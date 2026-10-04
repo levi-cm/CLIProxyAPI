@@ -121,10 +121,18 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options) *cliproxyexecutor.StreamResult {
+	if lease, ok := ctx.Value(policyRequestLeaseKey{}).(*policyRequestLease); ok {
+		lease.mu.Lock()
+		lease.streaming = true
+		lease.mu.Unlock()
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
 	go func() {
 		defer close(out)
+		if lease, ok := ctx.Value(policyRequestLeaseKey{}).(*policyRequestLease); ok {
+			defer lease.release()
+		}
 		var failed bool
 		forward := true
 		var rewriter *StreamRewriter

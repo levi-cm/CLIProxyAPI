@@ -207,7 +207,11 @@ type Manager struct {
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
-	persistLocks sync.Map
+	persistLocks            sync.Map
+	policyRuntimeMu         sync.Mutex
+	policyRuntime           map[string]PolicyRuntimeStatus
+	policyPending           map[*policyRequestLease]policyRequestDemand
+	policyResetReservations map[string]chan struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.

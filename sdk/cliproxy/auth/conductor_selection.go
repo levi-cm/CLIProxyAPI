@@ -432,7 +432,11 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Unlock()
 
 	if oldSelector != nil {
-		if stoppable, ok := oldSelector.(StoppableSelector); ok {
+		ownsOld := false
+		if owner, ok := selector.(interface{ OwnsSelector(Selector) bool }); ok {
+			ownsOld = owner.OwnsSelector(oldSelector)
+		}
+		if stoppable, ok := oldSelector.(StoppableSelector); ok && !ownsOld {
 			stoppable.Stop()
 		}
 	}
@@ -619,9 +623,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	selectorAcross := selectorWantsAcrossPriorities(selector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 
-	if !sessionAffinity && !schedulerAcross {
+	if !sessionAffinity && !schedulerAcross && !selectorAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -644,7 +649,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		priorityAuths = highestPriorityAuths(allAuths)
 	}
 
-	if sessionAffinity {
+	if sessionAffinity || selectorAcross {
 		selectorAuths = allAuths
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
@@ -662,7 +667,7 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
-		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity && !selectorWantsAcrossPriorities(selector) {
 			return ctx
 		}
 	}
