@@ -1,0 +1,31 @@
+[Unit]
+Description=Private CLIProxyAPI account pool
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=cliproxyapi
+Group=cliproxyapi
+WorkingDirectory=/var/lib/cliproxyapi
+ExecStart=/opt/cliproxyapi/cli-proxy-api --config /etc/cliproxyapi/config.yaml --local-model
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=cliproxyapi
+StateDirectoryMode=0700
+LogsDirectory=cliproxyapi
+LogsDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cliproxyapi /var/log/cliproxyapi /etc/cliproxyapi
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cliproxyapi
+
+[Install]
+WantedBy=multi-user.target

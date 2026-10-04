@@ -1,0 +1,13 @@
+# Codex CLI 0.160.0: install as $CODEX_HOME/proxy.config.toml in a NEW,
+# isolated Codex home. Supply an explicitly chosen model with --model.
+model_provider = "cliproxy_tailnet"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.cliproxy_tailnet]
+name = "Private CLIProxyAPI pool"
+base_url = "http://levi-thinkcentre-m700.dinosaur-dojo.ts.net:8317/v1"
+wire_api = "responses"
+env_key = "CLIPROXY_API_KEY"
+requires_openai_auth = false
+supports_websockets = true

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "proxy_origin": "http://levi-thinkcentre-m700.dinosaur-dojo.ts.net:8317",
+  "inference_base_url": "http://levi-thinkcentre-m700.dinosaur-dojo.ts.net:8317/v1",
+  "management_base_url": "http://levi-thinkcentre-m700.dinosaur-dojo.ts.net:8317/v8/management",
+  "policy_ui_url": "http://levi-thinkcentre-m700.dinosaur-dojo.ts.net:8317/account-policy.html",
+  "secrets_directory": "/etc/cliproxy-worker",
+  "coordinator_database": "/var/lib/cliproxy-fleet/inbox.sqlite",
+  "workers": [
+    {
+      "id": "levi-thinkcentre-m700",
+      "tailnet_host": "levi-thinkcentre-m700.dinosaur-dojo.ts.net",
+      "enabled": true,
+      "capacity": 2,
+      "build_capacity": 1,
+      "worktree_root": "/var/lib/cliproxy-fleet/worktrees",
+      "required_tools": ["codex", "git", "python3", "tmux", "tailscale", "go", "node", "playwright"]
+    }
+  ],
+  "overnight": { "max_tasks": 4, "requires_explicit_approval": true },
+  "notes": "Inventory for operator setup; fleetctl registration is explicit. Add remote hosts only after provisioning and connectivity checks. No secrets or fabricated remote availability."
+}

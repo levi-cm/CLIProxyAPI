@@ -1,0 +1,38 @@
+# Private deployment overlay: merge these fields into the complete v8 config.
+# Replace both keys locally. This file must never contain production secrets.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8318
+  trusted-proxies: []
+  tls:
+    enable: false
+  discovery:
+    enabled: false
+management:
+  allow-remote: false
+  secret-key: "REPLACE_WITH_SEPARATE_MANAGEMENT_KEY"
+access:
+  api-keys:
+    - "REPLACE_WITH_WORKER_INFERENCE_KEY"
+oauth:
+  auth-dir: "/var/lib/cliproxyapi/auths"
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-subagents: true
+account-policy:
+  enabled: false
+  mode: "earliest_deadline"
+  automation: "off"
+  fallback: "round-robin"
+  affinity: "deadline_at_boundary"
+  state-dir: "/var/lib/cliproxyapi/account-policy"
+  time-zone: "Europe/Berlin"
+observability:
+  logs:
+    debug: false
+    request-log: false
+    logging-to-file: true
+    logs-max-total-size-mb: 64
+    error-logs-max-files: 5
