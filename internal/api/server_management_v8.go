@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyui"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 )
 
@@ -15,7 +17,13 @@ func (s *Server) registerManagementV8Routes() {
 	s.engine.POST(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 
 	v8 := s.engine.Group(prefix)
-	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
+	v8.Use(s.managementAvailabilityMiddleware(), func(c *gin.Context) {
+		if c.Request.URL.Path == prefix+"/account-policy" || strings.HasPrefix(c.Request.URL.Path, prefix+"/account-policy/") {
+			s.mgmt.AccountPolicyMiddleware()(c)
+		} else {
+			s.mgmt.Middleware()(c)
+		}
+	}, func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
 	v8.GET("/config", s.mgmt.ConfigV8)
@@ -60,4 +68,24 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/plugins/:id/quota", s.mgmt.GetPluginQuota)
 	v8.POST("/plugins/:id/quota", s.mgmt.FetchPluginQuota)
 	v8.DELETE("/plugins/:id/quota", s.mgmt.ResetPluginQuota)
+
+	policy := v8.Group("/account-policy")
+	policy.GET("/accounts", s.mgmt.GetAccountPolicyAccounts)
+	policy.GET("/decisions", s.mgmt.GetAccountPolicyDecisions)
+	policy.GET("/resets", s.mgmt.GetAccountPolicyResets)
+	policy.PATCH("/settings", s.mgmt.PatchAccountPolicySettings)
+	policy.POST("/refresh", s.mgmt.RefreshAccountPolicy)
+	policy.POST("/resets/redeem", s.mgmt.RedeemAccountPolicyReset)
+	policy.POST("/resets/schedule", s.mgmt.ScheduleAccountPolicyReset)
+	policy.DELETE("/resets/schedule/:schedule_id", s.mgmt.CancelAccountPolicySchedule)
+	policy.GET("/diagnostics", s.mgmt.GetAccountPolicyDiagnostics)
+}
+
+func (s *Server) serveAccountPolicyPanel(c *gin.Context) {
+	cfg := s.getConfig()
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	accountpolicyui.Handler().ServeHTTP(c.Writer, c.Request)
 }
