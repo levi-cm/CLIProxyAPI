@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -62,6 +63,14 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	accountPolicyProvider accountpolicy.Provider
+}
+
+// WithAccountPolicyProvider replaces the provider adapter for isolated deployments.
+func (b *Builder) WithAccountPolicyProvider(provider accountpolicy.Provider) *Builder {
+	b.accountPolicyProvider = provider
+	return b
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -203,6 +212,10 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	b.cfg.AccountPolicy = normalizedPolicySettings(b.cfg.AccountPolicy)
+	if errValidatePolicy := validatePolicyOwnership(b.cfg, b.cfg.AccountPolicy, b.pluginHost != nil && b.pluginHost.HasScheduler()); errValidatePolicy != nil {
+		return nil, fmt.Errorf("cliproxy: %w", errValidatePolicy)
+	}
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
@@ -245,6 +258,9 @@ func (b *Builder) Build() (*Service, error) {
 		pluginHost.ApplyConfig(context.Background(), b.cfg)
 		pluginHost.RegisterFrontendAuthProviders()
 	}
+	if errValidatePolicy := validatePolicyOwnership(b.cfg, b.cfg.AccountPolicy, pluginHost.HasScheduler()); errValidatePolicy != nil {
+		return nil, fmt.Errorf("cliproxy: %w", errValidatePolicy)
+	}
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
 	coreManager := b.coreManager
@@ -277,25 +293,31 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg,
-		configPath:          b.configPath,
-		tokenProvider:       tokenProvider,
-		apiKeyProvider:      apiKeyProvider,
-		watcherFactory:      watcherFactory,
-		hooks:               b.hooks,
-		authManager:         authManager,
-		accessManager:       accessManager,
-		coreManager:         coreManager,
-		cooldownStateStore:  cooldownStateStore,
-		pluginHost:          pluginHost,
-		discoveryManager:    newDiscoveryAdvertiserManager(),
-		appliedRoutingState: appliedRoutingState,
-		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:                   b.cfg,
+		configPath:            b.configPath,
+		tokenProvider:         tokenProvider,
+		apiKeyProvider:        apiKeyProvider,
+		watcherFactory:        watcherFactory,
+		hooks:                 b.hooks,
+		authManager:           authManager,
+		accessManager:         accessManager,
+		coreManager:           coreManager,
+		cooldownStateStore:    cooldownStateStore,
+		pluginHost:            pluginHost,
+		discoveryManager:      newDiscoveryAdvertiserManager(),
+		appliedRoutingState:   appliedRoutingState,
+		serverOptions:         append([]api.ServerOption(nil), b.serverOptions...),
+		accountPolicyProvider: b.accountPolicyProvider,
+	}
+	if errInitPolicy := service.initializeAccountPolicy(); errInitPolicy != nil {
+		return nil, fmt.Errorf("cliproxy: initialize account policy: %w", errInitPolicy)
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
 	service.serverOptions = append(service.serverOptions,
+		api.WithAccountPolicy(service.accountPolicy),
+		api.WithAccountPolicySettingsValidator(service.validateAccountPolicySettings),
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {

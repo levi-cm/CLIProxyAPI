@@ -9,6 +9,31 @@
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
 
+# Optional Codex deadline policy. Disabled preserves existing routing and starts
+# no background provider discovery. Explicit Refresh remains available to operators.
+# Store the journal on durable private storage; keep it during rollback/restarts.
+account-policy:
+  enabled: false
+  mode: earliest_deadline
+  automation: off # off, notify, auto_expiring, auto_all_saved; writes require explicit opt-in
+  fallback: round-robin
+  affinity: deadline_at_boundary
+  state-dir: "" # defaults next to config.yaml in account-policy-state/
+  time-zone: Europe/Berlin
+  expiry-guard-seconds: 600
+  freshness-seconds: 120
+  saved-credit-reserve: 1
+  read-only: false # use true on replicas; only one owner may redeem a logical account
+  force-account: "" # proxy credential ID; real authentication/quota blocks still apply
+  # Ordinary saved Codex reset credits only.
+  credit-types: [codex_rate_limits]
+  # credential-ID: {hold: false, reserve-percent: 0}
+  accounts: {}
+
+# Policy settings changed through management persist in the operation journal.
+# Restarting with enabled: false or automation: off always disables automatic writes.
+# An active Home controller or scheduler plugin cannot share account ownership.
+
 # Listener, TLS, network discovery, and server operation.
 server:
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).

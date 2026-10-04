@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"time"
 
@@ -113,6 +114,29 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
+	policySettings := normalizedPolicySettings(newCfg.AccountPolicy)
+	if s.accountPolicy != nil && policySettings.StateDir == "" {
+		policySettings.StateDir = s.accountPolicy.Settings().StateDir
+	}
+	// Operator changes are durable in the policy journal. Unrelated YAML reloads
+	// must not reset those changes to the last file defaults.
+	if s.accountPolicy != nil && reflect.DeepEqual(normalizedPolicySettings(newCfg.AccountPolicy), s.accountPolicyConfig) {
+		policySettings = s.accountPolicy.Settings()
+	}
+	if errPolicy := validatePolicyOwnership(newCfg, policySettings, s.pluginHost != nil && s.pluginHost.HasScheduler()); errPolicy != nil {
+		log.WithField("code", "ownership_or_settings_conflict").Warn("rejected conflicting account policy configuration")
+		return configCommit{}
+	}
+	if s.accountPolicy != nil && !reflect.DeepEqual(normalizedPolicySettings(newCfg.AccountPolicy), s.accountPolicyConfig) {
+		if errPolicy := s.accountPolicy.UpdateSettings(policySettings); errPolicy != nil {
+			log.WithField("code", "policy_state_unavailable").Warn("rejected account policy configuration update")
+			return configCommit{}
+		}
+		if policySettings.Enabled {
+			s.ensureAccountPolicyRouting(newCfg)
+		}
+		s.accountPolicyConfig = normalizedPolicySettings(newCfg.AccountPolicy)
+	}
 
 	s.cfgMu.Lock()
 	s.cfg = newCfg
@@ -170,7 +194,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	}
 
 	registrationCtx := coreauth.WithSkipPersist(ctx)
-	s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg)
+	if !s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg) && s.pluginHost != nil {
+		return false
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
@@ -216,7 +242,10 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.accountPolicyMu.Lock()
+		s.accountPolicyDisabledFallback = newRoutingSelector(routingState)
+		s.coreManager.SetSelector(s.newPolicyRoutingSelector(routingState))
+		s.accountPolicyMu.Unlock()
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

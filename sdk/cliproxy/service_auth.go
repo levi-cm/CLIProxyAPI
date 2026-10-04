@@ -388,6 +388,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		auth = current
 	}
 	s.cancelStaleAntigravityProbes(auth.ID)
+	s.wakeAccountPolicy(auth.ID)
 	return auth
 }
 
