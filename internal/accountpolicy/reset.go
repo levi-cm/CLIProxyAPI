@@ -147,6 +147,10 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 }
 
 func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner *Identity) (Operation, error) {
+	return s.redeemSelected(ctx, id, creditID, expectedOwner, nil)
+}
+
+func (s *Service) redeemSelected(ctx context.Context, id, creditID string, expectedOwner *Identity, confirmation *ConfirmedResetRequest) (Operation, error) {
 	if id == "" || creditID == "" {
 		return Operation{}, policyError("unknown_credit", "explicit account and selected credit are required")
 	}
@@ -188,9 +192,33 @@ func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner
 	if err = s.reloadOperations(); err != nil {
 		return Operation{}, err
 	}
+	var confirmedSnapshot *Snapshot
+	if confirmation != nil {
+		for _, old := range s.Operations() {
+			if old.RequestID != confirmation.RequestID {
+				continue
+			}
+			if old.CredentialID != id || old.CreditID != creditID || old.Before == nil || !sameOwnership(old.Before.Identity, confirmation.ExpectedIdentity) || old.Before.Identity.Generation != confirmation.ExpectedIdentity.Generation {
+				return Operation{}, policyError("conflict", "request identity cannot be retargeted")
+			}
+			// Replays only read the journal; native reconciliation owns uncertain writes.
+			return old, nil
+		}
+		if err = s.checkConfirmation(confirmation, identity); err != nil {
+			return Operation{}, err
+		}
+		before, found := s.Snapshot(id)
+		if !found || before.Version != confirmation.ExpectedVersion || !sameOwnership(before.Identity, confirmation.ExpectedIdentity) || before.Identity.Generation != confirmation.ExpectedIdentity.Generation {
+			return Operation{}, policyError("conflict", "confirmed snapshot changed")
+		}
+		confirmedSnapshot = &before
+	}
 	var op Operation
 	for _, old := range s.Operations() {
 		if old.CredentialID == id && unresolved(old.State) {
+			if confirmation != nil {
+				return old, policyError("conflict", "another redemption is unresolved")
+			}
 			if old.CreditID != creditID {
 				return old, policyError("conflict", "another redemption is unresolved")
 			}
@@ -209,6 +237,12 @@ func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner
 		return op, policyError("identity_mismatch", "credential changed during reset preparation")
 	}
 	settings = s.Settings()
+	if confirmedSnapshot != nil && !sameConfirmedEvidence(*confirmedSnapshot, snapshot, creditID) {
+		return Operation{}, policyError("conflict", "confirmed allowance or selected credit changed during discovery")
+	}
+	if err = s.checkConfirmation(confirmation, identity); err != nil {
+		return op, err
+	}
 	if !settings.Enabled || settings.ReadOnly {
 		return op, policyError("read_only", "reset writes are disabled")
 	}
@@ -256,6 +290,9 @@ func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner
 			}
 		}
 		op = Operation{ID: uuid.NewString(), RequestID: uuid.NewString(), CredentialID: id, AccountID: identity.AccountID, WorkspaceID: identity.WorkspaceID, CreditID: creditID, State: "prepared", CreatedAt: s.now(), UpdatedAt: s.now(), Before: &snapshot}
+		if confirmation != nil {
+			op.RequestID = confirmation.RequestID
+		}
 		if err = s.saveOperation(op); err != nil {
 			return op, err
 		}

@@ -39,3 +39,7 @@ bin
 .bmad
 _bmad
 _bmad-output
+
+# Independent Telegram companion and private owner handoff
+telegram-companion
+telegram.txt

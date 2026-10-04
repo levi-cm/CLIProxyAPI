@@ -7,6 +7,17 @@ preserved; extension capabilities are additive optional interfaces or callbacks.
 No executor payload-building or translator code was changed. The downloaded
 management panel remains upstream-owned and is not patched after download.
 
+The independent Telegram companion is a locally excluded nested repository at
+`telegram-companion/`, not proxy routing code or an upstream submodule. Its only
+additional contract is two v8 account-policy endpoints: authenticated capability
+version1 and snapshot-bound caller-idempotent confirmed redemption. Preserve
+`internal/accountpolicy/confirmed_reset.go`, the optional confirmation hooks in
+`reset.go`, `management/account_policy_companion.go` and two registrations in
+`server_account_policy.go`. Original redemption, scheduler, API/Go interfaces and
+defaults are unchanged. Run `TestConfirmed`, `TestCompanion` and server route
+regressions after merging; run the companion adapter checks independently.
+Companion failure/rollback does not stop the proxy. No deprecated v0 changes.
+
 ## Module boundaries
 
 | Custom module | Responsibility |

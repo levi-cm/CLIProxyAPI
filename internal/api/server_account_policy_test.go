@@ -32,6 +32,9 @@ func TestServerAccountPolicyRoutesUseAuthenticatedV8Only(t *testing.T) {
 	}{
 		{"/v8/management/account-policy/accounts", "", 401, "unauthorized"},
 		{"/v8/management/account-policy/accounts", "operator-test", 503, "unavailable"},
+		{"/v8/management/account-policy/capabilities", "", 401, "unauthorized"},
+		{"/v8/management/account-policy/capabilities", "operator-test", 503, "unavailable"},
+		{"/v0/management/account-policy/capabilities", "operator-test", 404, ""},
 		{"/v0/management/account-policy/accounts", "operator-test", 404, ""},
 	} {
 		request := httptest.NewRequest(http.MethodGet, test.path, nil)
@@ -44,6 +47,18 @@ func TestServerAccountPolicyRoutesUseAuthenticatedV8Only(t *testing.T) {
 		if response.Code != test.status || test.code != "" && !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
 			t.Fatalf("%s: status=%d body=%s", test.path, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestServerConfirmedResetRouteRequiresManagementAuthentication(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "operator-test")
+	server := NewServer(&config.Config{Port: 8317}, nil, nil, "", WithRequestLoggerFactory(nil))
+	request := httptest.NewRequest(http.MethodPost, "/v8/management/account-policy/resets/redeem-confirmed", strings.NewReader(`{}`))
+	request.RemoteAddr = "127.0.0.1:1234"
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatal(response.Code)
 	}
 }
 
