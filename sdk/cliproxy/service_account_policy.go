@@ -78,7 +78,7 @@ func (s *Service) initializeAccountPolicy() error {
 		return err
 	}
 	s.accountPolicy = policy
-	s.accountPolicyWake = make(chan string, 128)
+	s.coreManager.SetPolicyRefreshCallback(policy.RequestRefresh)
 	s.accountPolicyDisabledFallback = s.coreManager.Selector()
 	if err := s.validateAccountPolicySettings(policy.Settings()); err != nil {
 		return err
@@ -154,19 +154,7 @@ func (s *Service) startAccountPolicy(ctx context.Context) error {
 	s.accountPolicyCancel, s.accountPolicyDone = cancel, done
 	go func() {
 		defer close(done)
-		runDone := make(chan struct{})
-		go func() { defer close(runDone); s.accountPolicy.Run(policyCtx) }()
-		for {
-			select {
-			case <-policyCtx.Done():
-				<-runDone
-				return
-			case id := <-s.accountPolicyWake:
-				if s.accountPolicy.Settings().Enabled {
-					_ = s.accountPolicy.Refresh(policyCtx, id)
-				}
-			}
-		}
+		s.accountPolicy.Run(policyCtx)
 	}()
 	return nil
 }
@@ -197,13 +185,10 @@ func (s *Service) closeAccountPolicyUsage(ctx context.Context) {
 }
 
 func (s *Service) wakeAccountPolicy(id string) {
-	if s == nil || s.accountPolicyWake == nil || id == "" {
+	if s == nil || s.accountPolicy == nil || id == "" {
 		return
 	}
-	select {
-	case s.accountPolicyWake <- id:
-	default:
-	}
+	s.accountPolicy.RequestRefresh(id)
 }
 
 func (s *Service) stopAccountPolicy() {
@@ -214,6 +199,9 @@ func (s *Service) stopAccountPolicy() {
 	if cancel != nil {
 		cancel()
 		<-done
+	}
+	if s.coreManager != nil {
+		s.coreManager.SetPolicyRefreshCallback(nil)
 	}
 }
 
