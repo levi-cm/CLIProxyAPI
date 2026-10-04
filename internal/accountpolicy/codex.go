@@ -46,6 +46,7 @@ type CodexError struct {
 
 func (e *CodexError) Error() string             { return "codex account policy: " + e.Code }
 func (e *CodexError) RetryDelay() time.Duration { return e.RetryAfter }
+func (e *CodexError) FailureCode() string       { return e.Code }
 func codexError(code string) error              { return &CodexError{Code: code} }
 
 var _ Provider = (*CodexClient)(nil)
