@@ -105,7 +105,6 @@ type Service struct {
 	accountPolicyCancel           context.CancelFunc
 	accountPolicyDone             chan struct{}
 	accountPolicyMu               sync.Mutex
-	accountPolicyWake             chan string
 	accountPolicyDisabledFallback coreauth.Selector
 	accountPolicyRoutingInstalled atomic.Bool
 	accountPolicyPluginConfig     *config.Config

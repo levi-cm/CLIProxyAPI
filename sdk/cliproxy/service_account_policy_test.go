@@ -292,6 +292,39 @@ func TestAccountPolicyBackgroundCredentialWakeAndCancellation(t *testing.T) {
 	}
 }
 
+func TestAccountPolicyQuotaEventWakesBackgroundDiscovery(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	policyTestAuth(t, manager, "credential-B", "account-B")
+	cfg := &config.Config{AccountPolicy: accountpolicy.DefaultSettings()}
+	cfg.AccountPolicy.Enabled = true
+	cfg.AccountPolicy.StateDir = t.TempDir()
+	fixture := &policyFixtureProvider{discovered: make(chan string, 10)}
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath("config.yaml").WithCoreAuthManager(manager).WithAccountPolicyProvider(fixture).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = service.startAccountPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer service.stopAccountPolicy()
+	select {
+	case <-fixture.discovered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup observation unavailable")
+	}
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "credential-B", Provider: "codex", Model: "fixture-model", Error: &coreauth.Error{HTTPStatus: 429, Code: "quota"}})
+	select {
+	case id := <-fixture.discovered:
+		if id != "credential-B" {
+			t.Fatal(id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("quota event did not refresh through background policy")
+	}
+}
+
 func policyTestAuth(t *testing.T, manager *coreauth.Manager, id, account string) {
 	t.Helper()
 	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"` + account + `"}}`))
