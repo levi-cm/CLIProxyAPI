@@ -588,3 +588,40 @@ func TestSecondLifecycleOwnerIsReadOnly(t *testing.T) {
 		t.Fatal("replica reclaimed reset authority through management patch")
 	}
 }
+
+func TestObservationReconcilesPendingOperationWithoutAutomaticWrites(t *testing.T) {
+	now := testTime()
+	b := testSnapshot("b", 7)
+	expiry := now.Add(time.Hour)
+	b.Credits = []Credit{testCredit("first", &expiry)}
+	b.AvailableCredits = 1
+	b.Buckets[1].UsedPercent = 100
+	p := &fakeProvider{snapshots: map[string]Snapshot{"b": b}}
+	settings := DefaultSettings()
+	settings.Enabled = true
+	settings.Automation = "off"
+	s, opts := fixtureService(t, p, &now, settings)
+	p.consume = func(Identity, string, string) (ConsumeResult, error) {
+		after := clone(b)
+		after.Credits = nil
+		after.AvailableCredits = 0
+		after.Buckets[1].UsedPercent = 15
+		after.Buckets[1].ResetAt = now.Add(8 * 24 * time.Hour)
+		p.snapshots["b"] = after
+		return ConsumeResult{}, errors.New("lost response")
+	}
+	first, _ := s.Redeem(context.Background(), "b", "first")
+	if first.State != "outcome_unknown" {
+		t.Fatal("expected unknown outcome")
+	}
+	s, err := NewService(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Refresh(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	if s.Operations()[0].State != "confirmed" || len(p.requests) != 1 {
+		t.Fatal("read-only evidence failed to reconcile saved unknown operation")
+	}
+}

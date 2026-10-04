@@ -421,6 +421,15 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 		}
 	}
 	s.state.Snapshots[id.CredentialID] = clone(next)
+	for i, op := range s.state.Operations {
+		if op.CredentialID == id.CredentialID && unresolved(op.State) && confirmedRecovery(op, next) {
+			op.State = "confirmed"
+			op.Error = ""
+			op.After = &next
+			op.UpdatedAt = now
+			s.state.Operations[i] = clone(op)
+		}
+	}
 	recoveryBefore := clone(old)
 	recoveryBefore.Identity.Generation = id.Generation
 	recoveryBefore.ObservedAt = started
@@ -463,6 +472,16 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	if settings.Enabled && s.opts.Recover != nil && hasRecovery && recovered(pendingRecovery.Before, next) {
 		if current, errCurrent := s.identity(id.CredentialID); errCurrent == nil && sameIdentity(id, current) {
 			if errRecover := s.opts.Recover(ctx, pendingRecovery.Before, next); errRecover != nil {
+				s.mu.Lock()
+				beforeFailure := clone(s.state)
+				failed := s.state.Snapshots[id.CredentialID]
+				failed.LastError = "local cooldown reconciliation pending"
+				s.state.Snapshots[id.CredentialID] = failed
+				errSaveFailure := s.persistLocked(beforeFailure)
+				s.mu.Unlock()
+				if errSaveFailure != nil {
+					return next, errSaveFailure
+				}
 				return next, policyError("recovery_failed", "local cooldown reconciliation failed")
 			}
 			s.mu.Lock()
