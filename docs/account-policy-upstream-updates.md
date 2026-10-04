@@ -44,6 +44,15 @@ blanket `--ours`/`--theirs` over these files.
 
 ## Update procedure
 
+Dashboard collection is a separate optional gate: `ObservationsEnabled` maps to
+`account-policy.observations-enabled` in YAML and `observations_enabled` in v8
+settings. It permits discovery and the private SDK usage sink, not selector
+installation, redemption, schedule execution or cooldown recovery. Keep these
+authority checks separate when merging upstream changes. Both gates default off;
+the observations flag is taken from config on restart (including false), avoiding
+legacy journals silently losing a new explicit opt-in. No Redis queue aggregation
+or executor telemetry hook is required.
+
 1. Choose an upstream release/tag or reviewed commit explicitly. Back up the
    deployed binary and private state directory without committing credentials.
    Pause automatic writes for deployment; preserve pending operation UUIDs.

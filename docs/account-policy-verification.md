@@ -82,6 +82,42 @@ a newly failing custom regression or change unrelated upstream executors.
 | Approved companion jobs, durable task states, isolated worktrees, worker/build capacity | Nine Python inbox tests |
 | Private edge HTTP/SSE/WebSocket and operator gate rejects spoofed forwarding | Real temporary Caddy fixture smoke, including reconnect and nonoperator rejection |
 
+## Independent dashboard collection fix (2026-10-04)
+
+Diagnosis: disabled deadline routing also disabled the private usage sink and
+background quota discovery. Live provider read-only refresh succeeded for both
+accounts (49% and 93% weekly remaining, five saved resets total); no reset was
+consumed. The UI also hid quota after the 120-second action freshness limit even
+though idle discovery normally runs approximately every five minutes.
+
+The additive observations opt-in now enables discovery and durable completion
+records independently of routing. Default-off behavior, routing/reset authority,
+ownership, backoff and the upstream Redis queue are preserved. Startup config
+controls the new flag across legacy journals. Last-known display values retain
+honest stale labels; action freshness rules are unchanged.
+
+Verification on the final code:
+
+- Full `go test ./...` passed with Go 1.26, `GOFLAGS=-p=1`, `GOMAXPROCS=4`.
+- Required `go build -o test-output ./cmd/server` passed; artifact removed.
+- Focused race suites passed for account policy, SDK account-policy lifecycle,
+  config, management, embedded UI and preview.
+- All 20 JavaScript helper tests passed.
+- `verify-dashboard.cjs` passed the 100-account/concurrent-activity/mobile/draft
+  regression suite with no provider/reset/settings writes.
+- `verify-observations.cjs` checks independent opt-in, zero retained attempts,
+  waiting versus disabled collection, stale quota/inventory, no reset authority,
+  and corrupt storage. The corrupt-storage case failed before correcting the
+  renderer's health guards, then passed after rebuilding the preview.
+- Authenticated Lighthouse snapshot accessibility was 100% in all four views,
+  in both light and dark themes.
+- Independent scope and quality reviews passed after the renderer correction.
+
+Past unrecorded completions are not backfilled. Success rate, latency and token
+graphs need real new usage evidence; unsupported token fields remain nullable.
+Production verification uses read-only management/browser checks, not synthetic
+usage records or billable inference requests.
+
 ## Playwright browser checks
 
 The lead used the rebuilt current embedded assets at

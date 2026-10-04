@@ -101,6 +101,22 @@ func TestAccountPolicyPartialSettingsAndInvalidPatch(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountPolicyObservationOnlySettingsPatchPreservesRoutingOff(t *testing.T) {
+	r, service := policyTestRouter(t, true)
+	w := policyRequest(r, http.MethodPatch, "/settings", `{"enabled":false,"observations_enabled":true}`, "operator-test")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	settings := service.Settings()
+	if settings.Enabled || !settings.ObservationsEnabled || settings.Automation != "off" {
+		t.Fatalf("observation opt-in changed routing authority: %#v", settings)
+	}
+	w = policyRequest(r, http.MethodPatch, "/settings", `{"observations_enabled":false}`, "operator-test")
+	if w.Code != http.StatusOK || service.Settings().Enabled || service.Settings().ObservationsEnabled {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
 func TestAccountPolicyExplicitRedemptionAndSchedule(t *testing.T) {
 	r, _ := policyTestRouter(t, true)
 	for _, body := range []string{`{}`, `{"credential_id":"a"}`, `{"credit_id":"c"}`} {

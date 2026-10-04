@@ -9,11 +9,12 @@
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
 
-# Optional Codex deadline policy. Disabled preserves existing routing and starts
-# no background provider discovery. Explicit Refresh remains available to operators.
+# Optional Codex deadline policy. Both switches default off, preserving upstream
+# routing and starting no background provider discovery or usage collection.
 # Store the journal on durable private storage; keep it during rollback/restarts.
 account-policy:
   enabled: false
+  observations-enabled: false # dashboard quota/inventory and private usage records; no routing/reset authority
   mode: earliest_deadline
   automation: off # off, notify, auto_expiring, auto_all_saved; writes require explicit opt-in
   fallback: round-robin
@@ -32,6 +33,7 @@ account-policy:
 
 # Policy settings changed through management persist in the operation journal.
 # Restarting with enabled: false or automation: off always disables automatic writes.
+# observations-enabled is config-authoritative on restart, including false.
 # An active Home controller or scheduler plugin cannot share account ownership.
 
 # Listener, TLS, network discovery, and server operation.

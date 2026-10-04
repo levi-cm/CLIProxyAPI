@@ -279,30 +279,37 @@
       : "Activity unavailable; retrying while visible";
     const usage = telemetry.usage || {},
       totals = usage.totals || {};
+    const collectionRequested =
+      state.settings.enabled || state.settings.observations_enabled;
+    const noCollection = collectionRequested ? "Unavailable" : "Collection off";
     const ratio =
       usage.available && totals.requests > 0
         ? ((100 * totals.success) / totals.requests).toFixed(1) + "%"
-        : "Unavailable";
-    const weekly = state.accounts.flatMap((a) =>
-      (a.buckets || [])
-        .filter(
-          (b) =>
-            b.duration_seconds === 604800 &&
-            !b.model &&
-            (!b.scope || b.scope === "ordinary") &&
-            fresh(b.observed_at || a.observed_at, state.settings, Date.now()),
-        )
-        .map((b) => 100 - b.used_percent),
+        : usage.available
+          ? "No attempts yet"
+          : noCollection;
+    const quotas = state.accounts.map((a) =>
+      dashboard.quotaView(a, state.settings, Date.now()),
     );
+    const weekly = quotas.filter((q) => q.remaining !== null);
+    const inventory = quotas.filter((q) => q.resets !== null);
+    const usageMissing =
+      usage.available && usage.collecting
+        ? "Waiting for completions"
+        : noCollection;
     const rows = [
       [
         "Recorded attempts",
-        usage.available ? dashboard.number(totals.requests) : "Unavailable",
+        usage.available ? dashboard.number(totals.requests) : noCollection,
         "Usage records; retries and additional models may count separately",
       ],
       [
         "Measured tokens",
-        usage.available ? dashboard.number(totals.total_tokens) : "Unavailable",
+        totals.total_tokens != null
+          ? dashboard.number(totals.total_tokens)
+          : totals.requests > 0
+            ? "Not measured"
+            : usageMissing,
         totals.token_missing_requests > 0
           ? dashboard.number(totals.token_missing_requests) +
             " records lack token evidence; no total is inferred"
@@ -313,7 +320,9 @@
         "Average latency",
         usage.available && totals.average_latency_ms != null
           ? dashboard.number(totals.average_latency_ms) + " ms"
-          : "Unavailable",
+          : totals.requests > 0
+            ? "Not measured"
+            : usageMissing,
         "Completed request duration",
       ],
       [
@@ -327,25 +336,30 @@
         "Multiple accounts can serve concurrently",
       ],
       [
-        "Weekly allowance left",
+        weekly.some((q) => !q.fresh)
+          ? "Last known weekly allowance"
+          : "Weekly allowance left",
         weekly.length
           ? dashboard.number(
-              weekly.reduce((sum, n) => sum + n, 0) / weekly.length,
+              weekly.reduce((sum, q) => sum + q.remaining, 0) / weekly.length,
             ) + "%"
           : "Unavailable",
-        "Average of " + weekly.length + " fresh ordinary weekly observations",
+        "Average of " +
+          weekly.length +
+          " observed accounts; " +
+          weekly.filter((q) => q.fresh).length +
+          " fresh. Stale values are not current quota.",
       ],
       [
-        "Available saved resets",
-        state.accounts.some((a) => a.available_credits != null)
-          ? dashboard.number(
-              state.accounts.reduce(
-                (sum, a) => sum + (a.available_credits || 0),
-                0,
-              ),
-            )
+        inventory.some((q) => !q.inventoryFresh)
+          ? "Last known saved resets"
+          : "Available saved resets",
+        inventory.length
+          ? dashboard.number(inventory.reduce((sum, q) => sum + q.resets, 0))
           : "Unavailable",
-        "Provider counts; details may be incomplete",
+        "Provider counts from " +
+          inventory.length +
+          " observed accounts; details may be incomplete",
       ],
     ];
     $("metrics").innerHTML = rows
@@ -376,7 +390,11 @@
         (usage.collecting
           ? "Collection is running."
           : "Collection is currently off; retained history remains visible.")
-      : "No retained usage observations. Policy-enabled collection starts with real completions; earlier traffic cannot be reconstructed.";
+      : usage.available && usage.collecting
+        ? "Collection is running. Waiting for real request completions; earlier traffic cannot be reconstructed."
+        : collectionRequested
+          ? "Usage data is unavailable; retrying. Check diagnostics for collection/storage errors."
+          : "No retained usage observations. Enable Collect dashboard data in Routing & settings to record future completions without changing routing.";
     const points = dashboard.chartSeries(usage, $("measure").value);
     $("chart-values").innerHTML = points.length
       ? '<table><caption>Recorded values in the selected time zone</caption><thead><tr><th scope="col">Bucket starts</th><th scope="col">Requests</th><th scope="col">Tokens</th></tr></thead><tbody>' +
@@ -627,6 +645,7 @@
     if (settingsDirty) return;
     const s = state.settings;
     $("enabled").checked = !!s.enabled;
+    $("observations-enabled").checked = !!s.observations_enabled;
     $("automation").value = s.automation || "off";
     $("fallback").value = s.fallback || "round-robin";
     $("affinity").value = s.affinity || "strict";
@@ -648,7 +667,9 @@
     $("force").value = s.force_account || "";
     $("policy-status").textContent = s.enabled
       ? "Enabled · " + s.automation
-      : "Disabled";
+      : s.observations_enabled
+        ? "Dashboard collection only"
+        : "Routing and collection off";
     $("policy-status").className = "badge " + (s.enabled ? "good" : "");
     updateSettingHelp();
   }
@@ -710,24 +731,20 @@
         escape(dashboard.number(a.active_requests)) +
         '</span></div><p class="field-help">Quota, plan and reset expiry are unavailable until supported provider observations are collected. Local activity is independent of deadline routing.</p></article>'
       );
-    const weeklyBucket = (a.buckets || []).find(
-      (b) =>
-        b.duration_seconds === 604800 &&
-        !b.model &&
-        (!b.scope || b.scope === "ordinary"),
-    );
-    const quotaFresh =
-      weeklyBucket &&
-      fresh(weeklyBucket.observed_at || a.observed_at, state.settings, now);
+    const quota = dashboard.quotaView(a, state.settings, now);
     const quotaSummary =
-      '<div class="account-quota-summary"><span>Weekly allowance left <strong>' +
-      (quotaFresh
-        ? escape(dashboard.number(100 - weeklyBucket.used_percent)) + "%"
+      '<div class="account-quota-summary"><span>' +
+      (quota.fresh ? "Weekly allowance left" : "Last known weekly allowance") +
+      " <strong>" +
+      (quota.remaining !== null
+        ? escape(dashboard.number(quota.remaining)) + "%"
         : "Unavailable") +
       "</strong></span><span>Normal weekly refresh <strong>" +
-      escape(absolute(weeklyBucket?.reset_at)) +
-      "</strong></span><span>Saved resets <strong>" +
-      escape(dashboard.number(a.available_credits)) +
+      escape(absolute(quota.resetAt)) +
+      "</strong></span><span>" +
+      (quota.inventoryFresh ? "Saved resets" : "Last known saved resets") +
+      " <strong>" +
+      escape(dashboard.number(quota.resets)) +
       "</strong></span></div>";
     const credits = [...(a.credits || [])].sort(
       (x, y) =>
@@ -1376,6 +1393,7 @@
     run(async () => {
       const patch = {
         enabled: $("enabled").checked,
+        observations_enabled: $("observations-enabled").checked,
         automation: $("automation").value,
         fallback: $("fallback").value,
         affinity: $("affinity").value,

@@ -137,7 +137,10 @@ func (s *Service) startAccountPolicy(ctx context.Context) error {
 		return nil
 	}
 	settings := s.accountPolicy.Settings()
-	sink, err := accountpolicyusage.New(settings.StateDir, func() bool { return s.accountPolicy.Settings().Enabled })
+	sink, err := accountpolicyusage.New(settings.StateDir, func() bool {
+		current := s.accountPolicy.Settings()
+		return current.Enabled || current.ObservationsEnabled
+	})
 	if err != nil {
 		return &accountpolicy.Error{Code: "usage_state_unavailable", Message: "cannot initialize durable usage state"}
 	}

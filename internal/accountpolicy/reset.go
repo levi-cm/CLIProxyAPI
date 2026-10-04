@@ -337,7 +337,8 @@ func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner
 }
 
 func (s *Service) Tick(ctx context.Context) error {
-	if !s.Settings().Enabled {
+	settings := s.Settings()
+	if !settings.Enabled && !settings.ObservationsEnabled {
 		return nil
 	}
 	identities := s.opts.Accounts()
@@ -375,7 +376,8 @@ func (s *Service) Tick(ctx context.Context) error {
 }
 
 func (s *Service) tickAccount(ctx context.Context, account Identity) error {
-	if !s.Settings().Enabled {
+	settings := s.Settings()
+	if !settings.Enabled && !settings.ObservationsEnabled {
 		return nil
 	}
 	now := s.now()
@@ -421,7 +423,7 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 			errs = append(errs, err)
 		}
 	}
-	settings := s.Settings()
+	settings = s.Settings()
 	if !settings.Enabled || settings.ReadOnly {
 		return errors.Join(errs...)
 	}

@@ -144,8 +144,9 @@ updates; remove it only if those updates are desired. `Restart=on-failure` keeps
 the proxy running after a crash. Its discovery/reset lifecycle runs in the proxy
 service and is independent of the owner's browser or laptop connection.
 
-Start with `account-policy.enabled: false` and `automation: off`. Enable discovery
-with automation off, verify account/workspace mapping and fresh evidence, then
+Start with `account-policy.enabled: false` and `automation: off`. Opt into dashboard
+collection with `account-policy.observations-enabled: true` (config controls it on
+restart), verify account/workspace mapping and fresh evidence, then
 enable deadline routing, inspect dry-run advice with `notify`, and explicitly
 choose `auto_expiring` only after review. Run one writer instance; a second proxy
 must use read-only reset policy unless shared ownership has been implemented.

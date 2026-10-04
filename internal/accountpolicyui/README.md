@@ -16,7 +16,8 @@ It obtains snapshots and writes only through the authenticated
 `/dashboard` snapshot every five seconds and refresh local quota/history
 snapshots every thirty seconds. Polling pauses when hidden or during an operator
 action. Countdown ticks never fetch the provider or management API. Only the
-explicit Refresh quota action requests provider observations. Opening the page
+explicit Refresh quota action requests immediate provider observations; background
+discovery belongs to the independent service, not browser polling. Opening the page
 does not enable policy or reset automation. The management key is held in page memory only;
 disconnect clears it. The inference API key is separate.
 
@@ -33,7 +34,8 @@ settings are not replaced by background updates.
 Usage comes from the optional bounded, sanitized retained completion sink.
 The request total counts usage records (provider attempts); retries and
 additional model records can exceed the number of downstream client requests.
-Collection normally starts when account policy is enabled; previous traffic
+Collection starts when routing or the independent **Collect dashboard data**
+opt-in is enabled; previous traffic
 cannot be reconstructed. Retained observations remain readable when collection
 is off. Requests, tokens and latency are proxy measurements, not subscription
 allowance. Missing or ambiguous token measurements remain unavailable, not
@@ -42,6 +44,19 @@ plotted as zero. The timeline distinguishes ordinary weekly/short-window
 refreshes, reset expiry and the safety fallback. Out-of-range events retain
 their exact timestamps rather than masquerading as endpoint markers. Its
 account rows follow the Accounts filters and current page.
+
+`account-policy.observations-enabled: true` enables bounded provider quota/inventory
+reads and private completion records while `enabled: false` and `automation: off`
+preserve ordinary routing and disable reset execution/cooldown recovery. Both
+switches default false. The observations opt-in is config-authoritative on restart;
+UI changes apply at runtime, so also set YAML for a persistent opt-in. Idle provider
+discovery is approximately five minutes plus stable jitter; active/near-expiry
+accounts refresh approximately once a minute, respecting provider backoff.
+The two-minute action freshness window is deliberately stricter: the UI keeps
+last-known evidence with stale labels, but does not treat it as permission to route
+or redeem. Inventory counts require an actual inventory observation. Empty usage
+has an explicit waiting/collection-off explanation, not inferred historical zeros.
+The upstream Redis usage queue is not read or drained by this dashboard.
 
 The read-only dashboard endpoint accepts `range=1h`, `24h` or `7d`, is protected
 by the existing v8 management middleware, and returns allowlisted local fields.

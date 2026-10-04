@@ -240,8 +240,8 @@
             <div>
               <h2>Routing &amp; settings</h2>
               <p class="muted">
-                Account selection and provider reset automation are separate
-                choices.
+                Dashboard collection, account selection and provider reset
+                automation are separate choices.
               </p>
             </div>
             <span id="policy-status" class="badge"></span>
@@ -250,12 +250,25 @@
             <div class="settings-grid primary-settings">
               <label class="setting-check"
                 ><span class="check"
+                  ><input id="observations-enabled" type="checkbox" /> Collect
+                  dashboard data</span
+                ><span class="field-help"
+                  >Reads supported provider quota and saved reset inventory, and
+                  records future request completions locally. Works with normal
+                  routing and automation off. Discovery is bounded, not
+                  triggered by page polling. Restart uses the
+                  observations-enabled setting in config.yaml.</span
+                ></label
+              >
+              <label class="setting-check"
+                ><span class="check"
                   ><input id="enabled" type="checkbox" /> Earliest deadline
                   routing</span
                 ><span class="field-help"
                   >Prioritizes eligible accounts whose usable allowance expires
-                  first. Turn off to preserve normal proxy routing and stop
-                  policy discovery. Local activity remains visible.</span
+                  first. Turn off to preserve normal proxy routing. Dashboard
+                  collection can remain on; local activity is always
+                  separate.</span
                 ></label
               >
               <label
@@ -349,10 +362,22 @@
             <details class="settings-reference">
               <summary>Explain every option</summary>
               <dl>
+                <dt>Collect dashboard data</dt>
+                <dd>
+                  Observation-only mode does not select accounts, apply resets,
+                  execute schedules or clear quota cooldowns. Idle quota
+                  discovery is approximately every five minutes, more often for
+                  active accounts or imminent expiry; provider backoff still
+                  applies. Last-known quota remains visible with stale labels.
+                  Usage statistics begin with real completions, not past
+                  traffic. Config controls this opt-in on restart.
+                </dd>
                 <dt>Off / Notify</dt>
                 <dd>
                   Off never redeems automatically. Notify supplies advice only.
-                  Observation runs when earliest-deadline policy is enabled.
+                  Observation runs when dashboard collection or
+                  earliest-deadline routing is enabled. Routing must be enabled
+                  before any reset automation can run.
                 </dd>
                 <dt>Automatic: expiring resets</dt>
                 <dd>

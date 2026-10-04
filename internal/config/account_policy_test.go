@@ -82,8 +82,29 @@ func TestAccountPolicyConfigurationDefaultsOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := policyJSON(t, cfg)
-	if p["enabled"] != false || p["automation"] != "off" || p["expiry_guard_seconds"] != float64(600) || p["freshness_seconds"] != float64(120) {
+	if p["enabled"] != false || p["observations_enabled"] != false || p["automation"] != "off" || p["expiry_guard_seconds"] != float64(600) || p["freshness_seconds"] != float64(120) {
 		t.Fatalf("unsafe or incomplete defaults: %#v", p)
+	}
+}
+
+func TestAccountPolicyObservationOnlyConfigurationRoundTrip(t *testing.T) {
+	for _, prefix := range []string{"port: 8317\n", "config-version: 8\nserver: {port: 8317}\n"} {
+		cfg, err := ParseConfigBytes([]byte(prefix + "account-policy:\n  observations-enabled: true\n  state-dir: /tmp/observation-policy\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := yaml.Marshal(cfg.CloneForRuntime())
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := ParseConfigBytes(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := policyJSON(t, loaded)
+		if p["observations_enabled"] != true || p["enabled"] != false || p["automation"] != "off" {
+			t.Fatalf("observation opt-in changed routing defaults: %#v", p)
+		}
 	}
 }
 

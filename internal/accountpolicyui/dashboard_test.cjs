@@ -8,6 +8,54 @@ const identity = (id) => ({
   provider: "codex",
 });
 
+test("last-known quota remains visible between discovery ticks without becoming fresh evidence", () => {
+  const account = {
+    observed_at: "2026-10-04T15:55:00Z",
+    inventory_observed_at: "2026-10-04T15:55:00Z",
+    available_credits: 3,
+    buckets: [
+      {
+        scope: "ordinary",
+        duration_seconds: 604800,
+        used_percent: 51,
+        reset_at: "2026-10-06T16:00:00Z",
+      },
+    ],
+  };
+  const quota = dashboard.quotaView(account, { freshness_seconds: 120 }, now);
+  assert.equal(quota.remaining, 49);
+  assert.equal(quota.fresh, false);
+  assert.equal(quota.resets, 3);
+  assert.equal(quota.inventoryFresh, false);
+  assert.equal(
+    dashboard.quotaView({ available_credits: 0, buckets: [] }, {}, now).resets,
+    null,
+  );
+  assert.equal(
+    dashboard.quotaView(
+      { ...account, buckets: [{ ...account.buckets[0], used_percent: null }] },
+      {},
+      now,
+    ).remaining,
+    null,
+  );
+  assert.equal(
+    dashboard.quotaView(
+      { ...account, observed_at: "2026-10-04T16:01:00Z" },
+      {},
+      now,
+    ).remaining,
+    null,
+  );
+  const recent = dashboard.quotaView(
+    { ...account, observed_at: "2026-10-04T15:59:00Z" },
+    { freshness_seconds: 120 },
+    now,
+  );
+  assert.equal(recent.fresh, true);
+  assert.equal(recent.remaining, 49);
+});
+
 test("serving now reports every concurrent account and never mistakes last selection for activity", () => {
   const accounts = [
     {

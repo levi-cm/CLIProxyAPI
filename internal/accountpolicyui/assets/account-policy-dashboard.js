@@ -30,6 +30,39 @@
           value,
         )
       : "Unavailable";
+  // Display evidence may outlive the stricter backend action freshness window.
+  function quotaView(account, settings, now) {
+    const validTime = (value) => {
+      const at = stamp(value);
+      return at !== null && at <= now ? at : null;
+    };
+    const bucket = (account.buckets || []).find(
+      (b) =>
+        b.duration_seconds === 604800 &&
+        !b.model &&
+        (!b.scope || b.scope === "ordinary"),
+    );
+    const at = validTime(bucket?.observed_at || account.observed_at);
+    const inventoryAt = validTime(account.inventory_observed_at);
+    const limit = (settings.freshness_seconds || 120) * 1000;
+    return {
+      remaining:
+        bucket &&
+        at !== null &&
+        measured(bucket.used_percent) &&
+        bucket.used_percent <= 100
+          ? 100 - bucket.used_percent
+          : null,
+      observedAt: at,
+      fresh: at !== null && now - at <= limit,
+      resetAt: bucket?.reset_at,
+      resets:
+        inventoryAt !== null && measured(account.available_credits)
+          ? account.available_credits
+          : null,
+      inventoryFresh: inventoryAt !== null && now - inventoryAt <= limit,
+    };
+  }
   function activityView(activity, sampledAt, now) {
     const accounts = activity?.accounts || [];
     const latest =
@@ -370,7 +403,7 @@
   }
   const help = {
     automation: {
-      off: "Observes quota while policy is enabled. Never redeems a saved reset automatically.",
+      off: "Never redeems a saved reset automatically. Dashboard collection or enabled routing can still observe quota.",
       notify:
         "Calculates reset advice without redeeming credits. You decide whether to act.",
       auto_expiring:
@@ -395,6 +428,7 @@
   };
   const helpers = {
     activityView,
+    quotaView,
     pageAccounts,
     mergeAccounts,
     timelineEvents,

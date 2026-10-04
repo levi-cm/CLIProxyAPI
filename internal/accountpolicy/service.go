@@ -67,8 +67,8 @@ func NewService(opts Options) (*Service, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	if opts.Settings.Enabled && opts.Settings.StateDir == "" {
-		return nil, policyError("invalid_settings", "enabled account policy requires durable state directory")
+	if (opts.Settings.Enabled || opts.Settings.ObservationsEnabled) && opts.Settings.StateDir == "" {
+		return nil, policyError("invalid_settings", "enabled account policy or observations require durable state directory")
 	}
 	s := &Service{opts: opts, stateDir: opts.Settings.StateDir, locks: map[string]chan struct{}{}, discovery: map[string]discoveryState{}, semaphore: make(chan struct{}, 2), requested: map[string]uint64{}, wake: make(chan struct{}, 1), state: storedState{Version: 1, Settings: clone(opts.Settings), Snapshots: map[string]Snapshot{}, Operations: []Operation{}, Schedules: []Schedule{}, Decisions: []Decision{}}}
 	seen := map[string]bool{}
@@ -84,7 +84,7 @@ func NewService(opts Options) (*Service, error) {
 	}
 	if s.stateDir != "" {
 		if err := func() error {
-			if !opts.Settings.Enabled {
+			if !opts.Settings.Enabled && !opts.Settings.ObservationsEnabled {
 				return nil
 			}
 			return os.MkdirAll(s.stateDir, 0700)
@@ -100,6 +100,9 @@ func NewService(opts Options) (*Service, error) {
 				s.state.Snapshots = map[string]Snapshot{}
 			}
 			s.state.Settings.StateDir = s.stateDir
+			// Observation collection follows the startup configuration, including journals
+			// created before the independent observation setting existed.
+			s.state.Settings.ObservationsEnabled = opts.Settings.ObservationsEnabled
 			// A replica configured read-only cannot acquire authority from persisted settings.
 			if opts.Settings.ReadOnly {
 				s.state.Settings.ReadOnly = true
@@ -252,6 +255,9 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	}
 	if next.StateDir != s.stateDir {
 		return policyError("invalid_settings", "state directory cannot change while running")
+	}
+	if next.ObservationsEnabled && s.stateDir == "" {
+		return policyError("invalid_settings", "enabled observations require durable state directory")
 	}
 	if s.opts.Settings.ReadOnly && !next.ReadOnly {
 		return policyError("read_only", "replica configuration requires read-only mode")
@@ -623,7 +629,8 @@ func (s *Service) Run(ctx context.Context) {
 		}
 	}()
 	acquireOwner := func() {
-		if releaseOwner != nil || !s.Settings().Enabled || s.stateDir == "" {
+		settings := s.Settings()
+		if releaseOwner != nil || (!settings.Enabled && !settings.ObservationsEnabled) || s.stateDir == "" {
 			return
 		}
 		_ = os.MkdirAll(s.stateDir, 0700)
@@ -643,7 +650,8 @@ func (s *Service) Run(ctx context.Context) {
 	busy := map[string]bool{}
 	defer workers.Wait()
 	dispatch := func() {
-		if !s.Settings().Enabled {
+		settings := s.Settings()
+		if !settings.Enabled && !settings.ObservationsEnabled {
 			return
 		}
 		for _, identity := range s.opts.Accounts() {

@@ -75,6 +75,7 @@ func newFixtureAt(now time.Time) *fixture {
 	f.operations = append(f.operations, accountpolicy.Operation{ID: "expired-history", RequestID: "fixture-expired-request", CredentialID: "inventory-c", AccountID: "upstream-c", WorkspaceID: "workspace-c", CreditID: "expired-credit", State: "expired", CreatedAt: now.Add(-24 * time.Hour), UpdatedAt: now.Add(-24 * time.Hour)})
 	f.decisions = append(f.decisions, accountpolicy.Decision{CredentialID: "account-a", Provider: "codex", Model: "gpt-5.4", Reason: "Fixture: policy disabled; existing round-robin strategy", At: now, Fallback: true})
 	f.now = now
+	f.settings.ObservationsEnabled = true // Explicit fixture telemetry, without routing or reset authority.
 	f.clock = func() time.Time { return now }
 	f.activeAccounts = map[string]bool{"account-a": true}
 	f.applyActivity()

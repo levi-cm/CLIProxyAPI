@@ -7,20 +7,21 @@ import (
 )
 
 type Settings struct {
-	Enabled            bool                      `json:"enabled" yaml:"enabled"`
-	Mode               string                    `json:"mode" yaml:"mode"`
-	Automation         string                    `json:"automation" yaml:"automation"`
-	Fallback           string                    `json:"fallback" yaml:"fallback"`
-	Affinity           string                    `json:"affinity" yaml:"affinity"`
-	StateDir           string                    `json:"state_dir" yaml:"state-dir"`
-	TimeZone           string                    `json:"time_zone" yaml:"time-zone"`
-	ExpiryGuardSeconds int                       `json:"expiry_guard_seconds" yaml:"expiry-guard-seconds"`
-	FreshnessSeconds   int                       `json:"freshness_seconds" yaml:"freshness-seconds"`
-	SavedCreditReserve int                       `json:"saved_credit_reserve" yaml:"saved-credit-reserve"`
-	ReadOnly           bool                      `json:"read_only" yaml:"read-only"`
-	ForceAccount       string                    `json:"force_account" yaml:"force-account"`
-	CreditTypes        []string                  `json:"credit_types" yaml:"credit-types"`
-	Accounts           map[string]AccountControl `json:"accounts" yaml:"accounts"`
+	Enabled             bool                      `json:"enabled" yaml:"enabled"`
+	ObservationsEnabled bool                      `json:"observations_enabled" yaml:"observations-enabled"`
+	Mode                string                    `json:"mode" yaml:"mode"`
+	Automation          string                    `json:"automation" yaml:"automation"`
+	Fallback            string                    `json:"fallback" yaml:"fallback"`
+	Affinity            string                    `json:"affinity" yaml:"affinity"`
+	StateDir            string                    `json:"state_dir" yaml:"state-dir"`
+	TimeZone            string                    `json:"time_zone" yaml:"time-zone"`
+	ExpiryGuardSeconds  int                       `json:"expiry_guard_seconds" yaml:"expiry-guard-seconds"`
+	FreshnessSeconds    int                       `json:"freshness_seconds" yaml:"freshness-seconds"`
+	SavedCreditReserve  int                       `json:"saved_credit_reserve" yaml:"saved-credit-reserve"`
+	ReadOnly            bool                      `json:"read_only" yaml:"read-only"`
+	ForceAccount        string                    `json:"force_account" yaml:"force-account"`
+	CreditTypes         []string                  `json:"credit_types" yaml:"credit-types"`
+	Accounts            map[string]AccountControl `json:"accounts" yaml:"accounts"`
 }
 type AccountControl struct {
 	Hold           bool    `json:"hold" yaml:"hold"`
