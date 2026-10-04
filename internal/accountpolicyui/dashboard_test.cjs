@@ -394,3 +394,150 @@ test("timeline axis retains full clock minutes instead of truncating timestamp t
   );
   assert.match(html, />05\/10 18:48<\/text>/);
 });
+
+test("weekly cycle spans seven days with elapsed time separate from allowance consumption", () => {
+  const bucket = {
+    scope: "ordinary",
+    duration_seconds: 604800,
+    reset_at: "2026-10-06T16:00:00Z",
+    used_percent: 2,
+  };
+  const cycle = dashboard.weeklyCycle(
+    bucket,
+    now,
+    now - 604800000,
+    now + 604800000,
+  );
+  assert.equal(cycle.start, Date.parse("2026-09-29T16:00:00Z"));
+  assert.equal(cycle.end, Date.parse("2026-10-06T16:00:00Z"));
+  assert.equal(cycle.elapsedEnd, now);
+  assert.equal(cycle.visibleStart, cycle.start);
+  assert.equal(cycle.visibleEnd, cycle.end);
+  assert.equal(
+    dashboard.weeklyCycle(
+      { ...bucket, model: "limited" },
+      now,
+      now - 604800000,
+      now + 604800000,
+    ),
+    null,
+  );
+  assert.equal(
+    dashboard.weeklyCycle(
+      { ...bucket, duration_seconds: 18000 },
+      now,
+      now - 604800000,
+      now + 604800000,
+    ),
+    null,
+  );
+  assert.equal(
+    dashboard.weeklyCycle(
+      { ...bucket, reset_at: "invalid" },
+      now,
+      now - 604800000,
+      now + 604800000,
+    ),
+    null,
+  );
+  const expired = dashboard.weeklyCycle(
+    { ...bucket, reset_at: "2026-10-03T16:00:00Z" },
+    now,
+    now - 604800000,
+    now + 604800000,
+  );
+  assert.equal(expired.visibleStart, now - 604800000);
+  assert.equal(expired.elapsedEnd, expired.end);
+  assert.equal(
+    dashboard.weeklyCycle(
+      { ...bucket, reset_at: "2026-09-20T16:00:00Z" },
+      now,
+      now - 604800000,
+      now + 604800000,
+    ),
+    null,
+  );
+});
+
+test("timeline uses weekly rectangles and separate manual expiry lines, not a weekly reset marker", () => {
+  const account = {
+    identity: identity("a"),
+    observed_at: "2026-10-04T16:00:00Z",
+    buckets: [
+      {
+        scope: "ordinary",
+        duration_seconds: 604800,
+        reset_at: "2026-10-06T16:00:00Z",
+        used_percent: 51,
+      },
+    ],
+    credits: [
+      {
+        id: "reset",
+        status: "available",
+        details_known: true,
+        expires_at: "2026-10-05T16:00:00Z",
+      },
+    ],
+  };
+  const html = dashboard.renderTimeline([account], {}, now, 7, (v) => v);
+  assert.match(html, /class="weekly-cycle-remaining"/);
+  assert.match(html, /class="weekly-cycle-elapsed"/);
+  assert.match(html, /class="timeline-marker expiry"/);
+  assert.doesNotMatch(html, /class="timeline-marker weekly"/);
+  assert.match(html, /49% left/);
+  assert.match(html, /Weekly allowance/);
+  assert.match(html, /Saved manual resets/);
+  assert.match(html, /Now/);
+  const unknown = dashboard.renderTimeline(
+    [{ identity: identity("b"), buckets: [], credits: [] }],
+    {},
+    now,
+    7,
+    (v) => v,
+  );
+  assert.doesNotMatch(unknown, /class="weekly-cycle-/);
+});
+
+test("per-account allowance never hides unequal accounts behind an average", () => {
+  const make = (id, used) => ({
+    identity: identity(id),
+    observed_at: "2026-10-04T16:00:00Z",
+    inventory_observed_at: "2026-10-04T16:00:00Z",
+    available_credits: 1,
+    buckets: [
+      {
+        scope: "ordinary",
+        duration_seconds: 604800,
+        used_percent: used,
+        reset_at: "2026-10-06T16:00:00Z",
+      },
+    ],
+  });
+  const html = dashboard.renderAllowances(
+    [make("a", 52), make("b", 7)],
+    {},
+    now,
+    (v) => v,
+  );
+  assert.match(html, /48%/);
+  assert.match(html, /93%/);
+  assert.doesNotMatch(html, /70\.5%|Average/);
+  assert.match(html, /data-open-account="a"/);
+  assert.match(html, /data-open-account="b"/);
+  const stale = dashboard.renderAllowances(
+    [make("a", 52)],
+    {},
+    now + 300000,
+    (v) => v,
+  );
+  assert.match(stale, /Last known/);
+  const unobserved = dashboard.renderAllowances(
+    [{ identity: identity("c"), buckets: [] }],
+    {},
+    now,
+    (v) => v,
+  );
+  assert.match(unobserved, /Unavailable/);
+  assert.doesNotMatch(unobserved, /0%/);
+});

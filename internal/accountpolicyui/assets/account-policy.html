@@ -109,6 +109,11 @@
             <div id="serving" aria-live="polite"></div>
             <p id="last-selected" class="muted"></p>
           </section>
+          <section class="panel" aria-labelledby="allowances-title">
+            <h2 id="allowances-title">Weekly allowance by account</h2>
+            <div id="allowances" class="allowance-list"></div>
+            <p id="allowance-scope" class="field-help"></p>
+          </section>
           <div
             id="metrics"
             class="metrics-grid"
@@ -155,8 +160,8 @@
               <div>
                 <h2>Refresh &amp; reset timeline</h2>
                 <p class="muted">
-                  Weekly refresh, saved-reset expiry and expiry safety fallback
-                  have different meanings.
+                  Seven-day weekly cycles and saved manual resets are shown
+                  separately.
                 </p>
               </div>
               <label
@@ -168,17 +173,20 @@
               >
             </div>
             <div class="timeline-legend">
-              <span class="weekly">Weekly refresh</span
+              <span class="elapsed">Elapsed cycle time</span
+              ><span class="remaining">Time left in cycle</span
               ><span class="window">Short-window refresh</span
               ><span class="expiry">Manual reset expires</span
               ><span class="guard">Expiry safety fallback</span>
             </div>
             <div id="timeline"></div>
             <p class="field-help">
-              Expiring-only automation uses an eligible reset immediately at
-              confirmed weekly exhaustion if it expires before the next normal
-              refresh. The guard is a fallback if allowance remains. Hover or
-              focus a marker for exact times.
+              Rectangles show the observed seven-day cycle, including the past
+              week. Shading is elapsed time, not allowance consumed. Saved-reset
+              expiry stays a line. Expiring-only automation uses an eligible
+              reset immediately at confirmed weekly exhaustion if it expires
+              before the next normal refresh. The guard is a fallback if
+              allowance remains. Hover or focus a marker for exact times.
             </p>
           </section>
         </section>

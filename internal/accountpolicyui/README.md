@@ -11,6 +11,15 @@ selections, schedules and durable redemption outcomes. Light, dark and system
 themes use the main panel's restrained neutral palette without patching its
 downloaded assets.
 
+Weekly allowance is shown for each account, not averaged across accounts. The
+allowance list and reset timeline follow the current Accounts filters/page, so
+large account pools remain bounded and searchable. Weekly timeline rectangles
+span the provider's seven-day window ending at the observed refresh; the start
+is inferred from that duration. Darker shading is elapsed time, not quota used.
+The axis includes the previous seven days plus the selected future range. Saved
+manual-reset expiries and safety guards remain lines on a separate lane. Unknown
+cycles are not invented; stale observations remain labelled last-known.
+
 It obtains snapshots and writes only through the authenticated
 `/v8/management/account-policy` APIs. Visible connected pages read the local
 `/dashboard` snapshot every five seconds and refresh local quota/history
@@ -104,6 +113,9 @@ node --test internal/accountpolicyui/*test.cjs
 go test ./internal/accountpolicyui ./cmd/account-policy-preview
 # With Playwright installed (or PLAYWRIGHT_MODULE_PATH pointing at its package):
 ACCOUNT_POLICY_PREVIEW_URL=http://127.0.0.1:8318 node internal/accountpolicyui/scripts/verify-dashboard.cjs
+# Run other suites sequentially, or give each an isolated preview process/port:
+ACCOUNT_POLICY_PREVIEW_URL=http://127.0.0.1:8318 node internal/accountpolicyui/scripts/verify-observations.cjs
+ACCOUNT_POLICY_PREVIEW_URL=http://127.0.0.1:8318 node internal/accountpolicyui/scripts/verify-weekly-timeline.cjs
 # Optional authenticated Lighthouse snapshot audits (Lighthouse + puppeteer-core):
 ACCOUNT_POLICY_PREVIEW_URL=http://127.0.0.1:8318 node internal/accountpolicyui/scripts/audit-dashboard.mjs
 ```

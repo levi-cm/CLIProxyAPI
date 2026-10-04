@@ -291,7 +291,6 @@
     const quotas = state.accounts.map((a) =>
       dashboard.quotaView(a, state.settings, Date.now()),
     );
-    const weekly = quotas.filter((q) => q.remaining !== null);
     const inventory = quotas.filter((q) => q.resets !== null);
     const usageMissing =
       usage.available && usage.collecting
@@ -334,21 +333,6 @@
         "Active requests",
         dashboard.number(live.requests),
         "Multiple accounts can serve concurrently",
-      ],
-      [
-        weekly.some((q) => !q.fresh)
-          ? "Last known weekly allowance"
-          : "Weekly allowance left",
-        weekly.length
-          ? dashboard.number(
-              weekly.reduce((sum, q) => sum + q.remaining, 0) / weekly.length,
-            ) + "%"
-          : "Unavailable",
-        "Average of " +
-          weekly.length +
-          " observed accounts; " +
-          weekly.filter((q) => q.fresh).length +
-          " fresh. Stale values are not current quota.",
       ],
       [
         inventory.some((q) => !q.inventoryFresh)
@@ -413,6 +397,21 @@
         "</tbody></table>"
       : '<p class="muted">No measured values to display.</p>';
     const page = filteredAccounts();
+    replaceMarkup(
+      "allowances",
+      dashboard.renderAllowances(
+        page.items,
+        state.settings,
+        Date.now(),
+        absolute,
+      ),
+    );
+    $("allowance-scope").textContent =
+      "Showing " +
+      page.items.length +
+      " of " +
+      page.total +
+      " matching accounts. Uses the Accounts filters and page.";
     replaceMarkup(
       "timeline",
       '<p class="field-help">Showing ' +
@@ -1338,16 +1337,17 @@
     const button = e.target.closest("[data-view]");
     if (button) changeView(button.dataset.view);
   });
-  $("serving").addEventListener("click", (e) => {
-    const button = e.target.closest("[data-open-account]");
-    if (!button) return;
-    $("search").value = button.dataset.openAccount;
-    $("provider-filter").value = "";
-    $("status-filter").value = "";
-    accountPage = 1;
-    renderAccountList();
-    changeView("accounts");
-  });
+  for (const id of ["serving", "allowances"])
+    $(id).addEventListener("click", (e) => {
+      const button = e.target.closest("[data-open-account]");
+      if (!button) return;
+      $("search").value = button.dataset.openAccount;
+      $("provider-filter").value = "";
+      $("status-filter").value = "";
+      accountPage = 1;
+      renderAccountList();
+      changeView("accounts");
+    });
   for (const id of [
     "search",
     "provider-filter",

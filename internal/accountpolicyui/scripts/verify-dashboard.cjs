@@ -56,6 +56,14 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
     await page.locator("#workspace").waitFor({ state: "visible" });
     assert.equal(await page.locator(".serving-account").count(), 2);
     assert.ok((await page.locator(".chart-bar").count()) > 0);
+    assert.equal(
+      await page.locator("#allowances .allowance-account").count(),
+      10,
+    );
+    assert.ok((await page.locator(".weekly-cycle-remaining").count()) > 0);
+    assert.ok((await page.locator(".weekly-cycle-elapsed").count()) > 0);
+    assert.equal(await page.locator(".timeline-marker.weekly").count(), 0);
+    assert.ok((await page.locator(".timeline-marker.expiry line").count()) > 0);
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
     assert.equal(await page.locator("#accounts article").count(), 10);
     assert.match(

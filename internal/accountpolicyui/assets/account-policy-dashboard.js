@@ -93,6 +93,44 @@
       latest,
     };
   }
+  function weeklyCycle(bucket, now, start, end) {
+    const reset = stamp(bucket.reset_at);
+    if (
+      bucket.duration_seconds !== 604800 ||
+      bucket.model ||
+      (bucket.scope && bucket.scope !== "ordinary") ||
+      reset === null
+    )
+      return null;
+    const cycleStart = reset - 604800000;
+    const visibleStart = Math.max(start, cycleStart),
+      visibleEnd = Math.min(end, reset);
+    if (visibleEnd <= visibleStart) return null;
+    return {
+      start: cycleStart,
+      end: reset,
+      visibleStart,
+      visibleEnd,
+      elapsedEnd: Math.max(visibleStart, Math.min(now, visibleEnd)),
+    };
+  }
+  function renderAllowances(accounts, settings, now, absolute) {
+    return (
+      accounts
+        .map((a) => {
+          const quota = quotaView(a, settings, now);
+          const label =
+            quota.remaining === null
+              ? "No weekly observation"
+              : quota.fresh
+                ? "Weekly allowance left"
+                : "Last known weekly allowance";
+          return `<button type="button" class="allowance-account" data-open-account="${escape(a.identity.credential_id)}"><span><strong>${escape(name(a))}</strong><small>${escape(a.identity.provider || "")} · ${escape(label)}</small></span><span class="allowance-value">${quota.remaining === null ? "Unavailable" : escape(number(quota.remaining)) + "%"}<small>${quota.remaining === null ? "Awaiting quota observation" : "Automatic refresh: " + escape(absolute(quota.resetAt))}</small></span></button>`;
+        })
+        .join("") ||
+      '<p class="muted">No accounts match the current filters.</p>'
+    );
+  }
   function mergeAccounts(snapshots, activity) {
     const runtime = new Map(
       (activity?.accounts || []).map((a) => [a.credential_id, a]),
@@ -374,32 +412,53 @@
     );
   }
   function renderTimeline(accounts, settings, now, days, absolute) {
+    // Include the past week so elapsed cycle time is visible, not clipped at Now.
+    const start = now - 604800000;
     const end = now + days * 86400000;
-    const axis = [0, 0.25, 0.5, 0.75, 1]
+    const x = (at) => 20 + ((at - start) / (end - start)) * 860;
+    const ticks = [start, now, end];
+    const axis = ticks
       .map(
-        (f) =>
-          `<text x="${20 + f * 860}" y="20" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${escape(f === 0 ? "Now" : absolute(new Date(now + (end - now) * f).toISOString()).replace(/(\d{2}\/\d{2})\/\d{4}, (\d{2}:\d{2}).*/, "$1 $2"))}</text>`,
+        (at) =>
+          `<text x="${x(at)}" y="${at === now ? 50 : 20}" text-anchor="${at === start ? "start" : at === end ? "end" : "middle"}">${escape(at === now ? "Now" : absolute(new Date(at).toISOString()).replace(/(\d{2}\/\d{2})\/\d{4}, (\d{2}:\d{2}).*/, "$1 $2"))}</text>`,
       )
       .join("");
     const rows = accounts
       .map((a) => {
         const events = timelineEvents(a, settings, now);
         const inside = events.filter(
-          (e) => !eventPosition(e.at, now, end).outside,
+          (e) =>
+            e.kind !== "weekly" && !eventPosition(e.at, start, end).outside,
         );
         const outside = events.filter(
-          (e) => eventPosition(e.at, now, end).outside,
+          (e) => eventPosition(e.at, start, end).outside,
         );
-        const marks = inside
+        const marker = (e) => {
+          const position = x(stamp(e.at));
+          return `<g class="timeline-marker ${e.kind}" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":" + e.kind + ":" + (e.credit || "") + ":" + e.at)}" role="img" aria-label="${escape(e.label + ": " + absolute(e.at))}"><title>${escape(e.label + ": " + absolute(e.at) + (e.credit ? " (credit " + e.credit + ")" : ""))}</title><line x1="${position}" y1="8" x2="${position}" y2="34"/></g>`;
+        };
+        const manualMarks = inside
+          .filter((e) => e.kind !== "window")
+          .map(marker)
+          .join("");
+        const windowMarks = inside
+          .filter((e) => e.kind === "window")
+          .map(marker)
+          .join("");
+        const bands = (a.buckets || [])
+          .map((b) => weeklyCycle(b, now, start, end))
+          .filter(Boolean)
           .map((e) => {
-            const position = eventPosition(e.at, now, end).position;
-            return `<g class="timeline-marker ${e.kind}" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":" + e.kind + ":" + (e.credit || "") + ":" + e.at)}" role="img" aria-label="${escape(e.label + ": " + absolute(e.at))}"><title>${escape(e.label + ": " + absolute(e.at) + (e.credit ? " (credit " + e.credit + ")" : ""))}</title><line x1="${20 + position * 8.6}" y1="8" x2="${20 + position * 8.6}" y2="34"/></g>`;
+            const label = `Seven-day weekly cycle: ${absolute(new Date(e.start).toISOString())} to ${absolute(new Date(e.end).toISOString())}. Start inferred from provider refresh and seven-day duration. Shading shows elapsed time, not allowance used.`;
+            return `<g class="weekly-cycle" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":cycle:" + e.end)}" role="img" aria-label="${escape(label)}"><title>${escape(label)}</title><rect x="${x(e.visibleStart)}" y="10" width="${x(e.visibleEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-remaining"/>${e.elapsedEnd > e.visibleStart ? `<rect x="${x(e.visibleStart)}" y="10" width="${x(e.elapsedEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-elapsed"/>` : ""}<rect x="${x(e.visibleStart)}" y="10" width="${x(e.visibleEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-outline"/></g>`;
           })
           .join("");
-        return `<div class="timeline-row"><div class="timeline-name">${escape(name(a))}</div><div><svg viewBox="0 0 900 42" class="timeline-track" role="img" aria-label="${escape(name(a))} reset timeline"><line x1="20" y1="21" x2="880" y2="21" class="chart-grid"/>${marks}</svg>${!events.length ? '<span class="muted">No observed refresh or expiry times</span>' : ""}${outside.length ? '<div class="timeline-outside">' + outside.map((e) => escape(e.label + ": " + absolute(e.at))).join("<br>") + "</div>" : ""}</div></div>`;
+        const nowLine = `<line x1="${x(now)}" x2="${x(now)}" y1="3" y2="39" class="timeline-now"/>`;
+        const quota = quotaView(a, settings, now);
+        return `<div class="timeline-row"><div class="timeline-name">${escape(name(a))}${quota.remaining !== null ? `<small>${escape(number(quota.remaining))}% left${quota.fresh ? "" : " (last known)"}</small>` : ""}</div><div class="timeline-lanes"><div class="timeline-lane"><span class="timeline-lane-label">Weekly allowance</span><svg viewBox="0 0 900 42" class="timeline-track" role="img" aria-label="${escape(name(a))} automatic allowance refresh">${bands}${windowMarks}${nowLine}</svg>${!bands ? '<span class="muted">No observed weekly cycle in this range</span>' : ""}</div><div class="timeline-lane"><span class="timeline-lane-label">Saved manual resets</span><svg viewBox="0 0 900 42" class="timeline-track" role="img" aria-label="${escape(name(a))} manual reset expiry"><line x1="20" y1="21" x2="880" y2="21" class="chart-grid"/>${manualMarks}${nowLine}</svg>${!events.some((e) => e.kind === "expiry") ? '<span class="muted">No observed saved-reset expiry</span>' : ""}</div>${outside.length ? '<div class="timeline-outside">' + outside.map((e) => escape(e.label + ": " + absolute(e.at))).join("<br>") + "</div>" : ""}</div></div>`;
       })
       .join("");
-    return `<div class="timeline-axis"><span></span><svg viewBox="0 0 900 30" aria-hidden="true">${axis}</svg></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}`;
+    return `<div class="timeline-axis"><span></span><svg viewBox="0 0 900 65" aria-hidden="true">${axis}</svg></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}`;
   }
   const help = {
     automation: {
@@ -429,6 +488,8 @@
   const helpers = {
     activityView,
     quotaView,
+    weeklyCycle,
+    renderAllowances,
     pageAccounts,
     mergeAccounts,
     timelineEvents,

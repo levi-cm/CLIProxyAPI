@@ -531,6 +531,86 @@ svg text {
 .timeline-legend .guard {
   color: var(--red);
 }
+.timeline-legend .elapsed::before,
+.timeline-legend .remaining::before {
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--accent);
+}
+.timeline-legend .elapsed::before {
+  background: var(--accent);
+}
+.timeline-legend .remaining::before {
+  background: var(--soft);
+}
+.weekly-cycle-remaining {
+  fill: var(--soft);
+}
+.weekly-cycle-elapsed {
+  fill: var(--accent);
+}
+.weekly-cycle-outline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+.timeline-now {
+  stroke: var(--ink);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.timeline-lanes {
+  display: grid;
+  gap: 14px;
+}
+.timeline-lane-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.timeline-name small {
+  display: block;
+  color: var(--muted);
+  margin-top: 5px;
+  font-weight: 400;
+}
+.allowance-list {
+  margin-top: 14px;
+}
+.allowance-account {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  padding: 16px 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  white-space: normal;
+}
+.allowance-account:hover:not(:disabled) {
+  background: var(--soft);
+  color: var(--ink);
+}
+.allowance-account span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.allowance-account small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  margin-top: 5px;
+}
+.allowance-value {
+  font-size: 24px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .timeline-row,
 .timeline-axis {
   display: grid;

@@ -25,6 +25,12 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       assert.equal(data.fixture_only, true, "Refuse non-fixture target");
       return data;
     };
+    await readState(); // Prove the target is an isolated fixture before preparing it.
+    const reset = await page.request.post(base + "/fixture/control", {
+      headers: auth,
+      data: { reset: true },
+    });
+    assert.equal(reset.ok(), true);
     const before = await readState();
     let recording = true;
     let healthy = true;
@@ -42,8 +48,12 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
             Date.now() - 300000,
           ).toISOString();
           account.available_credits = 2;
-          for (const bucket of account.buckets)
+          for (const bucket of account.buckets) {
             bucket.observed_at = account.observed_at;
+            if (bucket.duration_seconds === 604800)
+              bucket.used_percent =
+                account.identity.credential_id === "account-a" ? 51 : 7;
+          }
         }
         await route.fulfill({ response, json });
       },
@@ -91,8 +101,36 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       "Waiting for completions",
     );
     assert.equal(
-      await metric("Last known weekly allowance").textContent(),
-      "33%",
+      await page.locator("#allowances .allowance-account").count(),
+      3,
+    );
+    assert.match(
+      await page
+        .locator('#allowances [data-open-account="account-a"] .allowance-value')
+        .textContent(),
+      /^49%/,
+    );
+    assert.match(
+      await page
+        .locator('#allowances [data-open-account="account-b"] .allowance-value')
+        .textContent(),
+      /^93%/,
+    );
+    assert.match(
+      await page
+        .locator(
+          '#allowances [data-open-account="inventory-c"] .allowance-value',
+        )
+        .textContent(),
+      /^Unavailable/,
+    );
+    assert.doesNotMatch(
+      await page.locator("#metrics").textContent(),
+      /weekly allowance|Average of/i,
+    );
+    assert.match(
+      await page.locator("#allowances").textContent(),
+      /Last known weekly allowance/,
     );
     assert.equal(await metric("Last known saved resets").textContent(), "4");
     assert.match(
@@ -114,7 +152,7 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       await page
         .locator("[data-account=account-a] .account-quota-summary")
         .textContent(),
-      /Last known weekly allowance 33%/,
+      /Last known weekly allowance 49%/,
     );
     assert.equal(await page.locator("[data-action=redeem]:enabled").count(), 0);
     healthy = false;

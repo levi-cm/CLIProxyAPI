@@ -120,6 +120,29 @@ usage records or billable inference requests.
 
 ## Playwright browser checks
 
+### Per-account allowance and weekly-cycle timeline (2026-10-04)
+
+The weekly average was removed. Individual account percentages remain visible
+with last-known labels when stale. Ordinary seven-day cycles use rectangles
+ending at the provider's observed refresh; start is inferred from the seven-day
+duration. Shading represents elapsed time, not allowance consumption. The axis
+includes the past week plus the selected future range. Manual expiry/guard lines
+are on a separate lane; no future cycles or unknown provider values are invented.
+
+- Three helper regressions failed before implementation, then all 23 JavaScript
+  helper tests passed.
+- Full Go suite and required server compile passed after the final UI fixes.
+- Existing 100-account and observation-only browser suites passed against
+  isolated fixtures, including unequal account allowances and unknown evidence.
+- New `verify-weekly-timeline.cjs` proved elapsed geometry (three-sevenths of a
+  cycle, not 67% quota used), expiry lines, no weekly line marker, all three
+  future ranges at 1440/390/320px, keyboard account navigation and readable hover
+  in both themes. The first run reproduced overlapping labels, inert allowance
+  buttons and low hover contrast; all three passed after focused corrections.
+- Lighthouse accessibility was 100% in four views in both themes. Browser
+  verification made no provider/settings/reset writes.
+
+
 The lead used the rebuilt current embedded assets at
 `http://100.82.251.30:18318/account-policy.html` with fixture key `fixture-key`.
 The preview accepts no credential files and has no live provider adapter.
