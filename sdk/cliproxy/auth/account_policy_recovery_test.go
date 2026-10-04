@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -21,6 +22,43 @@ func recoveryFixture() (*Manager, accountpolicy.Snapshot, accountpolicy.Snapshot
 		"unrelated": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour), Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)}, LastError: &Error{HTTPStatus: 429}, UpdatedAt: now.Add(-time.Second)},
 	}}
 	return m, before, after
+}
+
+type policyRecoveryFailingStore struct {
+	fail    bool
+	records []CooldownStateRecord
+}
+
+func (s *policyRecoveryFailingStore) Load(context.Context) ([]CooldownStateRecord, error) {
+	return s.records, nil
+}
+func (s *policyRecoveryFailingStore) Save(_ context.Context, records []CooldownStateRecord) error {
+	if s.fail {
+		return errors.New("disk unavailable")
+	}
+	s.records = records
+	return nil
+}
+
+func TestPolicyRecoveryPersistenceFailureRemainsRetryable(t *testing.T) {
+	m, before, after := recoveryFixture()
+	store := &policyRecoveryFailingStore{fail: true}
+	m.SetCooldownStateStore(store)
+	if err := m.RecoverPolicyQuota(context.Background(), before, after); err == nil {
+		t.Fatal("failed durable recovery reported success")
+	}
+	a, _ := m.GetByID("a")
+	if !a.ModelStates["gpt-5"].Quota.Exceeded {
+		t.Fatal("failed persistence exposed recovered account before retry")
+	}
+	store.fail = false
+	if err := m.RecoverPolicyQuota(context.Background(), before, after); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = m.GetByID("a")
+	if a.ModelStates["gpt-5"].Quota.Exceeded {
+		t.Fatal("retry did not clear quota")
+	}
 }
 
 // Recovery must clear the covered model, preserve another quota, and persist it.

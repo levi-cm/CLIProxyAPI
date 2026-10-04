@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,6 +91,10 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		return nil
 	}
 	id := before.Identity.CredentialID
+	// Keep the published credential blocked until both persistence layers accept
+	// recovery, serialized with every independent cooldown save.
+	m.configCooldownMu.Lock()
+	defer m.configCooldownMu.Unlock()
 	m.mu.Lock()
 	auth := m.auths[id]
 	if auth == nil {
@@ -112,6 +117,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 			return &accountpolicy.Error{Code: "identity_mismatch", Message: "current credential ownership changed"}
 		}
 	}
+	auth = auth.Clone()
 	changed := false
 	now := after.ObservedAt
 	for model, state := range auth.ModelStates {
@@ -152,6 +158,33 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 	auth.UpdatedAt = now
 	snapshot := auth.Clone()
 	errPersist := m.persist(context.WithoutCancel(ctx), auth)
+	if errPersist != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("persist recovered credential: %w", errPersist)
+	}
+	if store := m.cooldownStore; store != nil {
+		records := make([]CooldownStateRecord, 0)
+		for candidateID, candidate := range m.auths {
+			if candidateID == id {
+				candidate = auth
+			}
+			records = append(records, m.cooldownStateRecordsForAuthLocked(candidate, time.Now())...)
+		}
+		sort.Slice(records, func(i, j int) bool {
+			if records[i].Provider != records[j].Provider {
+				return records[i].Provider < records[j].Provider
+			}
+			if records[i].AuthID != records[j].AuthID {
+				return records[i].AuthID < records[j].AuthID
+			}
+			return records[i].Model < records[j].Model
+		})
+		if errSave := store.Save(context.WithoutCancel(ctx), records); errSave != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("persist recovered cooldown: %w", errSave)
+		}
+	}
+	m.auths[id] = auth
 	m.mu.Unlock()
 	supported, epoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supported))
@@ -163,23 +196,6 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 	registry.GetGlobalRegistry().ApplyClientModelProjections(id, epoch, snapshot.Generation, projections)
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
-	}
-	// Serialize against other cooldown saves; return failure so journal recovery
-	// never claims a durable local repair when saved state still contains a block.
-	m.configCooldownMu.Lock()
-	m.mu.RLock()
-	store := m.cooldownStore
-	m.mu.RUnlock()
-	if store != nil {
-		errSave := store.Save(context.WithoutCancel(ctx), m.cooldownStateRecordsSnapshot())
-		if errSave != nil {
-			m.configCooldownMu.Unlock()
-			return fmt.Errorf("persist recovered cooldown: %w", errSave)
-		}
-	}
-	m.configCooldownMu.Unlock()
-	if errPersist != nil {
-		return fmt.Errorf("persist recovered credential: %w", errPersist)
 	}
 	return nil
 }
