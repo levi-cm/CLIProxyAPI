@@ -17,16 +17,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-type policyFixtureProvider struct{}
+type policyFixtureProvider struct{ lastError string }
 
-func (policyFixtureProvider) Discover(_ context.Context, id accountpolicy.Identity) (accountpolicy.Snapshot, error) {
-	return accountpolicy.Snapshot{Identity: id, Eligible: true, InventoryComplete: true, ObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), InventoryObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), LastError: "Bearer secret-token prompt-secret", Credits: []accountpolicy.Credit{{ID: "c", Type: "codex_rate_limits", Status: "available", DetailsKnown: true, Scopes: []string{"ordinary"}}}}, nil
+func (p policyFixtureProvider) Discover(_ context.Context, id accountpolicy.Identity) (accountpolicy.Snapshot, error) {
+	return accountpolicy.Snapshot{Identity: id, Eligible: true, InventoryComplete: true, ObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), InventoryObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), LastError: p.lastError, Credits: []accountpolicy.Credit{{ID: "c", Type: "codex_rate_limits", Status: "available", DetailsKnown: true, Scopes: []string{"ordinary"}}}}, nil
 }
 func (policyFixtureProvider) Consume(context.Context, accountpolicy.Identity, string, string) (accountpolicy.ConsumeResult, error) {
 	return accountpolicy.ConsumeResult{Code: "nothing_to_reset"}, nil
 }
 
-func policyTestRouter(t *testing.T, enabled bool) (*gin.Engine, *accountpolicy.Service) {
+func policyTestRouter(t *testing.T, enabled bool, providers ...accountpolicy.Provider) (*gin.Engine, *accountpolicy.Service) {
 	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "operator-test")
 	h := NewHandler(&config.Config{}, "", nil)
@@ -35,8 +35,12 @@ func policyTestRouter(t *testing.T, enabled bool) (*gin.Engine, *accountpolicy.S
 		settings := accountpolicy.DefaultSettings()
 		settings.Enabled = true
 		settings.StateDir = t.TempDir()
+		var provider accountpolicy.Provider = policyFixtureProvider{}
+		if len(providers) > 0 {
+			provider = providers[0]
+		}
 		var err error
-		service, err = accountpolicy.NewService(accountpolicy.Options{Settings: settings, Provider: policyFixtureProvider{}, Accounts: func() []accountpolicy.Identity {
+		service, err = accountpolicy.NewService(accountpolicy.Options{Settings: settings, Provider: provider, Accounts: func() []accountpolicy.Identity {
 			return []accountpolicy.Identity{{CredentialID: "a", AccountID: "upstream-a", WorkspaceID: "workspace-a", Provider: "codex"}}
 		}, Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) }, IsIdle: func(string) bool { return true }})
 		if err != nil {
@@ -111,7 +115,7 @@ func TestAccountPolicyExplicitRedemptionAndSchedule(t *testing.T) {
 	}
 }
 func TestAccountPolicyDiagnosticsSanitizeProviderErrors(t *testing.T) {
-	r, service := policyTestRouter(t, true)
+	r, service := policyTestRouter(t, true, policyFixtureProvider{lastError: "Bearer secret-token prompt-secret"})
 	if err := service.Refresh(context.Background(), "a"); err != nil {
 		t.Fatal(err)
 	}
