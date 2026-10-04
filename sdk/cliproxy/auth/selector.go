@@ -916,6 +916,58 @@ type SessionAffinitySelector struct {
 	subagentAffinity bool
 }
 
+// SelectorAcrossPriorities opts a dynamic selector into all eligible priority tiers.
+type SelectorAcrossPriorities interface {
+	SelectorWantsAcrossPriorities() bool
+}
+
+func selectorWantsAcrossPriorities(selector Selector) bool {
+	opt, ok := selector.(SelectorAcrossPriorities)
+	return ok && opt.SelectorWantsAcrossPriorities()
+}
+
+func (s *SessionAffinitySelector) SelectorWantsAcrossPriorities() bool {
+	return s != nil && selectorWantsAcrossPriorities(s.fallback)
+}
+
+func (s *SessionAffinitySelector) fallbackCandidates(available []*Auth) []*Auth {
+	if selectorWantsAcrossPriorities(s.fallback) {
+		return available
+	}
+	return highestPriorityAuths(available)
+}
+
+// BoundAffinitySelector may retain or safely replace an eligible binding.
+// It must never return another account for an unsafe continuation.
+type BoundAffinitySelector interface {
+	PickBound(context.Context, string, string, cliproxyexecutor.Options, *Auth, []*Auth) (*Auth, error)
+}
+
+func (s *SessionAffinitySelector) pickBound(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, bound *Auth, available []*Auth) (*Auth, error) {
+	if policy, ok := s.fallback.(BoundAffinitySelector); ok {
+		return policy.PickBound(ctx, provider, model, opts, bound, available)
+	}
+	return bound, nil
+}
+
+func (s *SessionAffinitySelector) affinityNamespace(provider string, opts cliproxyexecutor.Options) string {
+	if scoped, ok := s.fallback.(interface {
+		AffinityNamespace(string, cliproxyexecutor.Options) string
+	}); ok {
+		return scoped.AffinityNamespace(provider, opts)
+	}
+	return provider
+}
+
+func (s *SessionAffinitySelector) checkUnavailableAffinity(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, id string) error {
+	if policy, ok := s.fallback.(interface {
+		PickUnavailable(context.Context, string, string, cliproxyexecutor.Options, string) error
+	}); ok {
+		return policy.PickUnavailable(ctx, provider, model, opts, id)
+	}
+	return nil
+}
+
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback         Selector
@@ -1019,12 +1071,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		fallbackAuths, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, s.fallbackCandidates(fallbackAuths))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
@@ -1033,10 +1085,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackCandidates(available)
 
 	modelKey := canonicalModelKey(model)
-	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	cacheNamespace := s.affinityNamespace(provider, opts)
+	cacheKey := cacheNamespace + "::" + primaryID + "::" + modelKey
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1046,7 +1099,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKey = cacheNamespace + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1059,12 +1112,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				var errBound error
+				auth, errBound = s.pickBound(ctx, provider, model, opts, auth, available)
+				if errBound != nil || auth == nil {
+					return auth, errBound
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
+		if errUnavailable := s.checkUnavailableAffinity(ctx, provider, model, opts, cachedAuthID); errUnavailable != nil {
+			return nil, errUnavailable
+		}
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
@@ -1082,6 +1143,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
+						// Child sessions inherit the parent binding without deadline migration.
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
@@ -1186,7 +1248,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackCandidates(available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick
@@ -1532,7 +1594,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
 	}
 
-	cacheKey := ns + "::" + primaryID + "::" + nsModel
+	cacheKey := s.affinityNamespace(ns, res.Options) + "::" + primaryID + "::" + nsModel
 	var fallbackKey string
 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
