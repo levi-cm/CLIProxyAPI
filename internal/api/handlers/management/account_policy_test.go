@@ -210,3 +210,21 @@ func TestAccountPolicyPersistenceFailureRollsBackPatch(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestAccountPolicyDisabledAndReadOnlyRejectRedemption(t *testing.T) {
+	for _, test := range []struct {
+		patch, code string
+		status      int
+	}{{`{"enabled":false}`, "disabled", 503}, {`{"read_only":true}`, "read_only", 403}} {
+		t.Run(test.code, func(t *testing.T) {
+			r, service := policyTestRouter(t, true)
+			if response := policyRequest(r, http.MethodPatch, "/settings", test.patch, "operator-test"); response.Code != 200 {
+				t.Fatal(response.Code, response.Body.String())
+			}
+			response := policyRequest(r, http.MethodPost, "/resets/redeem", `{"credential_id":"a","credit_id":"c"}`, "operator-test")
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || len(service.Operations()) != 0 {
+				t.Fatal(response.Code, response.Body.String())
+			}
+		})
+	}
+}
