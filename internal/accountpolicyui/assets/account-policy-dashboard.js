@@ -414,13 +414,13 @@
   function renderTimeline(accounts, settings, now, days, absolute) {
     // Include the past week so elapsed cycle time is visible, not clipped at Now.
     const start = now - 604800000;
-    const end = now + days * 86400000;
+    const end = now + (days === 1 ? 1 : 7) * 86400000;
     const x = (at) => 20 + ((at - start) / (end - start)) * 860;
     const ticks = [start, now, end];
     const axis = ticks
       .map(
         (at) =>
-          `<text x="${x(at)}" y="${at === now ? 50 : 20}" text-anchor="${at === start ? "start" : at === end ? "end" : "middle"}">${escape(at === now ? "Now" : absolute(new Date(at).toISOString()).replace(/(\d{2}\/\d{2})\/\d{4}, (\d{2}:\d{2}).*/, "$1 $2"))}</text>`,
+          `<span class="timeline-tick ${at === start ? "start" : at === end ? "end" : "now"}">${escape(at === now ? "Now" : absolute(new Date(at).toISOString()).replace(/(\d{2}\/\d{2})\/\d{4}, (\d{2}:\d{2}).*/, "$1 $2"))}</span>`,
       )
       .join("");
     const rows = accounts
@@ -430,8 +430,8 @@
           (e) =>
             e.kind !== "weekly" && !eventPosition(e.at, start, end).outside,
         );
-        const outside = events.filter(
-          (e) => eventPosition(e.at, start, end).outside,
+        const later = events.filter(
+          (e) => e.kind === "expiry" && stamp(e.at) > end,
         );
         const marker = (e) => {
           const position = x(stamp(e.at));
@@ -446,19 +446,28 @@
           .map(marker)
           .join("");
         const bands = (a.buckets || [])
-          .map((b) => weeklyCycle(b, now, start, end))
-          .filter(Boolean)
-          .map((e) => {
-            const label = `Seven-day weekly cycle: ${absolute(new Date(e.start).toISOString())} to ${absolute(new Date(e.end).toISOString())}. Start inferred from provider refresh and seven-day duration. Shading shows elapsed time, not allowance used.`;
-            return `<g class="weekly-cycle" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":cycle:" + e.end)}" role="img" aria-label="${escape(label)}"><title>${escape(label)}</title><rect x="${x(e.visibleStart)}" y="10" width="${x(e.visibleEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-remaining"/>${e.elapsedEnd > e.visibleStart ? `<rect x="${x(e.visibleStart)}" y="10" width="${x(e.elapsedEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-elapsed"/>` : ""}<rect x="${x(e.visibleStart)}" y="10" width="${x(e.visibleEnd) - x(e.visibleStart)}" height="22" rx="3" class="weekly-cycle-outline"/></g>`;
+          .map((b) => {
+            const e = weeklyCycle(b, now, start, end);
+            if (!e) return "";
+            const quota = quotaView({ ...a, buckets: [b] }, settings, now);
+            const height =
+              quota.remaining === null ? null : quota.remaining * 0.4;
+            const allowance =
+              height === null
+                ? "Weekly allowance unavailable"
+                : `${number(quota.remaining)}% left${quota.fresh ? "" : " (last known)"}`;
+            const label = `Seven-day weekly cycle: ${absolute(new Date(e.start).toISOString())} to ${absolute(new Date(e.end).toISOString())}. Start inferred from provider refresh and seven-day duration. ${allowance}. Fill height shows allowance left; the top strip shows elapsed time.`;
+            const left = x(e.visibleStart),
+              width = x(e.visibleEnd) - left;
+            return `<g class="weekly-cycle" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":cycle:" + e.end)}" role="img" aria-label="${escape(label)}"><title>${escape(label)}</title><rect x="${left}" y="14" width="${width}" height="40" class="weekly-cycle-remaining"/>${height !== null ? `<rect x="${left}" y="${54 - height}" width="${width}" height="${height}" class="weekly-cycle-quota"/>` : ""}<rect x="${left}" y="6" width="${width}" height="4" class="weekly-cycle-remaining"/>${e.elapsedEnd > e.visibleStart ? `<rect x="${left}" y="6" width="${x(e.elapsedEnd) - left}" height="4" class="weekly-cycle-elapsed"/>` : ""}<rect x="${left}" y="14" width="${width}" height="40" class="weekly-cycle-outline"/></g>`;
           })
           .join("");
         const nowLine = `<line x1="${x(now)}" x2="${x(now)}" y1="3" y2="39" class="timeline-now"/>`;
         const quota = quotaView(a, settings, now);
-        return `<div class="timeline-row"><div class="timeline-name">${escape(name(a))}${quota.remaining !== null ? `<small>${escape(number(quota.remaining))}% left${quota.fresh ? "" : " (last known)"}</small>` : ""}</div><div class="timeline-lanes"><div class="timeline-lane"><span class="timeline-lane-label">Weekly allowance</span><svg viewBox="0 0 900 42" class="timeline-track" role="img" aria-label="${escape(name(a))} automatic allowance refresh">${bands}${windowMarks}${nowLine}</svg>${!bands ? '<span class="muted">No observed weekly cycle in this range</span>' : ""}</div><div class="timeline-lane"><span class="timeline-lane-label">Saved manual resets</span><svg viewBox="0 0 900 42" class="timeline-track" role="img" aria-label="${escape(name(a))} manual reset expiry"><line x1="20" y1="21" x2="880" y2="21" class="chart-grid"/>${manualMarks}${nowLine}</svg>${!events.some((e) => e.kind === "expiry") ? '<span class="muted">No observed saved-reset expiry</span>' : ""}</div>${outside.length ? '<div class="timeline-outside">' + outside.map((e) => escape(e.label + ": " + absolute(e.at))).join("<br>") + "</div>" : ""}</div></div>`;
+        return `<div class="timeline-row"><div class="timeline-name">${escape(name(a))}${quota.remaining !== null ? `<small>${escape(number(quota.remaining))}% left${quota.fresh ? "" : " (last known)"}</small>` : ""}</div><div class="timeline-lanes"><div class="timeline-lane"><span class="timeline-lane-label">Weekly allowance</span><svg viewBox="0 0 900 64" preserveAspectRatio="none" class="timeline-track timeline-weekly" role="img" aria-label="${escape(name(a))} automatic allowance refresh">${bands}${windowMarks}<line x1="${x(now)}" x2="${x(now)}" y1="3" y2="61" class="timeline-now"/></svg>${!bands ? '<span class="muted">No observed weekly cycle in this range</span>' : ""}</div><div class="timeline-lane"><span class="timeline-lane-label">Saved manual resets</span><svg viewBox="0 0 900 42" preserveAspectRatio="none" class="timeline-track timeline-manual" role="img" aria-label="${escape(name(a))} manual reset expiry"><line x1="20" y1="21" x2="880" y2="21" class="chart-grid"/>${manualMarks}${nowLine}</svg>${!inside.some((e) => e.kind === "expiry") ? '<span class="muted">No expiry in this range</span>' : ""}${later.length ? `<button type="button" class="timeline-later" data-open-account="${escape(a.identity.credential_id)}">${later.length} later ${later.length === 1 ? "expiry" : "expiries"} · View account</button>` : ""}</div></div></div>`;
       })
       .join("");
-    return `<div class="timeline-axis"><span></span><svg viewBox="0 0 900 65" aria-hidden="true">${axis}</svg></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}`;
+    return `<div class="timeline-axis"><span></span><div class="timeline-ticks ${days === 1 ? "day" : "week"}">${axis}</div></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}`;
   }
   const help = {
     automation: {

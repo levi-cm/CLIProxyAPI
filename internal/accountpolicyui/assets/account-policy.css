@@ -468,10 +468,32 @@ svg text {
 }
 .timeline-row,
 .timeline-axis {
-  min-width: 720px;
+  min-width: 0;
 }
-.timeline-axis text {
-  font-size: 20px;
+.timeline-ticks {
+  position: relative;
+  height: 50px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.timeline-tick {
+  position: absolute;
+  top: 0;
+}
+.timeline-tick.start {
+  left: 2.222222%;
+}
+.timeline-tick.end {
+  right: 2.222222%;
+}
+.timeline-tick.now {
+  top: 25px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.timeline-ticks.day .now {
+  left: 85.833333%;
 }
 .chart-data {
   margin-top: 10px;
@@ -531,17 +553,16 @@ svg text {
 .timeline-legend .guard {
   color: var(--red);
 }
-.timeline-legend .elapsed::before,
-.timeline-legend .remaining::before {
+.timeline-legend .quota::before {
   height: 12px;
   border-radius: 2px;
-  border: 1px solid var(--accent);
+  background: var(--green);
 }
 .timeline-legend .elapsed::before {
   background: var(--accent);
 }
-.timeline-legend .remaining::before {
-  background: var(--soft);
+.weekly-cycle-quota {
+  fill: var(--green);
 }
 .weekly-cycle-remaining {
   fill: var(--soft);
@@ -558,6 +579,31 @@ svg text {
   stroke: var(--ink);
   stroke-width: 1;
   stroke-dasharray: 2 3;
+}
+.timeline-weekly {
+  height: 64px;
+}
+.timeline-manual {
+  height: 32px;
+}
+.weekly-cycle-outline,
+.timeline-now,
+.timeline-marker line {
+  vector-effect: non-scaling-stroke;
+}
+.timeline-later {
+  display: block;
+  margin-top: 6px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  text-decoration: underline;
+}
+.timeline-later:hover:not(:disabled) {
+  background: var(--soft);
+  color: var(--ink);
 }
 .timeline-lanes {
   display: grid;
@@ -1069,8 +1115,20 @@ footer span {
   }
   .timeline-row,
   .timeline-axis {
-    grid-template-columns: 125px minmax(0, 1fr);
-    gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .timeline-axis > span {
+    display: none;
+  }
+  .timeline-name {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 5px 12px;
+  }
+  .timeline-name small {
+    margin-top: 0;
   }
   .timeline-track {
     min-height: 30px;

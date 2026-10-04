@@ -1338,7 +1338,7 @@
     const button = e.target.closest("[data-view]");
     if (button) changeView(button.dataset.view);
   });
-  for (const id of ["serving", "allowances"])
+  for (const id of ["serving", "allowances", "timeline"])
     $(id).addEventListener("click", (e) => {
       const button = e.target.closest("[data-open-account]");
       if (!button) return;

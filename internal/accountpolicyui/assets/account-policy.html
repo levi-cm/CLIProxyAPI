@@ -160,33 +160,29 @@
               <div>
                 <h2>Refresh &amp; reset timeline</h2>
                 <p class="muted">
-                  Seven-day weekly cycles and saved manual resets are shown
-                  separately.
+                  This week’s allowance and nearby reset expiries.
                 </p>
               </div>
               <label
                 >Timeline range<select id="timeline-range">
                   <option value="1">Next 24 hours</option>
-                  <option value="7">Next 7 days</option>
-                  <option value="30" selected>Next 30 days</option>
+                  <option value="7" selected>Next 7 days</option>
                 </select></label
               >
             </div>
             <div class="timeline-legend">
-              <span class="elapsed">Elapsed cycle time</span
-              ><span class="remaining">Time left in cycle</span
+              <span class="quota">Allowance left (fill height)</span
+              ><span class="elapsed">Elapsed time (top strip)</span
               ><span class="window">Short-window refresh</span
-              ><span class="expiry">Manual reset expires</span
-              ><span class="guard">Expiry safety fallback</span>
+              ><span class="expiry">Manual reset expires</span>
             </div>
             <div id="timeline"></div>
             <p class="field-help">
-              Rectangles show the observed seven-day cycle, including the past
-              week. Shading is elapsed time, not allowance consumed. Saved-reset
-              expiry stays a line. Expiring-only automation uses an eligible
-              reset immediately at confirmed weekly exhaustion if it expires
-              before the next normal refresh. The guard is a fallback if
-              allowance remains. Hover or focus a marker for exact times.
+              Width shows the seven-day cycle; fill height matches the account’s
+              allowance left. The top strip marks elapsed time. Manual reset
+              expiries stay lines; later expiries are in account details. Hover
+              or focus for exact dates. A red dashed line, when present, is the
+              expiry safety fallback.
             </p>
           </section>
         </section>

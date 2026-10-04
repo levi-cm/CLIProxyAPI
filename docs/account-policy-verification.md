@@ -275,3 +275,31 @@ Repeatable browser and audit scripts are under
 Ignored screenshot evidence includes `dashboard-final-desktop.png` and
 `dashboard-final-mobile.png`. Previous baseline-race limitations above remain
 documented; no unrelated upstream test or production default was weakened.
+
+## Nearby timeline and proportional allowance fills (2026-10-04)
+
+The overview defaults to the next seven days, with a 24-hour zoom. Later saved
+reset expiries no longer stretch the main timescale or add long timestamp lists;
+a count links to the owning account's complete inventory. Weekly rectangle width
+is still chronological. Opaque fill height now matches observed allowance left,
+while a separate thin top strip marks elapsed time. Unknown measurements get no
+fill and last-known observations remain labelled stale evidence, not authority.
+
+Verification for this UI-only change:
+
+- Two new deterministic regressions failed before implementation and passed
+  afterwards; all 25 JavaScript helper/clock regressions passed.
+- Full repository `go test ./...` and required server compilation passed using
+  Go 1.26; final log: `/tmp/cliproxy-nearby-timeline-final-full.log`.
+- Playwright verified the seven-day horizon, near expiry lines, later-expiry
+  account navigation, opaque proportional fill, the independent elapsed strip,
+  both range options and 1440/390/320px layout without overflow. A separate
+  red/green browser regression checks the timeline itself has no clipped
+  horizontal scroll area, with normal-size date labels on mobile.
+- The 100-account dashboard suite passed. Observation-only checks use unequal
+  49% and 93% allowances and measure the painted fill-height ratio in both themes
+  at desktop and mobile widths. No provider refresh/settings/reset writes occur.
+- All eight authenticated Lighthouse accessibility snapshots passed at 100.
+- Read-only publication reviews checked quality and scope. All implementation
+  changes remain in the optional dashboard module; no routing/reset policy,
+  upstream defaults, downloaded management assets or private configuration changed.

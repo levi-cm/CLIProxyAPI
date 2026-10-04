@@ -15,10 +15,19 @@ Weekly allowance is shown for each account, not averaged across accounts. The
 allowance list and reset timeline follow the current Accounts filters/page, so
 large account pools remain bounded and searchable. Weekly timeline rectangles
 span the provider's seven-day window ending at the observed refresh; the start
-is inferred from that duration. Darker shading is elapsed time, not quota used.
-The axis includes the previous seven days plus the selected future range. Saved
-manual-reset expiries and safety guards remain lines on a separate lane. Unknown
-cycles are not invented; stale observations remain labelled last-known.
+is inferred from that duration. Solid fill height is proportional to the observed
+allowance left, not elapsed time or opacity. A separate thin top strip marks
+elapsed time. Width remains chronological and is never scaled by quota consumed.
+The axis includes the previous seven days plus the next seven days by default;
+the 24-hour option provides a closer look. It never stretches to distant credits.
+Saved manual-reset expiries and safety guards remain lines on a separate lane.
+Later expiries are summarized by count with a link to the owning account's full
+inventory, without extra dates cluttering the overview. Unknown allowance has no
+fill; zero allowance has zero fill. Unknown cycles are not invented; stale
+observations remain labelled last-known.
+On mobile the timeline fits the available width, with account names above each
+chart and unscaled readable date labels; it does not hide cycles in a horizontal
+scroller. The measured traffic chart retains its independent scrollable layout.
 
 It obtains snapshots and writes only through the authenticated
 `/v8/management/account-policy` APIs. Visible connected pages read the local
@@ -50,8 +59,8 @@ is off. Requests, tokens and latency are proxy measurements, not subscription
 allowance. Missing or ambiguous token measurements remain unavailable, not
 invented zero-token usage. Graphs show occupied measured buckets only; missing coverage is not
 plotted as zero. The timeline distinguishes ordinary weekly/short-window
-refreshes, reset expiry and the safety fallback. Out-of-range events retain
-their exact timestamps rather than masquerading as endpoint markers. Its
+refreshes, reset expiry and the safety fallback. Out-of-range events are never
+clamped to endpoint markers; full dates remain in account details. Its
 account rows follow the Accounts filters and current page.
 
 `account-policy.observations-enabled: true` enables bounded provider quota/inventory

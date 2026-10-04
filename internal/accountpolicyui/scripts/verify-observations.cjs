@@ -132,6 +132,38 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       await page.locator("#allowances").textContent(),
       /Last known weekly allowance/,
     );
+    // Check the painted geometry, not just the SVG's numeric attributes.
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const theme of ["light", "dark"]) {
+        await page.locator("#theme").selectOption(theme);
+        const ratios = await page
+          .locator(".weekly-cycle")
+          .evaluateAll((cycles) =>
+            cycles.map((cycle) => {
+              const fill = cycle.querySelector(".weekly-cycle-quota");
+              const outline = cycle.querySelector(".weekly-cycle-outline");
+              return (
+                fill.getBoundingClientRect().height /
+                outline.getBoundingClientRect().height
+              );
+            }),
+          );
+        assert.equal(ratios.length, 2);
+        assert.ok(ratios.some((ratio) => Math.abs(ratio - 0.49) < 0.0001));
+        assert.ok(ratios.some((ratio) => Math.abs(ratio - 0.93) < 0.0001));
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth),
+          width,
+        );
+        if (width === 390)
+          await page
+            .locator("#timeline")
+            .screenshot({
+              path: `output/playwright/weekly-quota-unequal-mobile-${theme}.png`,
+            });
+      }
+    }
     assert.equal(await metric("Last known saved resets").textContent(), "4");
     assert.match(
       await page.locator("#coverage").textContent(),

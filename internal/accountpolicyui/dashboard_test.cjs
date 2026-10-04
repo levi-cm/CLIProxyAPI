@@ -392,7 +392,7 @@ test("timeline axis retains full clock minutes instead of truncating timestamp t
     1,
     () => "05/10/2026, 18:48 GMT+2",
   );
-  assert.match(html, />05\/10 18:48<\/text>/);
+  assert.match(html, />05\/10 18:48<\/span>/);
 });
 
 test("weekly cycle spans seven days with elapsed time separate from allowance consumption", () => {
@@ -540,4 +540,84 @@ test("per-account allowance never hides unequal accounts behind an average", () 
   );
   assert.match(unobserved, /Unavailable/);
   assert.doesNotMatch(unobserved, /0%/);
+});
+
+test("timeline caps the main horizon at one week and summarizes later expiries without stretching it", () => {
+  const account = {
+    identity: identity("a"),
+    observed_at: new Date(now).toISOString(),
+    buckets: [
+      {
+        duration_seconds: 604800,
+        used_percent: 52,
+        reset_at: "2026-10-06T16:00:00Z",
+      },
+    ],
+    credits: [
+      {
+        id: "near",
+        status: "available",
+        details_known: true,
+        expires_at: "2026-10-05T16:00:00Z",
+      },
+      {
+        id: "later",
+        status: "available",
+        details_known: true,
+        expires_at: "2026-10-25T16:00:00Z",
+      },
+    ],
+  };
+  const html = dashboard.renderTimeline([account], {}, now, 30, (v) => v);
+  assert.match(html, /2026-10-11T16:00:00\.000Z/);
+  assert.doesNotMatch(html, /2026-10-25|2026-11-03/);
+  assert.equal((html.match(/class="timeline-marker expiry"/g) || []).length, 1);
+  assert.match(html, /1 later expiry/);
+  assert.match(html, /data-open-account="a"/);
+});
+
+test("weekly rectangle fill height tracks allowance, never elapsed time or opacity", () => {
+  const render = (used, observed = new Date(now).toISOString()) =>
+    dashboard.renderTimeline(
+      [
+        {
+          identity: identity("a"),
+          observed_at: observed,
+          buckets: [
+            {
+              duration_seconds: 604800,
+              used_percent: used,
+              reset_at: "2026-10-06T16:00:00Z",
+            },
+          ],
+        },
+      ],
+      {},
+      now,
+      7,
+      (v) => v,
+    );
+  for (const [used, height] of [
+    [52, 19.2],
+    [7, 37.2],
+    [100, 0],
+    [0, 40],
+  ]) {
+    const html = render(used);
+    const fill = html.match(/<rect[^>]*class="weekly-cycle-quota"[^>]*>/)?.[0];
+    assert.ok(fill, "A measured quota needs a proportional fill");
+    assert.ok(
+      Math.abs(Number(fill.match(/height="([^"]+)"/)[1]) - height) < 0.0001,
+    );
+    assert.match(html, /height="4"[^>]*class="weekly-cycle-elapsed"/);
+  }
+  for (const used of [null, -1, 101, "52", NaN]) {
+    assert.doesNotMatch(render(used), /class="weekly-cycle-quota"/);
+    assert.match(render(used), /allowance unavailable/i);
+  }
+  assert.doesNotMatch(
+    render(52, "2026-10-04T17:00:00Z"),
+    /class="weekly-cycle-quota"/,
+  );
+  assert.match(render(52, "2026-10-04T15:00:00Z"), /48% left \(last known\)/);
 });
