@@ -115,6 +115,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		return configCommit{}
 	}
 	policySettings := normalizedPolicySettings(newCfg.AccountPolicy)
+	if s.accountPolicy == nil && policySettings.Enabled {
+		log.WithField("code", "account_policy_unavailable").Warn("rejected enabling account policy through reload while its state is unavailable; repair the state and restart")
+		return configCommit{}
+	}
 	if s.accountPolicy != nil && policySettings.StateDir == "" {
 		policySettings.StateDir = s.accountPolicy.Settings().StateDir
 	}

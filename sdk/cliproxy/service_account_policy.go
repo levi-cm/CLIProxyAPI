@@ -71,6 +71,10 @@ func (s *Service) initializeAccountPolicy() error {
 		AcquireReset: s.coreManager.AcquirePolicyReset,
 	})
 	if err != nil {
+		if !settings.Enabled {
+			log.WithField("code", "account_policy_unavailable").Warn("disabled account policy state is unavailable; normal proxy startup continues and policy management remains unavailable")
+			return nil
+		}
 		return err
 	}
 	s.accountPolicy = policy
@@ -133,14 +137,15 @@ func (s *Service) startAccountPolicy(ctx context.Context) error {
 		return nil
 	}
 	settings := s.accountPolicy.Settings()
-	s.accountPolicyMu.Lock()
-	defer s.accountPolicyMu.Unlock()
-	if s.accountPolicy == nil || s.accountPolicyCancel != nil {
-		return nil
-	}
 	sink, err := accountpolicyusage.New(settings.StateDir, func() bool { return s.accountPolicy.Settings().Enabled })
 	if err != nil {
 		return &accountpolicy.Error{Code: "usage_state_unavailable", Message: "cannot initialize durable usage state"}
+	}
+	s.accountPolicyMu.Lock()
+	defer s.accountPolicyMu.Unlock()
+	if s.accountPolicy == nil || s.accountPolicyCancel != nil {
+		_ = sink.Close()
+		return nil
 	}
 	s.accountPolicyUsage = sink
 	usage.RegisterNamedPlugin("account-policy-durable-usage", sink)
