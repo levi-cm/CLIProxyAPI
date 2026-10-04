@@ -7,7 +7,7 @@ import (
 )
 
 func TestHandlerServesMaintainedAssetsWithoutCachingSecrets(t *testing.T) {
-	for _, asset := range []struct{ path, contentType string }{{"/account-policy.html", "text/html; charset=utf-8"}, {"/account-policy.js", "text/javascript; charset=utf-8"}, {"/account-policy.css", "text/css; charset=utf-8"}} {
+	for _, asset := range []struct{ path, contentType string }{{"/account-policy.html", "text/html; charset=utf-8"}, {"/account-policy.js", "text/javascript; charset=utf-8"}, {"/account-policy-dashboard.js", "text/javascript; charset=utf-8"}, {"/account-policy.css", "text/css; charset=utf-8"}, {"/account-policy-icon.svg", "image/svg+xml"}} {
 		r := httptest.NewRecorder()
 		Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, asset.path, nil))
 		if r.Code != http.StatusOK || r.Header().Get("Content-Type") != asset.contentType || r.Body.Len() == 0 {

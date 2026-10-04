@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -15,9 +16,10 @@ import (
 // PolicyRuntimeStatus exposes local execution accounting. UpstreamTransport is
 // unknown unless an executor explicitly reports its actual selected transport.
 type PolicyRuntimeStatus struct {
-	ActiveRequests int    `json:"active_requests"`
-	ActiveBindings int    `json:"active_bindings"`
-	Transport      string `json:"transport"`
+	ActiveRequests int        `json:"active_requests"`
+	ActiveBindings int        `json:"active_bindings"`
+	Transport      string     `json:"transport"`
+	LastSelectedAt *time.Time `json:"last_selected_at"`
 }
 
 type policyRequestLease struct {
@@ -107,6 +109,8 @@ func (l *policyRequestLease) selectAuth(id string) {
 		status := l.manager.policyRuntime[id]
 		status.ActiveRequests++
 		status.Transport = l.transport
+		selectedAt := time.Now().UTC()
+		status.LastSelectedAt = &selectedAt
 		l.manager.policyRuntime[id] = status
 	}
 }
@@ -183,6 +187,10 @@ func (m *Manager) PolicyRuntime(id string) PolicyRuntimeStatus {
 	}
 	m.policyRuntimeMu.Lock()
 	status := m.policyRuntime[id]
+	if status.LastSelectedAt != nil {
+		selectedAt := *status.LastSelectedAt
+		status.LastSelectedAt = &selectedAt
+	}
 	m.policyRuntimeMu.Unlock()
 	if status.Transport == "" {
 		status.Transport = "unknown"

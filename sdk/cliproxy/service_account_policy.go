@@ -159,6 +159,12 @@ func (s *Service) startAccountPolicy(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) accountPolicyUsageSink() *accountpolicyusage.Sink {
+	s.accountPolicyMu.Lock()
+	defer s.accountPolicyMu.Unlock()
+	return s.accountPolicyUsage
+}
+
 func (s *Service) closeAccountPolicyUsage(ctx context.Context) {
 	s.accountPolicyMu.Lock()
 	sink := s.accountPolicyUsage

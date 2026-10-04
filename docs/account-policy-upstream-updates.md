@@ -15,9 +15,9 @@ management panel remains upstream-owned and is not patched after download.
 | `sdk/cliproxy/auth/account_policy_*.go` | Native routing adapter, affinity evidence, request/reset leases and narrow cooldown recovery |
 | `sdk/cliproxy/service_account_policy.go` | Optional lifecycle/config/credential wiring and ownership checks |
 | `internal/api/server_account_policy.go` | Extension routes, assets and server options |
-| `internal/api/handlers/management/account_policy.go` | Authenticated v8 controls and sanitized diagnostics |
+| `internal/api/handlers/management/account_policy*.go` | Authenticated v8 controls, sanitized diagnostics and read-only dashboard telemetry |
 | `internal/accountpolicyui/` | Maintained embedded extension, without changing the upstream panel |
-| `internal/accountpolicyusage/` | Private bounded allowlisted usage records through the existing usage plugin interface |
+| `internal/accountpolicyusage/` | Private bounded allowlisted usage records and cached local dashboard aggregates through the existing usage plugin interface |
 | `cmd/proxyctl/`, `cmd/account-policy-preview/`, `companion/` | Operator CLI, fixture-only browser preview and separate fleet workflow |
 
 Keep business rules in these modules, not in upstream hooks. Avoid renaming,
@@ -34,6 +34,7 @@ moving, or reformatting unrelated upstream functions when updating the fork.
 | `sdk/cliproxy/auth/conductor*.go` | Account request leases, stream-lifetime release, optional relevant-quota refresh signal | Auth runtime/reset/recovery tests |
 | `sdk/cliproxy/usage/manager.go` | Additive completion-drain waiting; existing plugin signature unchanged | `go test ./sdk/cliproxy/usage` |
 | `internal/api/{server,server_options,server_management_v8}.go` and handler fields | Attach extension and call separate route registrars; upstream management middleware unchanged | `go test ./internal/api ./internal/api/handlers/management` |
+| `sdk/cliproxy/builder.go` and management handler fields | Optional account runtime source for `/v8/management/account-policy/dashboard`; activity available even when policy is off | Dashboard auth/no-write/runtime tests |
 | `sdk/config/` and `config.example.yaml` | Additive public aliases and commented optional configuration | Config round-trip tests |
 
 Some edits to struct fields cause necessary `gofmt` alignment changes. Treat those
@@ -54,7 +55,7 @@ blanket `--ours`/`--theirs` over these files.
 # Run remote add only if an upstream remote does not already exist.
 git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
 git fetch upstream --tags
-git worktree add -b update/cliproxy-UPSTREAM_VERSION ../CLIProxyAPI-update feat/account-policy
+git worktree add -b update/cliproxy-UPSTREAM_VERSION ../CLIProxyAPI-update main
 cd ../CLIProxyAPI-update
 git merge --no-ff --no-commit UPSTREAM_TAG
 ```
@@ -71,7 +72,7 @@ gofmt -w .
 git diff --check
 go test ./...
 go test -race ./internal/accountpolicy ./internal/accountpolicyusage ./internal/accountpolicyui ./internal/api ./internal/api/handlers/management ./sdk/cliproxy ./sdk/cliproxy/auth ./sdk/cliproxy/usage ./cmd/proxyctl ./cmd/account-policy-preview
-node --test internal/accountpolicyui/clock_test.cjs
+node --test internal/accountpolicyui/*test.cjs
 python3 -m unittest discover -s companion -v
 go build -o test-output ./cmd/server
 rm test-output
@@ -79,7 +80,9 @@ rm test-output
 
 5. Run the fixture preview and repeat Playwright login, ownership-confirmation,
    scheduling/cancellation, selected redemption, disabled/read-only states,
-   countdown/no-polling, DST and mobile checks. Re-run the real transport fixtures
+   countdown/no-provider-polling, DST and mobile checks. Verify simultaneous
+   serving accounts, stale/unavailable recovery, unsaved forms, measured graph
+   coverage and a 100-account paginated pool. Re-run the real transport fixtures
    on loopback and the intended private interface:
 
 ```bash

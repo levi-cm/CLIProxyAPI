@@ -318,6 +318,7 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithAccountPolicy(service.accountPolicy),
 		api.WithAccountPolicySettingsValidator(service.validateAccountPolicySettings),
+		api.WithAccountPolicyUsage(service.accountPolicyUsageSink),
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {

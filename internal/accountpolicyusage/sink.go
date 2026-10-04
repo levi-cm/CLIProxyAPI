@@ -27,16 +27,19 @@ var segmentNames = [...]string{"usage.jsonl", "usage.1.jsonl", "usage.2.jsonl"}
 // away from inference. Each accepted completion is synced before returning.
 // Only one sink should own a state directory in a running deployment.
 type Sink struct {
-	mu           sync.Mutex
-	dir          string
-	enabled      func() bool
-	root         *os.Root
-	closed       bool
-	maxFileBytes int64
-	ids          [3]map[string]struct{}
-	sizes        [3]int64
-	counts       [3]uint64
-	status       Status
+	mu                sync.Mutex
+	dir               string
+	enabled           func() bool
+	root              *os.Root
+	closed            bool
+	maxFileBytes      int64
+	ids               [3]map[string]struct{}
+	sizes             [3]int64
+	counts            [3]uint64
+	status            Status
+	dashboardLoaded   bool
+	dashboardValid    bool
+	dashboardSegments [3]map[int64]*dashboardBucket
 }
 
 // Status reports retained completions and runtime write health, without secrets.
@@ -182,6 +185,9 @@ func (s *Sink) append(record usage.Record) error {
 	s.counts[0]++
 	s.status.Written++
 	s.status.LastWriteAt = time.Now().UTC()
+	if s.dashboardLoaded && s.dashboardValid {
+		s.addDashboardEvent(0, item)
+	}
 	return nil
 }
 
@@ -218,6 +224,9 @@ func allowlisted(record usage.Record) event {
 }
 
 func (s *Sink) initialize() error {
+	// Recovery can truncate unfinished tails, so rebuild the read cache after it.
+	s.dashboardLoaded, s.dashboardValid = false, false
+	s.dashboardSegments = [3]map[int64]*dashboardBucket{}
 	if errCheck := checkDirectory(s.dir); errCheck != nil {
 		return errCheck
 	}
@@ -332,8 +341,10 @@ func (s *Sink) rotate() error {
 	}
 	for i := len(segmentNames) - 1; i > 0; i-- {
 		s.ids[i], s.sizes[i], s.counts[i] = s.ids[i-1], s.sizes[i-1], s.counts[i-1]
+		s.dashboardSegments[i] = s.dashboardSegments[i-1]
 	}
 	s.ids[0], s.sizes[0], s.counts[0] = make(map[string]struct{}), 0, 0
+	s.dashboardSegments[0] = nil
 	return s.syncDirectory()
 }
 

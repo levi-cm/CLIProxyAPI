@@ -3,44 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Account policy · CLIProxyAPI</title>
+    <meta
+      name="description"
+      content="Private account activity, usage history, quota deadlines and routing controls for CLIProxyAPI."
+    />
+    <title>Account dashboard · CLIProxyAPI</title>
+    <link rel="icon" href="/account-policy-icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/account-policy.css" />
+    <script defer src="/account-policy-dashboard.js"></script>
     <script defer src="/account-policy.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to dashboard</a>
     <header class="top">
-      <a href="/management.html">CLIProxyAPI</a
-      ><span class="crumb">/ Account policy</span
-      ><span id="connection" class="badge">Disconnected</span>
+      <a class="wordmark" href="/management.html">CLI<span>ProxyAPI</span></a
+      ><span class="crumb">Account dashboard</span>
+      <div class="header-status">
+        <span id="connection" class="badge">Disconnected</span
+        ><label class="theme-control"
+          >Theme<select id="theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select></label
+        >
+      </div>
     </header>
-    <main>
+    <main id="main">
       <div class="heading">
         <div>
-          <p class="eyebrow">ACCOUNT ROUTING & RESET CONTROLS</p>
-          <h1>Use the allowance that matters next.</h1>
+          <h1>Account dashboard</h1>
           <p class="muted">
-            Normal renewals, saved credits, and local routing state — each with
-            its own clock.
+            See account activity, allowance deadlines and how your next request
+            is routed.
           </p>
         </div>
-        <div class="heading-tools">
-          <label
-            >Display time zone<select id="zone">
-              <option value="Europe/Berlin">
-                Europe/Berlin · seasonal offset
-              </option>
-              <option value="GMT+2">GMT+2 · fixed offset</option>
-              <option value="UTC">UTC</option>
-            </select></label
-          >
-        </div>
+        <label class="zone-control"
+          >Display time zone<select id="zone">
+            <option value="Europe/Berlin">Europe/Berlin</option>
+            <option value="GMT+2">GMT+2 (fixed)</option>
+            <option value="UTC">UTC</option></select
+          ><span class="field-help"
+            >Changes display only. Provider expiry stays unchanged.</span
+          ></label
+        >
       </div>
-      <section id="login" class="panel">
-        <h2>Connect to management</h2>
-        <p>
-          Use the management key for this proxy. The client inference API key is
-          separate. Your key stays in this page's memory.
-        </p>
+      <section id="login" class="panel login-panel">
+        <div>
+          <h2>Connect to your proxy</h2>
+          <p class="muted">
+            Use the same management key as the main dashboard, not an inference
+            key. It stays in page memory only.
+          </p>
+          <p class="connection-origin" id="origin"></p>
+        </div>
         <form id="login-form" class="inline">
           <label
             >Management key<input
@@ -48,135 +64,395 @@
               type="password"
               autocomplete="off"
               required
-              placeholder="Management key" /></label
+              placeholder="Enter management key" /></label
           ><button type="submit">Connect</button>
         </form>
       </section>
       <div id="notice" role="status" aria-live="polite" hidden></div>
-      <p id="fixture-banner" class="panel" hidden>
-        Sanitized fixture preview only. These accounts and reset operations are
-        test data. No provider credentials are loaded and no live credit can be
-        redeemed. Management key: fixture-key.
+      <p id="fixture-banner" class="fixture-banner" hidden>
+        <strong>Fixture preview.</strong> All accounts, graphs and reset
+        operations are test data. No live credentials or credits are used.
       </p>
       <div id="workspace" hidden>
         <div class="toolbar">
           <div>
             <span id="summary" class="muted"></span
-            ><button id="reload" class="secondary">Reload snapshots</button
-            ><button id="refresh" class="secondary">
-              Refresh observations
-            </button>
+            ><span id="sample-status" class="muted">Waiting for activity</span>
           </div>
-          <div>
-            <button id="export" class="secondary">Export diagnostics</button
+          <div class="toolbar-actions">
+            <button id="reload" class="secondary">Reload snapshots</button
+            ><button id="refresh" class="secondary">Refresh quota</button
             ><button id="disconnect" class="quiet">Disconnect</button>
           </div>
         </div>
-        <section class="panel" id="policy">
+        <nav class="dashboard-nav" aria-label="Account dashboard">
+          <button type="button" data-view="overview" aria-current="page">
+            Overview</button
+          ><button type="button" data-view="accounts">Accounts</button
+          ><button type="button" data-view="routing">
+            Routing &amp; settings</button
+          ><button type="button" data-view="history">History</button
+          ><a href="/management.html">Main dashboard</a>
+        </nav>
+        <section data-section="overview">
+          <section class="serving-panel panel" aria-labelledby="serving-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="serving-title">Serving now</h2>
+                <p class="muted">
+                  Accounts actually handling requests. More than one can be
+                  active.
+                </p>
+              </div>
+              <span id="activity-badge" class="badge">Waiting</span>
+            </div>
+            <div id="serving" aria-live="polite"></div>
+            <p id="last-selected" class="muted"></p>
+          </section>
+          <div
+            id="metrics"
+            class="metrics-grid"
+            aria-label="Proxy usage statistics"
+          ></div>
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <h2>Usage over time</h2>
+                <p class="muted">
+                  Recorded provider attempts, not unique client requests or
+                  subscription allowance.
+                </p>
+              </div>
+              <div class="chart-controls">
+                <label
+                  >Time range<select id="range">
+                    <option value="1h">Last hour</option>
+                    <option value="24h" selected>Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                  </select></label
+                ><label
+                  >Measure<select id="measure">
+                    <option value="requests">Requests</option>
+                    <option value="total_tokens">Tokens</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <div id="usage-chart" class="chart-container" aria-busy="true">
+              <div
+                class="skeleton-chart"
+                aria-label="Loading usage history"
+              ></div>
+            </div>
+            <p id="coverage" class="field-help"></p>
+            <details class="chart-data">
+              <summary>View recorded values</summary>
+              <div id="chart-values"></div>
+            </details>
+          </section>
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <h2>Refresh &amp; reset timeline</h2>
+                <p class="muted">
+                  Weekly refresh, saved-reset expiry and expiry safety fallback
+                  have different meanings.
+                </p>
+              </div>
+              <label
+                >Timeline range<select id="timeline-range">
+                  <option value="1">Next 24 hours</option>
+                  <option value="7">Next 7 days</option>
+                  <option value="30" selected>Next 30 days</option>
+                </select></label
+              >
+            </div>
+            <div class="timeline-legend">
+              <span class="weekly">Weekly refresh</span
+              ><span class="window">Short-window refresh</span
+              ><span class="expiry">Manual reset expires</span
+              ><span class="guard">Expiry safety fallback</span>
+            </div>
+            <div id="timeline"></div>
+            <p class="field-help">
+              Expiring-only automation uses an eligible reset immediately at
+              confirmed weekly exhaustion if it expires before the next normal
+              refresh. The guard is a fallback if allowance remains. Hover or
+              focus a marker for exact times.
+            </p>
+          </section>
+        </section>
+        <section id="accounts-section" data-section="accounts" hidden>
           <div class="section-heading">
             <div>
-              <h2>Routing policy</h2>
+              <h2>Accounts</h2>
               <p class="muted">
-                Automation starts off. Save explicitly to change behavior.
+                Local activity works independently of policy. Quota and reset
+                details need fresh provider observations.
+              </p>
+            </div>
+            <span id="account-count" class="badge"></span>
+          </div>
+          <div class="account-filters">
+            <label
+              >Find account<input
+                id="search"
+                type="search"
+                placeholder="Alias, provider or account ID" /></label
+            ><label
+              >Provider<select id="provider-filter">
+                <option value="">All providers</option>
+              </select></label
+            ><label
+              >Status<select id="status-filter">
+                <option value="">All accounts</option>
+                <option value="active">Serving now</option>
+                <option value="held">On hold</option>
+                <option value="unknown">No quota observations</option>
+              </select></label
+            ><label
+              >Sort accounts<select id="sort">
+                <option value="expiry">Earliest reset expiry</option>
+                <option value="alias">Account name</option>
+              </select></label
+            ><label
+              >Per page<select id="page-size">
+                <option value="10">10 accounts</option>
+                <option value="25">25 accounts</option>
+                <option value="50">50 accounts</option>
+              </select></label
+            >
+          </div>
+          <div id="accounts"></div>
+          <div class="pagination">
+            <span id="page-summary" class="muted"></span>
+            <div>
+              <button id="previous-page" class="secondary" type="button">
+                Previous</button
+              ><button id="next-page" class="secondary" type="button">
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+        <section id="policy" class="panel" data-section="routing" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>Routing &amp; settings</h2>
+              <p class="muted">
+                Account selection and provider reset automation are separate
+                choices.
               </p>
             </div>
             <span id="policy-status" class="badge"></span>
           </div>
           <form id="settings-form">
-            <div class="settings-grid">
-              <label class="check"
-                ><input id="enabled" type="checkbox" /> Enable earliest deadline
-                policy</label
-              ><label
-                >Automation<select id="automation">
-                  <option value="off">Off · discover and display</option>
-                  <option value="notify">Notify · advice only</option>
+            <div class="settings-grid primary-settings">
+              <label class="setting-check"
+                ><span class="check"
+                  ><input id="enabled" type="checkbox" /> Earliest deadline
+                  routing</span
+                ><span class="field-help"
+                  >Prioritizes eligible accounts whose usable allowance expires
+                  first. Turn off to preserve normal proxy routing and stop
+                  policy discovery. Local activity remains visible.</span
+                ></label
+              >
+              <label
+                >Reset automation<select
+                  id="automation"
+                  aria-describedby="automation-help"
+                >
+                  <option value="off">Off: observe only</option>
+                  <option value="notify">Notify: advice only</option>
                   <option value="auto_expiring">
-                    Auto expiring · known expiry only
+                    Automatic: expiring resets
                   </option>
                   <option value="auto_all_saved">
-                    Auto all saved · reserve rules
-                  </option>
-                </select></label
-              ><label
-                >Fallback strategy<select id="fallback">
+                    Automatic: all saved resets
+                  </option></select
+                ><span id="automation-help" class="field-help"></span
+              ></label>
+              <label
+                >Fallback strategy<select
+                  id="fallback"
+                  aria-describedby="fallback-help"
+                >
                   <option value="round-robin">Round robin</option>
                   <option value="fill-first">Fill first</option>
                   <option value="weighted-round-robin">
                     Weighted round robin
-                  </option>
-                </select></label
-              ><label
-                >Affinity<select id="affinity">
-                  <option value="strict">Strict</option>
-                  <option value="deadline_at_boundary">
-                    Deadline at safe boundary
-                  </option>
-                </select></label
-              ><label
-                >Expiry guard (seconds)<input
-                  id="guard"
-                  type="number"
-                  min="0"
-                  step="1"
-                  required /></label
-              ><label
-                >Saved credit reserve<input
-                  id="saved-reserve"
-                  type="number"
-                  min="0"
-                  step="1"
-                  required /></label
-              ><label
-                >Force account<select id="force">
-                  <option value="">Automatic choice</option>
-                </select></label
-              ><label class="check"
-                ><input id="read-only" type="checkbox" /> Read only · no
-                provider writes</label
-              >
+                  </option></select
+                ><span id="fallback-help" class="field-help"></span
+              ></label>
             </div>
-            <p class="muted">
-              Force selection still respects authentication, quota, model
-              eligibility, holds, and reserves. Purchased resets are excluded
-              from automatic use.
+            <details class="advanced-settings">
+              <summary>Advanced routing &amp; reset safety</summary>
+              <div class="settings-grid">
+                <label
+                  >Conversation affinity<select
+                    id="affinity"
+                    aria-describedby="affinity-help"
+                  >
+                    <option value="strict">Strict: keep owning account</option>
+                    <option value="deadline_at_boundary">
+                      Move at a safe boundary
+                    </option></select
+                  ><span id="affinity-help" class="field-help"></span
+                ></label>
+                <label
+                  >Expiry guard (seconds)<input
+                    id="guard"
+                    type="number"
+                    min="0"
+                    max="86400"
+                    step="1"
+                    required
+                  /><span class="field-help"
+                    >Fallback deadline before saved-reset expiry. 600 means 10
+                    minutes early. Does not delay immediate redemption at
+                    exhaustion or change provider expiry.</span
+                  ></label
+                >
+                <label
+                  >Saved credit reserve<input
+                    id="saved-reserve"
+                    type="number"
+                    min="0"
+                    step="1"
+                    required
+                  /><span class="field-help"
+                    >Credits kept back under all-saved automation's
+                    non-expiring-credit rules. Expiring-only mode preserves
+                    resets expiring after the natural weekly refresh.</span
+                  ></label
+                >
+                <label
+                  >Force account<select id="force">
+                    <option value="">Automatic choice</option></select
+                  ><span class="field-help"
+                    >Requests one account for eligible new work. Cannot bypass
+                    quota, model restrictions, cooldown, holds or account-bound
+                    continuations. Clear to restore automatic choice.</span
+                  ></label
+                >
+                <label class="setting-check"
+                  ><span class="check"
+                    ><input id="read-only" type="checkbox" /> Read only</span
+                  ><span class="field-help"
+                    >Blocks provider reset writes, including manual redemption.
+                    Does not disable account observations or routing.</span
+                  ></label
+                >
+              </div>
+            </details>
+            <details class="settings-reference">
+              <summary>Explain every option</summary>
+              <dl>
+                <dt>Off / Notify</dt>
+                <dd>
+                  Off never redeems automatically. Notify supplies advice only.
+                  Observation runs when earliest-deadline policy is enabled.
+                </dd>
+                <dt>Automatic: expiring resets</dt>
+                <dd>
+                  At fresh, confirmed weekly exhaustion, immediately applies the
+                  earliest eligible saved reset if it expires before the next
+                  normal weekly refresh. No queued task or near-expiry condition
+                  is needed. Later-expiring resets stay saved. If allowance
+                  remains, the expiry guard is the safety fallback.
+                </dd>
+                <dt>Automatic: all saved resets</dt>
+                <dd>
+                  Also allows eligible non-expiring saved resets under demand
+                  and reserve rules. More permissive than expiring-only mode.
+                  Purchased reset classes remain excluded.
+                </dd>
+                <dt>Round robin / Fill first / Weighted round robin</dt>
+                <dd>
+                  Round robin rotates eligible credentials. Fill first uses the
+                  first eligible credential until unavailable. Weighted round
+                  robin uses configured credential weights. These are fallbacks
+                  for missing deadline evidence, not permission to bypass
+                  eligibility.
+                </dd>
+                <dt>Strict / Safe-boundary affinity</dt>
+                <dd>
+                  Strict keeps the owner. Safe-boundary affinity may migrate
+                  only replayable work between completed requests. Never
+                  transfers an active stream, live WebSocket or account-specific
+                  continuation blindly.
+                </dd>
+                <dt>Account hold / Allowance reserve</dt>
+                <dd>
+                  A hold excludes the account from new deadline-policy routing
+                  without interrupting active work. Allowance reserve is a
+                  percentage to keep unused, unlike the saved-credit count
+                  reserve.
+                </dd>
+                <dt>Freshness and eligible credits</dt>
+                <dd>
+                  Only fresh, account-owned ordinary-allowance evidence can
+                  authorize resets. Purchased credits, unknown IDs, missing
+                  coverage and expired credits are not automatically usable.
+                </dd>
+                <dt>Display time zone / Sorting / Filters</dt>
+                <dd>
+                  Berlin observes seasonal offsets; GMT+2 is fixed; UTC has no
+                  offset. Presentation options never change routing, remove
+                  accounts or alter provider timestamps.
+                </dd>
+                <dt>Refresh quota / Reload snapshots</dt>
+                <dd>
+                  Refresh quota explicitly requests provider observations.
+                  Reload snapshots and automatic activity updates read the proxy
+                  only, without repeatedly querying the provider.
+                </dd>
+                <dt>Use reset / Schedule / Clear local cooldown</dt>
+                <dd>
+                  Use reset redeems the selected owning account's credit after
+                  confirmation. Schedule records a local redemption time before
+                  provider expiry. Clear cooldown changes proxy routing state
+                  only, not provider quota or OAuth.
+                </dd>
+              </dl>
+            </details>
+            <p class="field-help">
+              Opening this page never starts automation. Automatic modes require
+              an explicit save and confirmation.
             </p>
-            <button type="submit">Save policy settings</button>
+            <div class="settings-save">
+              <button type="submit">Save settings</button
+              ><span id="unsaved" class="muted" hidden>Unsaved changes</span>
+            </div>
           </form>
         </section>
-        <div class="section-heading">
-          <div>
-            <h2>Accounts & manual reset expiry</h2>
-            <p class="muted">
-              Each credit belongs to the account and workspace shown here.
-            </p>
+        <section data-section="history" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>History &amp; diagnostics</h2>
+              <p class="muted">
+                Recorded selections and durable reset outcomes. A selection is
+                not proof an account is still serving.
+              </p>
+            </div>
+            <button id="export" class="secondary">Export diagnostics</button>
           </div>
-          <label
-            >Sort accounts<select id="sort">
-              <option value="expiry">Earliest manual reset expiry</option>
-              <option value="alias">Account alias</option>
-            </select></label
-          >
-        </div>
-        <div id="accounts"></div>
-        <section class="panel">
-          <h2>Local redemption schedules</h2>
-          <p class="muted">
-            A local schedule cannot change a provider's expiry.
-          </p>
-          <div id="schedules"></div>
-        </section>
-        <section class="panel">
-          <h2>Redemption history</h2>
-          <div id="operations"></div>
-        </section>
-        <section class="panel">
-          <h2>Routing decisions</h2>
-          <p class="muted">
-            Actual backend decisions include model eligibility and affinity.
-            Display advice below is not an inference selection.
-          </p>
-          <div id="decisions"></div>
+          <section class="panel">
+            <h3>Routing decisions</h3>
+            <div id="decisions"></div>
+          </section>
+          <section class="panel">
+            <h3>Local redemption schedules</h3>
+            <p class="field-help">
+              A local schedule cannot extend provider expiry.
+            </p>
+            <div id="schedules"></div>
+          </section>
+          <section class="panel">
+            <h3>Redemption history</h3>
+            <div id="operations"></div>
+          </section>
         </section>
       </div>
     </main>
@@ -191,8 +467,9 @@
       </form>
     </dialog>
     <footer>
-      Account policy is an optional native module.
-      <a href="/management.html">Open existing management panel</a>
+      Separate, maintained extension.
+      <a href="/management.html">Main dashboard</a
+      ><span>Management key remains in memory only.</span>
     </footer>
   </body>
 </html>

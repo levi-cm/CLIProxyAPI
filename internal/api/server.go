@@ -213,6 +213,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetAccountPolicy(optionState.accountPolicy)
 	s.mgmt.SetAccountPolicySettingsValidator(optionState.accountPolicyValidator)
+	s.mgmt.SetAccountPolicyUsage(optionState.accountPolicyUsage)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)

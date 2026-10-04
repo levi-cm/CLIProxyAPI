@@ -150,6 +150,35 @@
     },
     timer,
     busy = false;
+  const dashboard = window.PolicyDashboard;
+  let telemetry = {},
+    connectionEpoch = 0,
+    accountPage = 1,
+    settingsDirty = false,
+    lastActivityStatus = "unavailable";
+  let lastSnapshotAt = 0;
+  const accountDrafts = new Map();
+  function replaceMarkup(id, html) {
+    const element = $(id);
+    if (element.innerHTML === html) return;
+    const focused = element.contains(document.activeElement)
+      ? document.activeElement
+      : null;
+    const identity = focused?.dataset.focusKey || focused?.dataset.openAccount;
+    element.innerHTML = html;
+    if (focused) {
+      const replacement = [
+        ...element.querySelectorAll("[data-focus-key], [data-open-account]"),
+      ].find(
+        (el) => (el.dataset.focusKey || el.dataset.openAccount) === identity,
+      );
+      if (replacement) replacement.focus({ preventScroll: true });
+      else {
+        element.tabIndex = -1;
+        element.focus({ preventScroll: true });
+      }
+    }
+  }
   const API = "/v8/management/account-policy";
   let zone = "Europe/Berlin";
   const absolute = (value) => instant(value, zone),
@@ -158,6 +187,330 @@
       a.identity.alias || a.identity.account_id || a.identity.credential_id;
   const badge = (value, type = "") =>
     '<span class="badge ' + type + '">' + escape(value) + "</span>";
+  $("origin").textContent = "Proxy: " + window.location.origin;
+  function updateSettingHelp() {
+    for (const id of ["automation", "fallback", "affinity"])
+      $(id + "-help").textContent =
+        dashboard.help[id][$(id).value] ||
+        "Select an option to see its behavior.";
+  }
+  function filteredAccounts() {
+    return dashboard.pageAccounts(state.accounts, {
+      search: $("search").value,
+      provider: $("provider-filter").value,
+      status: $("status-filter").value,
+      sort: $("sort").value,
+      page: accountPage,
+      pageSize: Number($("page-size").value),
+    });
+  }
+  function changeView(view) {
+    document.querySelectorAll("[data-section]").forEach((section) => {
+      section.hidden = section.dataset.section !== view;
+    });
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      if (button.dataset.view === view)
+        button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
+  }
+  function renderOverview() {
+    const live = dashboard.activityView(
+      telemetry.activity,
+      telemetry.sampled_at,
+      Date.now(),
+    );
+    lastActivityStatus = live.status;
+    $("activity-badge").textContent =
+      live.status === "live"
+        ? live.requests
+          ? "Live activity"
+          : "Idle"
+        : live.status === "stale"
+          ? "Stale activity"
+          : "Activity unavailable";
+    $("activity-badge").className =
+      "badge " + (live.status === "live" ? "good" : "warn");
+    replaceMarkup(
+      "serving",
+      live.status !== "live"
+        ? '<p class="muted">' +
+            (live.status === "stale"
+              ? "Last activity sample is stale. Current serving accounts are unknown until the next successful update."
+              : "Current serving accounts are unavailable. Retained history is not live activity.") +
+            "</p>"
+        : live.active.length
+          ? '<div class="serving-list">' +
+            live.active
+              .map(
+                (a) =>
+                  '<button type="button" class="serving-account" data-open-account="' +
+                  attr(a.credential_id) +
+                  '"><div><strong>' +
+                  escape(a.alias || a.credential_id) +
+                  "</strong><small>" +
+                  escape(a.provider) +
+                  " · " +
+                  escape(a.credential_id) +
+                  "</small></div><span>" +
+                  escape(a.active_requests) +
+                  " active request" +
+                  (a.active_requests === 1 ? "" : "s") +
+                  "</span></button>",
+              )
+              .join("") +
+            "</div>"
+          : '<p class="muted">No accounts are serving a request right now.</p>',
+    );
+    $("last-selected").textContent = live.latest
+      ? "Last selected: " +
+        (live.latest.alias || live.latest.credential_id) +
+        " (" +
+        live.latest.credential_id +
+        ")" +
+        " at " +
+        absolute(live.latest.last_selected_at) +
+        ". This is history, not a currently active account."
+      : "No account selection recorded in this runtime yet.";
+    $("sample-status").textContent = telemetry.sampled_at
+      ? "Activity sampled " +
+        absolute(telemetry.sampled_at) +
+        "; updates every 5 seconds while visible"
+      : "Activity unavailable; retrying while visible";
+    const usage = telemetry.usage || {},
+      totals = usage.totals || {};
+    const ratio =
+      usage.available && totals.requests > 0
+        ? ((100 * totals.success) / totals.requests).toFixed(1) + "%"
+        : "Unavailable";
+    const weekly = state.accounts.flatMap((a) =>
+      (a.buckets || [])
+        .filter(
+          (b) =>
+            b.duration_seconds === 604800 &&
+            !b.model &&
+            (!b.scope || b.scope === "ordinary") &&
+            fresh(b.observed_at || a.observed_at, state.settings, Date.now()),
+        )
+        .map((b) => 100 - b.used_percent),
+    );
+    const rows = [
+      [
+        "Recorded attempts",
+        usage.available ? dashboard.number(totals.requests) : "Unavailable",
+        "Usage records; retries and additional models may count separately",
+      ],
+      [
+        "Measured tokens",
+        usage.available ? dashboard.number(totals.total_tokens) : "Unavailable",
+        totals.token_missing_requests > 0
+          ? dashboard.number(totals.token_missing_requests) +
+            " records lack token evidence; no total is inferred"
+          : "Not an exact quota measurement",
+      ],
+      ["Success rate", ratio, "From recorded completions"],
+      [
+        "Average latency",
+        usage.available && totals.average_latency_ms != null
+          ? dashboard.number(totals.average_latency_ms) + " ms"
+          : "Unavailable",
+        "Completed request duration",
+      ],
+      [
+        "Registered accounts",
+        dashboard.number(state.accounts.length),
+        "All pages and providers",
+      ],
+      [
+        "Active requests",
+        dashboard.number(live.requests),
+        "Multiple accounts can serve concurrently",
+      ],
+      [
+        "Weekly allowance left",
+        weekly.length
+          ? dashboard.number(
+              weekly.reduce((sum, n) => sum + n, 0) / weekly.length,
+            ) + "%"
+          : "Unavailable",
+        "Average of " + weekly.length + " fresh ordinary weekly observations",
+      ],
+      [
+        "Available saved resets",
+        state.accounts.some((a) => a.available_credits != null)
+          ? dashboard.number(
+              state.accounts.reduce(
+                (sum, a) => sum + (a.available_credits || 0),
+                0,
+              ),
+            )
+          : "Unavailable",
+        "Provider counts; details may be incomplete",
+      ],
+    ];
+    $("metrics").innerHTML = rows
+      .map(
+        ([label, value, help]) =>
+          '<div class="metric"><span class="metric-label">' +
+          escape(label) +
+          '</span><strong class="metric-value' +
+          (value === "Unavailable" ? " unavailable" : "") +
+          '">' +
+          escape(value) +
+          "</strong><small>" +
+          escape(help) +
+          "</small></div>",
+      )
+      .join("");
+    replaceMarkup(
+      "usage-chart",
+      dashboard.renderChart(usage, $("measure").value, absolute),
+    );
+    $("usage-chart").setAttribute("aria-busy", "false");
+    $("coverage").textContent = usage.coverage_start
+      ? "Retained observations: " +
+        absolute(usage.coverage_start) +
+        " to " +
+        absolute(usage.coverage_end) +
+        ". Gaps do not establish zero traffic. " +
+        (usage.collecting
+          ? "Collection is running."
+          : "Collection is currently off; retained history remains visible.")
+      : "No retained usage observations. Policy-enabled collection starts with real completions; earlier traffic cannot be reconstructed.";
+    const points = dashboard.chartSeries(usage, $("measure").value);
+    $("chart-values").innerHTML = points.length
+      ? '<table><caption>Recorded values in the selected time zone</caption><thead><tr><th scope="col">Bucket starts</th><th scope="col">Requests</th><th scope="col">Tokens</th></tr></thead><tbody>' +
+        points
+          .map(
+            (p) =>
+              "<tr><td>" +
+              escape(absolute(new Date(p.at).toISOString())) +
+              "</td><td>" +
+              escape(dashboard.number(p.requests)) +
+              "</td><td>" +
+              escape(dashboard.number(p.tokens)) +
+              "</td></tr>",
+          )
+          .join("") +
+        "</tbody></table>"
+      : '<p class="muted">No measured values to display.</p>';
+    const page = filteredAccounts();
+    replaceMarkup(
+      "timeline",
+      '<p class="field-help">Showing ' +
+        page.items.length +
+        " of " +
+        page.total +
+        " matching accounts, page " +
+        page.page +
+        " of " +
+        page.pages +
+        ". Search, filters and pages are in the Accounts view.</p>" +
+        dashboard.renderTimeline(
+          page.items,
+          state.settings,
+          Date.now(),
+          Number($("timeline-range").value),
+          absolute,
+        ),
+    );
+    $("summary").textContent =
+      state.accounts.length +
+      " registered account" +
+      (state.accounts.length === 1 ? "" : "s") +
+      "; quota policy " +
+      (state.settings.enabled ? "enabled" : "off");
+  }
+  function applyTelemetry(data) {
+    telemetry = data || {};
+    const live = dashboard.activityView(
+      telemetry.activity,
+      telemetry.sampled_at,
+      Date.now(),
+    );
+    state.accounts = dashboard
+      .mergeAccounts(state.observations || state.accounts, {
+        ...telemetry.activity,
+        available: live.status === "live",
+      })
+      .map((a) => ({
+        ...a,
+        control:
+          (state.settings.accounts || {})[a.identity.credential_id] || {},
+      }));
+    renderOverview();
+    // Never replace editable account forms while an operator is using them.
+    if (
+      !document.activeElement?.closest("#accounts") &&
+      !$("accounts").querySelector(".account-details[open]")
+    )
+      renderAccountList();
+    document.querySelectorAll("[data-runtime-count]").forEach((el) => {
+      const account = state.accounts.find(
+        (a) =>
+          a.identity.credential_id ===
+          el.closest("[data-account]").dataset.account,
+      );
+      if (account) el.textContent = dashboard.number(account.active_requests);
+    });
+    document.querySelectorAll("[data-runtime-status]").forEach((el) => {
+      const account = state.accounts.find(
+        (a) =>
+          a.identity.credential_id ===
+          el.closest("[data-account]").dataset.account,
+      );
+      if (!account) return;
+      el.textContent =
+        account.active_requests == null
+          ? "Activity unavailable"
+          : account.active_requests > 0
+            ? "Serving now"
+            : "Idle";
+      el.className = "badge " + (account.active_requests > 0 ? "good" : "");
+    });
+  }
+  const poller = dashboard.createPoller({
+    isPaused: () =>
+      !key ||
+      busy ||
+      document.hidden ||
+      $("workspace").hidden ||
+      $("confirm").open,
+    fetchSnapshot: async () => {
+      const data = await request("/dashboard?range=" + $("range").value);
+      if (Date.now() - lastSnapshotAt >= 30000) {
+        const [accounts, resets, decisions] = await Promise.all([
+          request("/accounts"),
+          request("/resets"),
+          request("/decisions"),
+        ]);
+        data.snapshots = { accounts, resets, decisions };
+      }
+      return data;
+    },
+    applySnapshot: (data) => {
+      if (data.snapshots) {
+        state.observations = data.snapshots.accounts.accounts || [];
+        state.settings = data.snapshots.accounts.settings || {};
+        state.operations = data.snapshots.resets.operations || [];
+        state.schedules = data.snapshots.resets.schedules || [];
+        state.decisions = data.snapshots.decisions.decisions || [];
+        lastSnapshotAt = Date.now();
+        settingsForm();
+        renderHistory();
+      }
+      applyTelemetry(data);
+    },
+    onError: () => {
+      telemetry = {
+        ...telemetry,
+        activity: { ...telemetry.activity, available: false },
+      };
+      applyTelemetry(telemetry);
+      $("sample-status").textContent =
+        "Activity refresh failed; retrying. Usage values are retained observations.";
+    },
+  });
   function notice(message, isError = false) {
     $("notice").textContent = message;
     $("notice").className = isError ? "error" : "";
@@ -202,6 +555,7 @@
     } finally {
       busy = false;
       document.body.removeAttribute("aria-busy");
+      if (key && !$("workspace").hidden) poller.refresh();
     }
   }
   async function confirm(title, detail, actionLabel = "Confirm") {
@@ -220,18 +574,44 @@
     });
   }
   async function load() {
+    const epoch = connectionEpoch;
     const [accounts, resets, decisions] = await Promise.all([
       request("/accounts"),
       request("/resets"),
       request("/decisions"),
     ]);
+    let data;
+    try {
+      data = await request("/dashboard?range=" + $("range").value);
+    } catch (_) {
+      data = {
+        activity: { available: false, accounts: [] },
+        usage: { available: false },
+      };
+    }
+    if (epoch !== connectionEpoch || !key) return false;
     state = {
       settings: accounts.settings || {},
       accounts: accounts.accounts || [],
+      observations: accounts.accounts || [],
       operations: resets.operations || [],
       schedules: resets.schedules || [],
       decisions: decisions.decisions || [],
     };
+    telemetry = data;
+    state.accounts = dashboard
+      .mergeAccounts(state.observations, {
+        ...data.activity,
+        available:
+          dashboard.activityView(data.activity, data.sampled_at, Date.now())
+            .status === "live",
+      })
+      .map((a) => ({
+        ...a,
+        control:
+          (state.settings.accounts || {})[a.identity.credential_id] || {},
+      }));
+    lastSnapshotAt = Date.now();
     render();
     $("login").hidden = true;
     $("workspace").hidden = false;
@@ -240,8 +620,11 @@
       ? "Fixture preview"
       : "Connected";
     $("connection").className = "badge good";
+    poller.start();
+    return true;
   }
   function settingsForm() {
+    if (settingsDirty) return;
     const s = state.settings;
     $("enabled").checked = !!s.enabled;
     $("automation").value = s.automation || "off";
@@ -267,6 +650,7 @@
       ? "Enabled · " + s.automation
       : "Disabled";
     $("policy-status").className = "badge " + (s.enabled ? "good" : "");
+    updateSettingHelp();
   }
   function earliest(account) {
     return Math.min(
@@ -300,6 +684,51 @@
             "outcome_unknown",
           ].includes(o.state),
       );
+    const activityBadge =
+      '<span data-runtime-status class="badge ' +
+      (a.active_requests > 0 ? "good" : "") +
+      '">' +
+      (a.active_requests == null
+        ? "Activity unavailable"
+        : a.active_requests > 0
+          ? "Serving now"
+          : "Idle") +
+      "</span>";
+    if (a.local_only)
+      return (
+        '<article class="account" data-account="' +
+        attr(id) +
+        '"><div class="account-header"><div><h3>' +
+        escape(alias(a)) +
+        '</h3><p class="account-identity">' +
+        escape(a.identity.provider) +
+        " · " +
+        escape(id) +
+        "</p></div>" +
+        activityBadge +
+        '</div><div class="account-meta">Active requests <span data-runtime-count>' +
+        escape(dashboard.number(a.active_requests)) +
+        '</span></div><p class="field-help">Quota, plan and reset expiry are unavailable until supported provider observations are collected. Local activity is independent of deadline routing.</p></article>'
+      );
+    const weeklyBucket = (a.buckets || []).find(
+      (b) =>
+        b.duration_seconds === 604800 &&
+        !b.model &&
+        (!b.scope || b.scope === "ordinary"),
+    );
+    const quotaFresh =
+      weeklyBucket &&
+      fresh(weeklyBucket.observed_at || a.observed_at, state.settings, now);
+    const quotaSummary =
+      '<div class="account-quota-summary"><span>Weekly allowance left <strong>' +
+      (quotaFresh
+        ? escape(dashboard.number(100 - weeklyBucket.used_percent)) + "%"
+        : "Unavailable") +
+      "</strong></span><span>Normal weekly refresh <strong>" +
+      escape(absolute(weeklyBucket?.reset_at)) +
+      "</strong></span><span>Saved resets <strong>" +
+      escape(dashboard.number(a.available_credits)) +
+      "</strong></span></div>";
     const credits = [...(a.credits || [])].sort(
       (x, y) =>
         (stamp(x.expires_at) || Infinity) - (stamp(y.expires_at) || Infinity),
@@ -324,6 +753,7 @@
       " · generation " +
       escape(a.identity.generation) +
       '</p></div><div class="account-status">' +
+      activityBadge +
       badge(a.status || "Unknown") +
       badge(
         a.eligible ? "Eligible" : "Ineligible",
@@ -334,9 +764,10 @@
       (a.writes_disabled ? badge("Provider writes disabled", "error") : "") +
       (pending ? badge(pending.state, "warn") : "") +
       '</div></div><div class="account-meta"><span>Bindings ' +
-      escape(a.active_bindings ?? 0) +
-      "</span><span>Active requests " +
-      escape(a.active_requests ?? 0) +
+      escape(dashboard.number(a.active_bindings)) +
+      "</span><span>Active requests <span data-runtime-count>" +
+      escape(dashboard.number(a.active_requests)) +
+      "</span>" +
       "</span><span>Actual transport: " +
       escape(a.transport || "unavailable") +
       '</span><span data-age="' +
@@ -350,15 +781,17 @@
           : "Stale / unknown inventory",
         fresh(a.inventory_observed_at, state.settings, now) ? "good" : "warn",
       ) +
-      '</span></div><p class="time">Last successful usage refresh: ' +
+      "</span></div>" +
+      quotaSummary +
+      '<p class="time">Last successful usage refresh: ' +
       escape(absolute(a.observed_at)) +
       "<br>Inventory refresh: " +
       escape(absolute(a.inventory_observed_at)) +
       " · " +
       (a.inventory_complete
         ? "Complete"
-        : "Incomplete — some credit details unavailable") +
-      "</p>" +
+        : "Incomplete: some credit details unavailable") +
+      '</p><details class="account-details"><summary>Quota, saved resets &amp; account controls</summary>' +
       (a.last_error
         ? '<p class="error time">Observation error: ' +
           escape(a.last_error) +
@@ -444,6 +877,19 @@
               c.status === "available" &&
               c.details_known &&
               stamp(c.expires_at) > now &&
+              (state.settings.automation !== "auto_expiring" ||
+                stamp(c.expires_at) <
+                  Math.min(
+                    ...(a.buckets || [])
+                      .filter(
+                        (b) =>
+                          b.duration_seconds === 604800 &&
+                          !b.model &&
+                          (!b.scope || b.scope === "ordinary"),
+                      )
+                      .map((b) => stamp(b.reset_at) || Infinity),
+                    Infinity,
+                  )) &&
               (state.settings.credit_types || []).includes(c.type);
           return (
             '<div class="credit-row" data-credit-id="' +
@@ -477,7 +923,7 @@
             escape(creditState(c, now)) +
             '</div><div class="time">' +
             (auto
-              ? "Planned automatic redemption: " +
+              ? "Expiry safety fallback: " +
                 escape(
                   absolute(
                     new Date(
@@ -486,7 +932,7 @@
                     ).toISOString(),
                   ),
                 ) +
-                " · subject to fresh evidence and covered usage"
+                ". Exhaustion can trigger earlier; backend eligibility remains authoritative."
               : "Automatic redemption: " +
                 escape(
                   state.settings.automation === "off"
@@ -523,9 +969,9 @@
         : "") +
       '<form class="schedule-form" hidden><label>Local schedule · ISO time with offset<input class="schedule-at" required placeholder="2026-10-05T05:50:00+02:00" aria-label="Scheduled redemption time"></label><button type="submit">Save schedule</button><button type="button" class="secondary" data-action="hide-schedule">Cancel</button></form></div><form class="account-controls"><label class="check"><input class="hold" type="checkbox" ' +
       (controls.hold ? "checked" : "") +
-      '> Hold this account</label><label>Allowance reserve (%)<input class="reserve" type="number" min="0" max="100" step="0.1" value="' +
+      '> Hold this account<span class="field-help">Exclude from new deadline-policy routing, without interrupting active requests.</span></label><label>Allowance reserve (%)<input class="reserve" type="number" min="0" max="100" step="0.1" value="' +
       attr(controls.reserve_percent || 0) +
-      '" required></label><button class="secondary" type="submit">Save account controls</button><button type="button" class="quiet" data-action="cooldown">Clear local cooldown</button></form></article>'
+      '" required><span class="field-help">Percentage to keep unused. Not the number of saved reset credits.</span></label><button class="secondary" type="submit">Save account controls</button><button type="button" class="quiet" data-action="cooldown">Clear local cooldown</button></form></details></article>'
     );
   }
   function bucketLabel(b) {
@@ -539,13 +985,32 @@
     const s = Math.max(0, Math.floor((now - n) / 1000));
     return s < 60 ? s + "s" : Math.floor(s / 60) + "m";
   }
-  function render() {
-    settingsForm();
-    const accounts = [...state.accounts].sort((a, b) =>
-      $("sort").value === "alias"
-        ? alias(a).localeCompare(alias(b))
-        : earliest(a) - earliest(b) || alias(a).localeCompare(alias(b)),
-    );
+  function renderAccountList() {
+    for (const article of $("accounts").querySelectorAll("[data-account]")) {
+      const draft = accountDrafts.get(article.dataset.account);
+      if (draft) {
+        draft.open = !!article.querySelector(".account-details")?.open;
+        draft.scheduleHidden =
+          !!article.querySelector(".schedule-form")?.hidden;
+      }
+    }
+    const provider = $("provider-filter").value;
+    const providers = [
+      ...new Set(
+        state.accounts.map((a) => a.identity.provider).filter(Boolean),
+      ),
+    ].sort();
+    $("provider-filter").innerHTML =
+      '<option value="">All providers</option>' +
+      providers
+        .map(
+          (p) => '<option value="' + attr(p) + '">' + escape(p) + "</option>",
+        )
+        .join("");
+    if (providers.includes(provider)) $("provider-filter").value = provider;
+    const page = filteredAccounts(),
+      accounts = page.items;
+    accountPage = page.page;
     const min = Math.min(...accounts.map(earliest));
     const groups = new Map();
     for (const a of accounts) {
@@ -571,12 +1036,47 @@
               .join(""),
         )
         .join("") ||
-      '<p class="panel muted">No account snapshots yet. Enable observation in the server configuration and refresh.</p>';
-    $("summary").textContent =
-      accounts.length +
-      " account" +
-      (accounts.length === 1 ? "" : "s") +
-      " · snapshot reads never poll the provider";
+      '<div class="panel empty-state"><strong>No matching accounts</strong><p>Clear the filters or register credentials in the main dashboard. Quota observation must be enabled explicitly.</p></div>';
+    $("account-count").textContent =
+      page.total + " matching / " + state.accounts.length + " registered";
+    $("page-summary").textContent =
+      "Page " +
+      page.page +
+      " of " +
+      page.pages +
+      "; " +
+      page.total +
+      " matching accounts";
+    $("previous-page").disabled = page.page <= 1;
+    $("next-page").disabled = page.page >= page.pages;
+    for (const article of $("accounts").querySelectorAll("[data-account]")) {
+      const draft = accountDrafts.get(article.dataset.account);
+      if (!draft || !article.querySelector(".account-details")) continue;
+      article.querySelector(".account-details").open = draft.open;
+      if (draft.controls) {
+        article.querySelector(".hold").checked = draft.controls.hold;
+        article.querySelector(".reserve").value = draft.controls.reserve;
+      }
+      if (draft.schedule) {
+        const form = article.querySelector(".schedule-form");
+        form.hidden = draft.scheduleHidden;
+        form.dataset.credit = draft.schedule.credit;
+        form.querySelector(".schedule-at").value = draft.schedule.at;
+      }
+      const hint = document.createElement("p");
+      hint.className = "field-help";
+      hint.textContent = "Unsaved account changes";
+      article.append(hint);
+    }
+  }
+  function render() {
+    settingsForm();
+    renderAccountList();
+    renderOverview();
+    renderHistory();
+    tick();
+  }
+  function renderHistory() {
     $("schedules").innerHTML =
       state.schedules
         .map(
@@ -642,12 +1142,19 @@
         )
         .join("") ||
       '<p class="muted">No inference selection recorded yet.</p>';
-    tick();
   }
   function tick() {
     clearTimeout(timer);
     const now = Date.now();
     let next = 60000;
+    if (key) {
+      next = 5000;
+      if (
+        dashboard.activityView(telemetry.activity, telemetry.sampled_at, now)
+          .status !== lastActivityStatus
+      )
+        applyTelemetry(telemetry);
+    }
     document.querySelectorAll("[data-expiry]").forEach((el) => {
       const c = {
         details_known: el.dataset.known === "true",
@@ -722,28 +1229,34 @@
             );
       });
       const el = article.querySelector(".inventory-status");
-      el.innerHTML = badge(
-        fresh(a.inventory_observed_at, state.settings, now)
-          ? "Fresh inventory"
-          : "Stale / unknown inventory",
-        fresh(a.inventory_observed_at, state.settings, now) ? "good" : "warn",
-      );
+      if (el)
+        el.innerHTML = badge(
+          fresh(a.inventory_observed_at, state.settings, now)
+            ? "Fresh inventory"
+            : "Stale / unknown inventory",
+          fresh(a.inventory_observed_at, state.settings, now) ? "good" : "warn",
+        );
     });
     timer = setTimeout(tick, next);
   }
   $("login-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    connectionEpoch++;
+    poller.stop();
     key = $("key").value;
     $("key").value = "";
     run(async () => {
-      await load();
-      notice(
-        "Connected. Provider automation remains at the server setting shown below.",
-      );
+      if (await load())
+        notice(
+          "Connected. Provider automation remains at the server setting shown below.",
+        );
     });
   });
   $("disconnect").addEventListener("click", () => {
+    connectionEpoch++;
+    poller.stop();
     key = "";
+    accountDrafts.clear();
     state = {
       settings: {},
       accounts: [],
@@ -751,10 +1264,24 @@
       schedules: [],
       decisions: [],
     };
+    telemetry = {};
+    settingsDirty = false;
+    $("unsaved").hidden = true;
     clearTimeout(timer);
     $("workspace").hidden = true;
     $("login").hidden = false;
-    $("accounts").replaceChildren();
+    for (const id of [
+      "accounts",
+      "serving",
+      "metrics",
+      "usage-chart",
+      "chart-values",
+      "timeline",
+      "decisions",
+      "schedules",
+      "operations",
+    ])
+      $(id).replaceChildren();
     $("connection").textContent = "Disconnected";
     $("connection").className = "badge";
     $("notice").hidden = true;
@@ -790,7 +1317,60 @@
     zone = $("zone").value;
     if (key) render();
   });
-  $("sort").addEventListener("change", () => render());
+  document.querySelector(".dashboard-nav").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-view]");
+    if (button) changeView(button.dataset.view);
+  });
+  $("serving").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-open-account]");
+    if (!button) return;
+    $("search").value = button.dataset.openAccount;
+    $("provider-filter").value = "";
+    $("status-filter").value = "";
+    accountPage = 1;
+    renderAccountList();
+    changeView("accounts");
+  });
+  for (const id of [
+    "search",
+    "provider-filter",
+    "status-filter",
+    "sort",
+    "page-size",
+  ])
+    $(id).addEventListener(id === "search" ? "input" : "change", () => {
+      accountPage = 1;
+      renderAccountList();
+      renderOverview();
+    });
+  $("previous-page").addEventListener("click", () => {
+    accountPage--;
+    renderAccountList();
+    renderOverview();
+  });
+  $("next-page").addEventListener("click", () => {
+    accountPage++;
+    renderAccountList();
+    renderOverview();
+  });
+  $("measure").addEventListener("change", renderOverview);
+  $("timeline-range").addEventListener("change", renderOverview);
+  $("range").addEventListener("change", () => poller.refresh());
+  $("theme").addEventListener("change", () => {
+    if ($("theme").value === "system")
+      document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.dataset.theme = $("theme").value;
+  });
+  $("settings-form").addEventListener("input", () => {
+    settingsDirty = true;
+    $("unsaved").hidden = false;
+    updateSettingHelp();
+  });
+  $("settings-form").addEventListener("change", () => {
+    settingsDirty = true;
+    $("unsaved").hidden = false;
+    updateSettingHelp();
+  });
   $("settings-form").addEventListener("submit", (e) => {
     e.preventDefault();
     run(async () => {
@@ -822,6 +1402,8 @@
           return;
       }
       await request("/settings", "PATCH", patch);
+      settingsDirty = false;
+      $("unsaved").hidden = true;
       await load();
       notice("Policy settings saved.");
     });
@@ -837,12 +1419,21 @@
       c = selectedCredit(a, button.dataset.credit);
     if (action === "hide-schedule") {
       article.querySelector(".schedule-form").hidden = true;
+      clearAccountDraft(a.identity.credential_id, "schedule");
       return;
     }
     if (action === "schedule") {
       const form = article.querySelector(".schedule-form");
       form.hidden = false;
       form.dataset.credit = button.dataset.credit;
+      const draft = accountDrafts.get(a.identity.credential_id) || {};
+      draft.schedule = {
+        at: form.querySelector("input").value,
+        credit: button.dataset.credit,
+      };
+      draft.open = true;
+      draft.scheduleHidden = false;
+      accountDrafts.set(a.identity.credential_id, draft);
       form.querySelector("input").focus();
       return;
     }
@@ -925,6 +1516,31 @@
       }
     });
   });
+  for (const event of ["input", "change"])
+    $("accounts").addEventListener(event, (e) => {
+      const article = e.target.closest("[data-account]");
+      if (!article) return;
+      const draft = accountDrafts.get(article.dataset.account) || {};
+      if (e.target.closest(".account-controls"))
+        draft.controls = {
+          hold: article.querySelector(".hold").checked,
+          reserve: article.querySelector(".reserve").value,
+        };
+      if (e.target.closest(".schedule-form"))
+        draft.schedule = {
+          at: article.querySelector(".schedule-at").value,
+          credit: article.querySelector(".schedule-form").dataset.credit,
+        };
+      draft.open = !!article.querySelector(".account-details")?.open;
+      draft.scheduleHidden = !!article.querySelector(".schedule-form")?.hidden;
+      accountDrafts.set(article.dataset.account, draft);
+    });
+  function clearAccountDraft(id, section) {
+    const draft = accountDrafts.get(id);
+    if (!draft) return;
+    delete draft[section];
+    if (!draft.controls && !draft.schedule) accountDrafts.delete(id);
+  }
   $("accounts").addEventListener("submit", (e) => {
     e.preventDefault();
     const form = e.target,
@@ -966,6 +1582,7 @@
           credit_id: c.id,
           at,
         });
+        clearAccountDraft(a.identity.credential_id, "schedule");
         await load();
         notice(
           "Local redemption schedule saved. Provider expiry is unchanged.",
@@ -979,6 +1596,7 @@
           },
         };
         await request("/settings", "PATCH", { accounts });
+        clearAccountDraft(a.identity.credential_id, "controls");
         await load();
         notice("Account hold and reserve saved.");
       }
@@ -997,12 +1615,21 @@
       });
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && key) tick();
+    if (!document.hidden && key) {
+      tick();
+      poller.refresh();
+    }
   });
   window.addEventListener("focus", () => {
-    if (key) tick();
+    if (key) {
+      tick();
+      poller.refresh();
+    }
   });
   window.addEventListener("pageshow", () => {
-    if (key) tick();
+    if (key) {
+      tick();
+      poller.refresh();
+    }
   });
 })();

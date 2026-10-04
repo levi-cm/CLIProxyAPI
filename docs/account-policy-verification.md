@@ -165,3 +165,54 @@ The original untracked specification and existing `.dockerignore` edit remain
 untouched. No custom change was made to executors or translators. Integration
 points and the upstream merge procedure are in
 [the update guide](account-policy-upstream-updates.md).
+
+## Account dashboard follow-up (2026-10-04)
+
+The separate extension was redesigned without patching the downloaded upstream
+panel or changing production policy configuration. An authenticated read-only
+v8 dashboard endpoint exposes all registered accounts' local request activity
+even when policy is disabled, and bounded retained usage-record aggregates.
+Last selection and active execution are explicitly different. Retry/additional
+model records are not presented as unique downstream client requests. Legacy
+missing/zero token components remain unavailable rather than fabricated values.
+
+Three independent read-only review seats checked backend correctness/privacy,
+frontend lifecycle/ownership and publication scope. Findings were fixed and
+re-reviewed: one-pass non-mutating binding sampling, sensitive header-fragment
+alias redaction, nullable token evidence, runtime-only account countdowns,
+whitelisted timeline advice, stable draft ownership and keyboard focus.
+
+Final follow-up gates:
+
+- Full uncached serial repository suite passed with Go 1.26 and package
+  concurrency 1. A final complete serial run also checked the last targeted
+  token-component fixes. Logs: `/tmp/cliproxy-dashboard-full-serial.log` and
+  `/tmp/cliproxy-dashboard-final-full.log`.
+- Focused dashboard/management/API/runtime tests and targeted concurrent
+  usage/runtime/management race tests passed. Required server compilation,
+  focused `go vet`, `gofmt`, Node syntax, Prettier and diff checks passed.
+- 19 deterministic JavaScript helper regressions passed, including complete
+  clock minutes on compact timeline axes.
+- Real Playwright regression script passed against the fixture-only preview:
+  100 accounts, ten pages, credential search and provider/status filters;
+  simultaneous serving accounts; measured charts; collapsed/open account drafts
+  surviving polling and display-zone changes; unsaved settings; stable keyboard
+  focus on serving accounts and timeline markers; stale/503 recovery; mixed
+  runtime-only providers; 390px/320px viewport without document overflow;
+  memory-only key and cleared DOM on disconnect.
+- The scheduled-credit draft regression switches October5 to October22 and
+  changes display zone without reverting selected ownership or entered time.
+  Visual control enablement is injected into a fixture read response only;
+  no backend policy save or credit consumption is used for that check.
+- Fixture counters stayed at zero provider refreshes, settings writes and reset
+  writes during passive browser tests. No provider credentials were loaded.
+- Authenticated Lighthouse snapshot accessibility audits scored 100 for all
+  four sections in both light and dark themes (eight snapshots). These are
+  automated accessibility checks, not a claim of exhaustive accessibility or a
+  navigation/performance score. Mobile charts scroll within their own regions.
+
+Repeatable browser and audit scripts are under
+`internal/accountpolicyui/scripts/`; both refuse non-fixture preflight data.
+Ignored screenshot evidence includes `dashboard-final-desktop.png` and
+`dashboard-final-mobile.png`. Previous baseline-race limitations above remain
+documented; no unrelated upstream test or production default was weakened.

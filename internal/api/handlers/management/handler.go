@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -64,6 +65,7 @@ type Handler struct {
 	pluginReleases          pluginReleaseCache
 	accountPolicy           *accountpolicy.Service
 	accountPolicyValidator  func(accountpolicy.Settings) error
+	accountPolicyUsage      func() *accountpolicyusage.Sink
 }
 
 type configReloadSnapshot struct {

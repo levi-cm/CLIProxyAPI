@@ -9,7 +9,7 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
-// Handler serves only the three registered assets. API authentication remains
+// Handler serves only the registered assets. API authentication remains
 // with the management router; the page collects its management key in memory.
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,8 +24,12 @@ func Handler() http.Handler {
 			filename, contentType = "account-policy.html", "text/html; charset=utf-8"
 		case "/account-policy.js":
 			filename, contentType = "account-policy.js", "text/javascript; charset=utf-8"
+		case "/account-policy-dashboard.js":
+			filename, contentType = "account-policy-dashboard.js", "text/javascript; charset=utf-8"
 		case "/account-policy.css":
 			filename, contentType = "account-policy.css", "text/css; charset=utf-8"
+		case "/account-policy-icon.svg":
+			filename, contentType = "account-policy-icon.svg", "image/svg+xml"
 		default:
 			http.NotFound(w, r)
 			return
