@@ -2,10 +2,26 @@ package config
 
 import (
 	"encoding/json"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestAccountPolicyZeroSDKConfigRemainsLoadable(t *testing.T) {
+	cfg := &Config{Port: 8317, CredentialInFlight: DefaultCredentialInFlightConfig()}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ParseConfigBytes(data)
+	if err != nil {
+		t.Fatalf("zero SDK configuration became invalid on marshal/load: %v", err)
+	}
+	if loaded.AccountPolicy.Enabled || loaded.AccountPolicy.Automation != "off" {
+		t.Fatal("generated configuration changed disabled policy defaults")
+	}
+}
 
 func policyJSON(t *testing.T, cfg *Config) map[string]any {
 	t.Helper()
