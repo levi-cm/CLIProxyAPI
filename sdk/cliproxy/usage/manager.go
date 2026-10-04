@@ -302,6 +302,7 @@ type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	done     chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -315,7 +316,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -330,7 +331,14 @@ func (m *Manager) Start(ctx context.Context) {
 			ctx = context.Background()
 		}
 		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
+		workerCtx, cancel := context.WithCancel(ctx)
+		m.mu.Lock()
+		m.cancel = cancel
+		closed := m.closed
+		m.mu.Unlock()
+		if closed {
+			cancel()
+		}
 		go m.run(workerCtx)
 	})
 }
@@ -341,14 +349,35 @@ func (m *Manager) Stop() {
 		return
 	}
 	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
 		m.mu.Lock()
+		cancel := m.cancel
 		m.closed = true
 		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		m.cond.Broadcast()
 	})
+}
+
+// Wait waits for Stop to finish dispatching all accepted records, including the
+// active plugin call. Context cancellation leaves the dispatcher draining. Sink
+// owners must not close their storage until Wait completes successfully.
+func (m *Manager) Wait(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Stop can precede Start when a service shuts down without executing a model.
+	m.Start(context.Background())
+	select {
+	case <-m.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Register appends a plugin to the delivery list.
@@ -418,6 +447,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -478,3 +508,6 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// WaitDefault waits for the default manager to drain after StopDefault.
+func WaitDefault(ctx context.Context) error { return DefaultManager().Wait(ctx) }
