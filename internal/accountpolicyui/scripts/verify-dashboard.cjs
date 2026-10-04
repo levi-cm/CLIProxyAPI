@@ -257,6 +257,10 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
     await page.getByRole("button", { name: "Disconnect", exact: true }).click();
     assert.equal(await page.locator("#workspace").isVisible(), false);
     assert.equal(await page.locator("#accounts article").count(), 0);
+    assert.equal(
+      await page.locator("#allowances .allowance-account").count(),
+      0,
+    );
     assert.deepEqual(errors, []);
     console.log(
       "PASS: 100-account pool, concurrent serving, graphs, drafts, keyboard focus, stale/failure recovery, runtime-only providers, mobile, no provider writes, memory-only key",

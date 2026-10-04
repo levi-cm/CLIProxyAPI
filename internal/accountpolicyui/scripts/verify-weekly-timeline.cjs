@@ -126,6 +126,11 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18319";
     for (const key of ["writes", "settings_writes", "provider_refreshes"])
       assert.equal(after[key], before[key]);
     assert.deepEqual(errors, []);
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+    assert.equal(
+      await page.locator("#allowances .allowance-account").count(),
+      0,
+    );
     console.log(
       "PASS: seven-day elapsed geometry, separate expiry lines, non-overlapping axes in all ranges/mobile, readable hover, keyboard account navigation, no writes",
     );

@@ -1288,6 +1288,7 @@
     $("login").hidden = false;
     for (const id of [
       "accounts",
+      "allowances",
       "serving",
       "metrics",
       "usage-chart",
