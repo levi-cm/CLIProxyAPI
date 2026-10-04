@@ -106,6 +106,9 @@ type Schedule struct {
 	ID           string    `json:"id"`
 	CredentialID string    `json:"credential_id"`
 	CreditID     string    `json:"credit_id"`
+	AccountID    string    `json:"account_id"`
+	WorkspaceID  string    `json:"workspace_id"`
+	Provider     string    `json:"provider"`
 	At           time.Time `json:"at"`
 }
 type ConsumeResult struct {

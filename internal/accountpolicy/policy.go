@@ -13,6 +13,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string               { return e.Code + ": " + e.Message }
+func (e *Error) FailureCode() string         { return e.Code }
 func policyError(code, message string) error { return &Error{Code: code, Message: message} }
 
 func DefaultSettings() Settings {

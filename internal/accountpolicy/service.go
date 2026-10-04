@@ -15,24 +15,26 @@ import (
 )
 
 type storedState struct {
-	Version    int                       `json:"version"`
-	Revision   uint64                    `json:"revision"`
-	Settings   Settings                  `json:"settings"`
-	Snapshots  map[string]Snapshot       `json:"snapshots"`
-	Operations []Operation               `json:"operations"`
-	Schedules  []Schedule                `json:"schedules"`
-	Decisions  []Decision                `json:"decisions"`
-	Recoveries map[string]recoveryRecord `json:"recoveries,omitempty"`
-	RetryAt    map[string]time.Time      `json:"retry_at,omitempty"`
+	Version       int                       `json:"version"`
+	Revision      uint64                    `json:"revision"`
+	Settings      Settings                  `json:"settings"`
+	Snapshots     map[string]Snapshot       `json:"snapshots"`
+	Operations    []Operation               `json:"operations"`
+	Schedules     []Schedule                `json:"schedules"`
+	Decisions     []Decision                `json:"decisions"`
+	Recoveries    map[string]recoveryRecord `json:"recoveries,omitempty"`
+	RetryAt       map[string]time.Time      `json:"retry_at,omitempty"`
+	WriteFailures map[string]string         `json:"write_failures,omitempty"`
 }
 type recoveryRecord struct {
 	Before Snapshot `json:"before"`
 	After  Snapshot `json:"after"`
 }
 type discoveryState struct {
-	Next     time.Time
-	Failures int
-	Identity Identity
+	Next      time.Time
+	Failures  int
+	Identity  Identity
+	Requested uint64
 }
 type Service struct {
 	mu        sync.RWMutex
@@ -43,6 +45,9 @@ type Service struct {
 	semaphore chan struct{}
 	stateDir  string
 	replica   bool
+	refreshMu sync.Mutex
+	requested map[string]uint64
+	wake      chan struct{}
 }
 
 func clone[T any](v T) T {
@@ -65,7 +70,7 @@ func NewService(opts Options) (*Service, error) {
 	if opts.Settings.Enabled && opts.Settings.StateDir == "" {
 		return nil, policyError("invalid_settings", "enabled account policy requires durable state directory")
 	}
-	s := &Service{opts: opts, stateDir: opts.Settings.StateDir, locks: map[string]chan struct{}{}, discovery: map[string]discoveryState{}, semaphore: make(chan struct{}, 2), state: storedState{Version: 1, Settings: clone(opts.Settings), Snapshots: map[string]Snapshot{}, Operations: []Operation{}, Schedules: []Schedule{}, Decisions: []Decision{}}}
+	s := &Service{opts: opts, stateDir: opts.Settings.StateDir, locks: map[string]chan struct{}{}, discovery: map[string]discoveryState{}, semaphore: make(chan struct{}, 2), requested: map[string]uint64{}, wake: make(chan struct{}, 1), state: storedState{Version: 1, Settings: clone(opts.Settings), Snapshots: map[string]Snapshot{}, Operations: []Operation{}, Schedules: []Schedule{}, Decisions: []Decision{}}}
 	seen := map[string]bool{}
 	for _, id := range opts.Accounts() {
 		if id.CredentialID == "" {
@@ -114,6 +119,17 @@ func NewService(opts Options) (*Service, error) {
 }
 
 func (s *Service) now() time.Time { return s.opts.Now().UTC() }
+
+// RequestRefresh coalesces provider quota and credential events without polling in inference handlers.
+func (s *Service) RequestRefresh(id string) {
+	s.refreshMu.Lock()
+	s.requested[id]++
+	s.refreshMu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
 func (s *Service) Settings() Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -280,6 +296,10 @@ func (s *Service) identity(id string) (Identity, error) {
 func sameIdentity(a, b Identity) bool {
 	return a.CredentialID == b.CredentialID && a.Provider == b.Provider && (a.AccountID == "" || a.AccountID == b.AccountID) && (a.WorkspaceID == "" || a.WorkspaceID == b.WorkspaceID) && a.Generation == b.Generation
 }
+
+func sameOwnership(a, b Identity) bool {
+	return a.CredentialID == b.CredentialID && a.Provider == b.Provider && a.AccountID == b.AccountID && a.WorkspaceID == b.WorkspaceID
+}
 func (s *Service) accountLock(ctx context.Context, id Identity) (func(), error) {
 	key := id.Provider + "\x00" + id.AccountID + "\x00" + id.WorkspaceID
 	if id.AccountID == "" {
@@ -350,6 +370,9 @@ func (s *Service) Refresh(ctx context.Context, id string) error {
 
 func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, error) {
 	started := s.now()
+	s.refreshMu.Lock()
+	requested := s.requested[id.CredentialID] + s.requested[""]
+	s.refreshMu.Unlock()
 	select {
 	case s.semaphore <- struct{}{}:
 	case <-ctx.Done():
@@ -379,6 +402,7 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	}
 	if errRead != nil {
 		tracking.Identity = id
+		tracking.Requested = requested
 		old.Identity = id
 		old.LastError = "provider discovery failed"
 		old.WritesDisabled = old.WritesDisabled || next.WritesDisabled
@@ -409,6 +433,10 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	next.Version = old.Version + 1
 	next.ObservedAt = next.ObservedAt.UTC()
 	next.InventoryObservedAt = next.InventoryObservedAt.UTC()
+	if code := s.state.WriteFailures[id.CredentialID]; code != "" {
+		next.WritesDisabled = true
+		next.LastError = code
+	}
 	for i := range next.Buckets {
 		next.Buckets[i].ObservedAt = next.Buckets[i].ObservedAt.UTC()
 		next.Buckets[i].ResetAt = next.Buckets[i].ResetAt.UTC()
@@ -418,6 +446,19 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 		if next.Credits[i].ExpiresAt != nil {
 			instant := next.Credits[i].ExpiresAt.UTC()
 			next.Credits[i].ExpiresAt = &instant
+		}
+	}
+	// A consume no_credit result is newer authoritative evidence than a lagging
+	// inventory GET. Keep the selected benefit unavailable until its details change.
+	for _, op := range s.state.Operations {
+		if op.CredentialID != id.CredentialID || !invalidatedCredit(op, next) {
+			continue
+		}
+		for i := range next.Credits {
+			if next.Credits[i].ID == op.CreditID {
+				next.Credits[i].Status = "unavailable"
+				next.InventoryComplete = false
+			}
 		}
 	}
 	s.state.Snapshots[id.CredentialID] = clone(next)
@@ -463,6 +504,7 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	}
 	tracking = discoveryState{Next: now.Add(interval + time.Duration(hash%6)*time.Second)}
 	tracking.Identity = id
+	tracking.Requested = requested
 	s.discovery[id.CredentialID] = tracking
 	errSave := s.persistLocked(before)
 	s.mu.Unlock()
@@ -536,10 +578,13 @@ func (s *Service) Schedule(id, creditID string, at time.Time) (Schedule, error) 
 	if !fresh(snapshot.InventoryObservedAt, now, settings.FreshnessSeconds) || snapshot.LastError != "" || snapshot.WritesDisabled {
 		return Schedule{}, policyError("stale_evidence", "fresh verified credit inventory is required")
 	}
+	if snapshot.Identity.AccountID == "" || snapshot.Identity.WorkspaceID == "" || snapshot.Identity.Provider == "" {
+		return Schedule{}, policyError("identity_mismatch", "scheduled resets require verified account ownership")
+	}
 	if !at.After(now) || !usableCredit(credit, settings, now) || credit.ExpiresAt != nil && !at.Before(*credit.ExpiresAt) {
 		return Schedule{}, policyError("invalid_schedule", "schedule must be before selected credit expiry and after current time")
 	}
-	sch := Schedule{ID: uuid.NewString(), CredentialID: id, CreditID: creditID, At: at.UTC()}
+	sch := Schedule{ID: uuid.NewString(), CredentialID: id, CreditID: creditID, AccountID: snapshot.Identity.AccountID, WorkspaceID: snapshot.Identity.WorkspaceID, Provider: snapshot.Identity.Provider, At: at.UTC()}
 	before := clone(s.state)
 	for _, old := range s.state.Schedules {
 		if old.CredentialID == id && old.CreditID == creditID {
@@ -625,6 +670,9 @@ func (s *Service) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			acquireOwner()
+			dispatch()
+		case <-s.wake:
 			acquireOwner()
 			dispatch()
 		}

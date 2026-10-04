@@ -3,7 +3,9 @@ package accountpolicy
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,11 +41,59 @@ func changedAllowance(before, after Snapshot) bool {
 }
 func weeklyExhausted(s Snapshot) bool {
 	for _, b := range s.Buckets {
-		if b.Scope == "ordinary" && b.DurationSeconds == 604800 && (b.UsedPercent >= 100 || b.Allowed != nil && !*b.Allowed) {
+		// Allowed is an aggregate scope permission; denial alone cannot identify an exhausted window.
+		if b.Scope == "ordinary" && b.DurationSeconds == 604800 && b.UsedPercent >= 100 && (b.Allowed == nil || !*b.Allowed) {
 			return true
 		}
 	}
 	return false
+}
+
+func sameCreditEvidence(a, b Credit) bool {
+	if a.ID != b.ID || a.Type != b.Type || a.Status != b.Status || a.DetailsKnown != b.DetailsKnown || !a.GrantedAt.Equal(b.GrantedAt) || (a.ExpiresAt == nil) != (b.ExpiresAt == nil) {
+		return false
+	}
+	if a.ExpiresAt != nil && !a.ExpiresAt.Equal(*b.ExpiresAt) {
+		return false
+	}
+	as, bs := slices.Clone(a.Scopes), slices.Clone(b.Scopes)
+	sort.Strings(as)
+	sort.Strings(bs)
+	return slices.Equal(as, bs)
+}
+func invalidatedCredit(op Operation, snapshot Snapshot) bool {
+	if op.State != "no_credit" || op.Before == nil {
+		return false
+	}
+	before, ok := findCredit(*op.Before, op.CreditID)
+	if !ok {
+		return true
+	}
+	after, ok := findCredit(snapshot, op.CreditID)
+	return !ok || sameCreditEvidence(before, after)
+}
+func permanentConsumeFailure(err error) string {
+	var coded interface{ FailureCode() string }
+	if !errors.As(err, &coded) {
+		return ""
+	}
+	code := coded.FailureCode()
+	if strings.Contains(code, "schema") || strings.Contains(code, "identity") || code == "workspace_identity_unsupported" || code == "automatic_writes_disabled" || code == "authentication_rejected" {
+		return code
+	}
+	return ""
+}
+func (s *Service) disableWrites(id, code string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.WriteFailures == nil {
+		s.state.WriteFailures = map[string]string{}
+	}
+	s.state.WriteFailures[id] = code
+	snapshot := s.state.Snapshots[id]
+	snapshot.WritesDisabled = true
+	snapshot.LastError = code
+	s.state.Snapshots[id] = snapshot
 }
 
 func naturalWeeklyReset(s Snapshot, now time.Time) time.Time {
@@ -93,6 +143,10 @@ func confirmedRecovery(op Operation, after Snapshot) bool {
 
 // Redeem requires explicit account and credit IDs. Repeated uncertain writes reuse one durable request ID.
 func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, error) {
+	return s.redeem(ctx, id, creditID, nil)
+}
+
+func (s *Service) redeem(ctx context.Context, id, creditID string, expectedOwner *Identity) (Operation, error) {
 	if id == "" || creditID == "" {
 		return Operation{}, policyError("unknown_credit", "explicit account and selected credit are required")
 	}
@@ -109,6 +163,9 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 	identity, err := s.identity(id)
 	if err != nil {
 		return Operation{}, err
+	}
+	if expectedOwner != nil && !sameOwnership(*expectedOwner, identity) {
+		return Operation{}, policyError("identity_mismatch", "scheduled reset account ownership changed")
 	}
 	unlock, err := s.accountLock(ctx, identity)
 	if err != nil {
@@ -188,6 +245,9 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 			if old.CredentialID != id {
 				continue
 			}
+			if old.CreditID == creditID && invalidatedCredit(old, snapshot) {
+				return old, policyError("conflict", "selected credit remains invalidated by provider no_credit result")
+			}
 			if old.State == "confirmed" && old.After != nil && (!snapshot.ObservedAt.After(old.After.ObservedAt) || !weeklyExhausted(snapshot)) {
 				return old, policyError("conflict", "renewed depletion evidence is required before another reset")
 			}
@@ -209,6 +269,9 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 	}
 	result, errConsume := s.opts.Provider.Consume(ctx, identity, op.RequestID, creditID)
 	if errConsume != nil {
+		if code := permanentConsumeFailure(errConsume); code != "" {
+			s.disableWrites(id, code)
+		}
 		op.State = "outcome_unknown"
 		op.Error = "provider consume outcome unknown"
 		delay := 30 * time.Second
@@ -249,6 +312,7 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 	default:
 		op.State = "outcome_unknown"
 		op.Error = "unrecognized provider consume result"
+		s.disableWrites(id, "consume_schema_changed")
 		_ = s.saveOperation(op)
 		return op, policyError("provider_error", "unrecognized provider consume result")
 	}
@@ -321,7 +385,10 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 		s.mu.RLock()
 		tracking, known := s.discovery[identity.CredentialID]
 		s.mu.RUnlock()
-		if !known || !sameIdentity(tracking.Identity, identity) || !tracking.Next.After(now) {
+		s.refreshMu.Lock()
+		requested := s.requested[identity.CredentialID] + s.requested[""]
+		s.refreshMu.Unlock()
+		if !known || !sameOwnership(tracking.Identity, identity) || tracking.Requested != requested || !tracking.Next.After(now) {
 			due = append(due, identity)
 		}
 	}
@@ -365,6 +432,15 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 		if sch.At.After(now) {
 			continue
 		}
+		if sch.AccountID == "" || sch.WorkspaceID == "" || sch.Provider == "" || sch.AccountID != account.AccountID || sch.WorkspaceID != account.WorkspaceID || sch.Provider != account.Provider {
+			op := Operation{ID: uuid.NewString(), RequestID: uuid.NewString(), CredentialID: sch.CredentialID, AccountID: sch.AccountID, WorkspaceID: sch.WorkspaceID, CreditID: sch.CreditID, State: "failed", Result: "identity_mismatch", Error: "scheduled account ownership changed", CreatedAt: now, UpdatedAt: now}
+			if err := s.saveOperation(op); err != nil {
+				errs = append(errs, err)
+			} else if err := s.CancelSchedule(sch.ID); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if snapshot, ok := s.Snapshot(sch.CredentialID); ok {
 			if credit, found := findCredit(snapshot, sch.CreditID); found && credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
 				op := Operation{ID: uuid.NewString(), RequestID: uuid.NewString(), CredentialID: sch.CredentialID, AccountID: snapshot.Identity.AccountID, WorkspaceID: snapshot.Identity.WorkspaceID, CreditID: sch.CreditID, State: "expired", CreatedAt: now, UpdatedAt: now, Before: &snapshot}
@@ -378,7 +454,8 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 				continue
 			}
 		}
-		if _, err := s.Redeem(ctx, sch.CredentialID, sch.CreditID); err != nil {
+		owner := Identity{CredentialID: sch.CredentialID, AccountID: sch.AccountID, WorkspaceID: sch.WorkspaceID, Provider: sch.Provider}
+		if _, err := s.redeem(ctx, sch.CredentialID, sch.CreditID, &owner); err != nil {
 			errs = append(errs, err)
 		} else {
 			_ = s.CancelSchedule(sch.ID)
@@ -442,6 +519,9 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 					continue
 				}
 				if op.CreditID == credit.ID && op.State == "nothing_to_reset" && op.Before != nil && !changedAllowance(*op.Before, snapshot) {
+					blocked = true
+				}
+				if op.CreditID == credit.ID && invalidatedCredit(op, snapshot) {
 					blocked = true
 				}
 				if op.State == "confirmed" && op.After != nil && (!snapshot.ObservedAt.After(op.After.ObservedAt) || !weeklyExhausted(snapshot)) {

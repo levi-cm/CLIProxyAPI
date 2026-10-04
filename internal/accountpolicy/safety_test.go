@@ -499,6 +499,14 @@ func TestExpiringCreditExhaustionBeforeNaturalResetNeedsNoDemand(t *testing.T) {
 			a.AvailableCredits = 1
 			a.Buckets[1].UsedPercent = tc.weekly
 			a.Buckets[0].UsedPercent = tc.short
+			allowed := tc.weekly < 100 && tc.short < 100
+			for i := range a.Buckets {
+				a.Buckets[i].Allowed = &allowed
+			}
+			a.Eligible = allowed
+			if !allowed {
+				a.Status = "quota_blocked"
+			}
 			p := &fakeProvider{snapshots: map[string]Snapshot{"a": a}}
 			settings := DefaultSettings()
 			settings.Enabled = true
@@ -523,6 +531,12 @@ func TestExpiringCreditExhaustionBeforeNaturalResetNeedsNoDemand(t *testing.T) {
 				after.AvailableCredits = 0
 				after.Buckets[1].UsedPercent = 10
 				after.Buckets[1].ResetAt = now.Add(7 * 24 * time.Hour)
+				allowed := true
+				for i := range after.Buckets {
+					after.Buckets[i].Allowed = &allowed
+				}
+				after.Eligible = true
+				after.Status = "ready"
 				p.snapshots["a"] = after
 				return ConsumeResult{Code: "reset", WindowsReset: 1}, nil
 			}
@@ -539,7 +553,7 @@ func TestExpiringCreditExhaustionBeforeNaturalResetNeedsNoDemand(t *testing.T) {
 	}
 }
 
-func TestCredentialChangeRefreshesBeforeIdleCadence(t *testing.T) {
+func TestRoutineGenerationChangeDoesNotPollButQuotaEventRefreshesImmediately(t *testing.T) {
 	now := testTime()
 	b := testSnapshot("b", 7)
 	p := &fakeProvider{snapshots: map[string]Snapshot{"b": b}}
@@ -559,8 +573,89 @@ func TestCredentialChangeRefreshesBeforeIdleCadence(t *testing.T) {
 	if err := s.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if reads != 0 {
+		t.Fatal("ordinary request generation triggered discovery before idle cadence")
+	}
+	s.RequestRefresh("b")
+	if err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if reads != 1 {
-		t.Fatal("changed credentials waited for idle discovery cadence")
+		t.Fatal("quota event failed to wake discovery immediately")
+	}
+}
+
+func TestNoCreditDoesNotRetryLaggingUnchangedInventoryWithNewUUID(t *testing.T) {
+	now := testTime()
+	b := testSnapshot("b", 7)
+	expiry := now.Add(9 * time.Minute)
+	b.Credits = []Credit{testCredit("first", &expiry)}
+	b.AvailableCredits = 1
+	p := &fakeProvider{snapshots: map[string]Snapshot{"b": b}, consume: func(Identity, string, string) (ConsumeResult, error) { return ConsumeResult{Code: "no_credit"}, nil }}
+	settings := DefaultSettings()
+	settings.Enabled = true
+	settings.Automation = "auto_expiring"
+	s, opts := fixtureService(t, p, &now, settings)
+	if err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.requests) != 1 {
+		t.Fatal("initial selected credit not submitted")
+	}
+	firstID := s.Operations()[0].RequestID
+	snapshot, _ := s.Snapshot("b")
+	if snapshot.Credits[0].Status == "available" || Evaluate(snapshot, "model", settings, now).Reason == "expiring_reset_credit" {
+		t.Fatal("provider no_credit left unavailable benefit eligible for deadline routing")
+	}
+	for i := 0; i < 3; i++ {
+		now = now.Add(time.Minute)
+		next := clone(b)
+		next.ObservedAt = now
+		next.InventoryObservedAt = now
+		for j := range next.Buckets {
+			next.Buckets[j].ObservedAt = now
+		}
+		p.snapshots["b"] = next
+		if err := s.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := NewService(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Tick(context.Background())
+	if len(p.requests) != 1 || len(s.Operations()) != 1 || s.Operations()[0].RequestID != firstID {
+		t.Fatal("lagging unavailable credit created another logical redemption")
+	}
+}
+
+func TestScheduleCannotRedeemAfterLogicalAccountMappingChanges(t *testing.T) {
+	now := testTime()
+	a := testSnapshot("mapped", 4)
+	expiry := now.Add(time.Hour)
+	a.Credits = []Credit{testCredit("same-opaque-id", &expiry)}
+	a.AvailableCredits = 1
+	p := &fakeProvider{snapshots: map[string]Snapshot{"mapped": a}}
+	settings := DefaultSettings()
+	settings.Enabled = true
+	s, _ := fixtureService(t, p, &now, settings)
+	if _, err := s.Schedule("mapped", "same-opaque-id", now.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(20 * time.Minute)
+	b := clone(a)
+	b.Identity.AccountID = "different-account"
+	b.Identity.WorkspaceID = "different-account"
+	b.ObservedAt = now
+	b.InventoryObservedAt = now
+	for i := range b.Buckets {
+		b.Buckets[i].ObservedAt = now
+	}
+	p.snapshots["mapped"] = b
+	_ = s.Tick(context.Background())
+	if len(p.requests) != 0 || len(s.Schedules()) != 0 || len(s.Operations()) != 1 || s.Operations()[0].State != "failed" || s.Operations()[0].Result != "identity_mismatch" {
+		t.Fatal("approval for original logical account was reused against replacement account")
 	}
 }
 
