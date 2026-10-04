@@ -105,7 +105,7 @@ type Config struct {
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
 	// AccountPolicy enables optional deadline routing and saved-reset automation.
-	AccountPolicy accountpolicy.Settings `yaml:"account-policy" json:"account-policy"`
+	AccountPolicy accountpolicy.Settings `yaml:"account-policy,omitempty" json:"account-policy"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
