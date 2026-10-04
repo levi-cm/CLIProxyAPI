@@ -570,6 +570,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
+			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID); errLease != nil {
+				return cliproxyexecutor.Response{}, errLease
+			}
 			execCtx = newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -782,6 +785,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
+			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID); errLease != nil {
+				return cliproxyexecutor.Response{}, errLease
+			}
 			execCtx = newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req

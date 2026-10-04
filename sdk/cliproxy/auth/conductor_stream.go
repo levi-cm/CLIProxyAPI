@@ -223,6 +223,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
+		if errLease := beginPolicyAttempt(ctx, opts, auth.ID); errLease != nil {
+			return nil, errLease
+		}
 		ctx = newUpstreamAttemptContext(ctx)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req

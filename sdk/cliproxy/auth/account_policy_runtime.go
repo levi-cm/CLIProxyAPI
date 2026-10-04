@@ -138,6 +138,14 @@ func finishPolicyAttempt(opts cliproxyexecutor.Options) {
 	}
 }
 
+func beginPolicyAttempt(ctx context.Context, opts cliproxyexecutor.Options, authID string) error {
+	if lease, ok := opts.Metadata[policyRequestLeaseMetadataKey].(*policyRequestLease); ok {
+		lease.selectAuth(authID)
+		return ctx.Err()
+	}
+	return nil
+}
+
 func (l *policyRequestLease) release() {
 	if l == nil {
 		return

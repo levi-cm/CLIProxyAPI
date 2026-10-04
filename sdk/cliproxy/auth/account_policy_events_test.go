@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestPolicyRefreshEventsOnlyQuotaAndCredentialMaterialChanges(t *testing.T) {
@@ -70,5 +71,37 @@ func TestPolicyPassiveDepletionEnqueuesOneRefresh(t *testing.T) {
 	m.MarkResult(ctx, Result{AuthID: "a", Provider: "codex", Success: true})
 	if count != 1 {
 		t.Fatalf("depletion transition caused %d refreshes, want one", count)
+	}
+}
+
+func TestPolicyRefreshCallbackRunsAfterRealBoundaryAndOutsideLocks(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(map[bool]string{false: "http", true: "stream"}[streaming], func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			if _, err := m.Register(WithSkipPersist(context.Background()), &Auth{ID: "a", Provider: "codex"}); err != nil {
+				t.Fatal(err)
+			}
+			opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+			publishSelectedAuthMetadata(opts.Metadata, &Auth{ID: "a", Provider: "codex"})
+			lease.streaming = streaming
+			count := 0
+			m.SetPolicyRefreshCallback(func(id string) {
+				if _, exists := m.GetByID(id); !exists {
+					t.Error("callback lost account")
+				}
+				if !m.PolicyIsIdle(id) {
+					t.Error("callback fired before request boundary")
+				}
+				count++
+			})
+			m.MarkResult(context.Background(), Result{AuthID: "a", Provider: "codex", Error: &Error{HTTPStatus: 429}, Options: opts})
+			if streaming && count != 0 {
+				t.Fatal("stream callback fired before end")
+			}
+			lease.release()
+			if count != 1 {
+				t.Fatalf("notifications=%d, want one", count)
+			}
+		})
 	}
 }

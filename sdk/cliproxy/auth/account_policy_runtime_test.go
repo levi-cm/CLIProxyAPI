@@ -4,11 +4,78 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+type policyPoolLeaseExecutor struct {
+	*openAICompatPoolExecutor
+	manager  *Manager
+	activeMu sync.Mutex
+	active   []int
+}
+
+func (e *policyPoolLeaseExecutor) observe(auth *Auth) {
+	e.activeMu.Lock()
+	defer e.activeMu.Unlock()
+	e.active = append(e.active, e.manager.PolicyRuntime(auth.ID).ActiveRequests)
+}
+
+func (e *policyPoolLeaseExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.observe(auth)
+	return e.openAICompatPoolExecutor.Execute(ctx, auth, req, opts)
+}
+
+func (e *policyPoolLeaseExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.observe(auth)
+	return e.openAICompatPoolExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+func (e *policyPoolLeaseExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.observe(auth)
+	return e.openAICompatPoolExecutor.ExecuteStream(ctx, auth, req, opts)
+}
+
+func TestPolicyRuntimeReacquiresLeaseForModelPoolRetry(t *testing.T) {
+	for _, transport := range []string{"http", "count", "stream"} {
+		t.Run(transport, func(t *testing.T) {
+			upstreamErr := &Error{HTTPStatus: http.StatusInternalServerError, Message: "first model failed"}
+			base := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey,
+				executeErrors:     map[string]error{"first": upstreamErr},
+				countErrors:       map[string]error{"first": upstreamErr},
+				streamFirstErrors: map[string]error{"first": upstreamErr},
+			}
+			manager := newOpenAICompatPoolTestManager(t, "public", []internalconfig.OpenAICompatibilityModel{{Name: "first", Alias: "public"}, {Name: "second", Alias: "public"}}, base)
+			executor := &policyPoolLeaseExecutor{openAICompatPoolExecutor: base, manager: manager}
+			manager.RegisterExecutor(executor)
+			request := cliproxyexecutor.Request{Model: "public"}
+			var err error
+			switch transport {
+			case "http":
+				_, err = manager.Execute(context.Background(), []string{openAICompatPoolProviderKey}, request, cliproxyexecutor.Options{})
+			case "count":
+				_, err = manager.ExecuteCount(context.Background(), []string{openAICompatPoolProviderKey}, request, cliproxyexecutor.Options{})
+			case "stream":
+				var stream *cliproxyexecutor.StreamResult
+				stream, err = manager.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, request, cliproxyexecutor.Options{})
+				if err == nil {
+					readOpenAICompatStreamPayload(t, stream)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor.activeMu.Lock()
+			defer executor.activeMu.Unlock()
+			if len(executor.active) != 2 || executor.active[0] != 1 || executor.active[1] != 1 {
+				t.Fatalf("active inference leases = %v, want [1 1]", executor.active)
+			}
+		})
+	}
+}
 
 // Selection must keep the account busy until the real response boundary.
 func TestPolicyRuntimeLeaseProtectsAccountUntilRelease(t *testing.T) {
