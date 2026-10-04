@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 // PolicyRuntimeStatus exposes local execution accounting. UpstreamTransport is
@@ -251,5 +253,26 @@ func (m *Manager) CredentialRoundTripper(id string) http.RoundTripper {
 	if !ok {
 		return nil
 	}
-	return m.roundTripperFor(a)
+	if strings.TrimSpace(a.ProxyURL) == "" {
+		if cfg := m.runtimeConfigSnapshot(); cfg != nil {
+			a.ProxyURL = cfg.ProxyURL
+		}
+	}
+	if rt := m.roundTripperFor(a); rt != nil {
+		return rt
+	}
+	if strings.TrimSpace(a.ProxyURL) != "" {
+		transport, _, err := proxyutil.BuildHTTPTransport(a.ProxyURL)
+		if err != nil {
+			return policyInvalidProxyTransport{}
+		}
+		return transport
+	}
+	return nil
+}
+
+type policyInvalidProxyTransport struct{}
+
+func (policyInvalidProxyTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, &accountpolicy.Error{Code: "invalid_proxy", Message: "configured credential proxy is invalid"}
 }

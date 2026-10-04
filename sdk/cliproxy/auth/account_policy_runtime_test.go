@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -32,6 +34,29 @@ func TestPolicyRuntimeLeaseProtectsAccountUntilRelease(t *testing.T) {
 	lease.release()
 	if !m.PolicyIsIdle("b") {
 		t.Fatal("completed account remains busy")
+	}
+}
+
+type policyProxyCapture struct{ proxy string }
+
+func (p *policyProxyCapture) RoundTripperFor(a *Auth) http.RoundTripper {
+	p.proxy = a.ProxyURL
+	return http.DefaultTransport
+}
+
+func TestPolicyCredentialTransportPreservesGlobalProxy(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.auths["a"] = &Auth{ID: "a", Provider: "codex"}
+	cfg := &internalconfig.Config{}
+	cfg.ProxyURL = "http://127.0.0.1:12345"
+	m.SetConfig(cfg)
+	provider := &policyProxyCapture{}
+	m.SetRoundTripperProvider(provider)
+	if m.CredentialRoundTripper("a") == nil || provider.proxy != "http://127.0.0.1:12345" {
+		t.Fatalf("discovery bypassed global proxy %q", provider.proxy)
+	}
+	if m.auths["a"].ProxyURL != "" {
+		t.Fatal("transport lookup mutated credential")
 	}
 }
 
