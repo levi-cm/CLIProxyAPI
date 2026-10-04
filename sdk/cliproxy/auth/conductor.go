@@ -212,6 +212,7 @@ type Manager struct {
 	policyRuntime           map[string]PolicyRuntimeStatus
 	policyPending           map[*policyRequestLease]policyRequestDemand
 	policyResetReservations map[string]chan struct{}
+	policyRefreshCallback   func(string)
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
