@@ -4,11 +4,17 @@
 // embed CLIProxyAPI without importing internal packages.
 package config
 
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+)
 
 type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
+
+type AccountPolicySettings = accountpolicy.Settings
+type AccountPolicyAccountControl = accountpolicy.AccountControl
 
 type ClientConfig = internalconfig.ClientConfig
 type CodexClientConfig = internalconfig.CodexClientConfig

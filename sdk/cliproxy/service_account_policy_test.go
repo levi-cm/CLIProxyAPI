@@ -68,14 +68,65 @@ func TestAccountPolicyRejectsNewSchedulerBeforeRuntimeAssignment(t *testing.T) {
 	}
 }
 
-type policyFixtureProvider struct{ discovered chan string }
+type policyFixtureProvider struct {
+	discovered chan string
+	snapshots  map[string]accountpolicy.Snapshot
+}
 
 func (p *policyFixtureProvider) Discover(_ context.Context, id accountpolicy.Identity) (accountpolicy.Snapshot, error) {
 	if p.discovered != nil {
 		p.discovered <- id.CredentialID
 	}
 	now := time.Now().UTC()
+	if snapshot, ok := p.snapshots[id.CredentialID]; ok {
+		snapshot.Identity = id
+		return snapshot, nil
+	}
 	return accountpolicy.Snapshot{Identity: id, Status: "healthy", Eligible: true, ObservedAt: now, InventoryObservedAt: now, InventoryComplete: true}, nil
+}
+
+func TestAccountPolicyAuthenticatedSettingsUpdateChangesRoutingImmediately(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	policyTestAuth(t, manager, "A", "account-A")
+	policyTestAuth(t, manager, "B", "account-B")
+	cfg := &config.Config{AccountPolicy: accountpolicy.DefaultSettings()}
+	cfg.AccountPolicy.StateDir = t.TempDir()
+	now := time.Now().UTC()
+	expiry := now.Add(24 * time.Hour)
+	fixture := &policyFixtureProvider{snapshots: map[string]accountpolicy.Snapshot{}}
+	for id, days := range map[string]int{"A": 4, "B": 7} {
+		fixture.snapshots[id] = accountpolicy.Snapshot{Status: "healthy", Eligible: true, ObservedAt: now, InventoryObservedAt: now, InventoryComplete: true, Buckets: []accountpolicy.Bucket{{Scope: "ordinary", DurationSeconds: 604800, UsedPercent: 20, ObservedAt: now, ResetAt: now.Add(time.Duration(days) * 24 * time.Hour)}}}
+	}
+	snapshotB := fixture.snapshots["B"]
+	snapshotB.Credits = []accountpolicy.Credit{{ID: "credit-B", Type: "codex_rate_limits", Status: "available", DetailsKnown: true, Scopes: []string{"ordinary"}, ExpiresAt: &expiry}}
+	fixture.snapshots["B"] = snapshotB
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath("config.yaml").WithCoreAuthManager(manager).WithAccountPolicyProvider(fixture).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.accountPolicy.Refresh(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	err = service.accountPolicy.MergeSettings(func(settings accountpolicy.Settings) (accountpolicy.Settings, error) {
+		settings.Enabled, settings.Automation = true, "notify"
+		return settings, service.validateAccountPolicySettings(settings)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := manager.Selector().Pick(context.Background(), "codex", "fixture-model", coreexecutor.Options{}, manager.List())
+	if err != nil || selected == nil || selected.ID != "B" {
+		t.Fatalf("enable did not activate deadline routing: %#v %v", selected, err)
+	}
+	settings := service.accountPolicy.Settings()
+	settings.Enabled = false
+	if err = service.accountPolicy.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	selected, err = manager.Selector().Pick(context.Background(), "codex", "fixture-model", coreexecutor.Options{}, manager.List())
+	if err != nil || selected == nil || selected.ID != "A" {
+		t.Fatalf("disable did not restore original round robin: %#v %v", selected, err)
+	}
 }
 func (*policyFixtureProvider) Consume(context.Context, accountpolicy.Identity, string, string) (accountpolicy.ConsumeResult, error) {
 	return accountpolicy.ConsumeResult{Code: "nothing_to_reset"}, nil
