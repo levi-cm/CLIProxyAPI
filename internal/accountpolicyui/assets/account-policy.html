@@ -1,11 +1,198 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Account policy · CLIProxyAPI</title><link rel="stylesheet" href="/account-policy.css"><script defer src="/account-policy.js"></script></head>
-<body><header class="top"><a href="/management.html">CLIProxyAPI</a><span class="crumb">/ Account policy</span><span id="connection" class="badge">Disconnected</span></header>
-<main><div class="heading"><div><p class="eyebrow">ACCOUNT ROUTING & RESET CONTROLS</p><h1>Use the allowance that matters next.</h1><p class="muted">Normal renewals, saved credits, and local routing state — each with its own clock.</p></div><div class="heading-tools"><label>Display time zone<select id="zone"><option value="Europe/Berlin">Europe/Berlin · seasonal offset</option><option value="GMT+2">GMT+2 · fixed offset</option><option value="UTC">UTC</option></select></label></div></div>
-<section id="login" class="panel"><h2>Connect to management</h2><p>Use the management key for this proxy. The client inference API key is separate. Your key stays in this page's memory.</p><form id="login-form" class="inline"><label>Management key<input id="key" type="password" autocomplete="off" required placeholder="Management key"></label><button type="submit">Connect</button></form></section>
-<div id="notice" role="status" aria-live="polite" hidden></div><p id="fixture-banner" class="panel" hidden>Sanitized fixture preview only. These accounts and reset operations are test data. No provider credentials are loaded and no live credit can be redeemed. Management key: fixture-key.</p>
-<div id="workspace" hidden><div class="toolbar"><div><span id="summary" class="muted"></span><button id="reload" class="secondary">Reload snapshots</button><button id="refresh" class="secondary">Refresh observations</button></div><div><button id="export" class="secondary">Export diagnostics</button><button id="disconnect" class="quiet">Disconnect</button></div></div>
-<section class="panel" id="policy"><div class="section-heading"><div><h2>Routing policy</h2><p class="muted">Automation starts off. Save explicitly to change behavior.</p></div><span id="policy-status" class="badge"></span></div><form id="settings-form"><div class="settings-grid"><label class="check"><input id="enabled" type="checkbox"> Enable earliest deadline policy</label><label>Automation<select id="automation"><option value="off">Off · discover and display</option><option value="notify">Notify · advice only</option><option value="auto_expiring">Auto expiring · known expiry only</option><option value="auto_all_saved">Auto all saved · reserve rules</option></select></label><label>Fallback strategy<select id="fallback"><option value="round-robin">Round robin</option><option value="fill-first">Fill first</option><option value="weighted-round-robin">Weighted round robin</option></select></label><label>Affinity<select id="affinity"><option value="strict">Strict</option><option value="deadline_at_boundary">Deadline at safe boundary</option></select></label><label>Expiry guard (seconds)<input id="guard" type="number" min="0" step="1" required></label><label>Saved credit reserve<input id="saved-reserve" type="number" min="0" step="1" required></label><label>Force account<select id="force"><option value="">Automatic choice</option></select></label><label class="check"><input id="read-only" type="checkbox"> Read only · no provider writes</label></div><p class="muted">Force selection still respects authentication, quota, model eligibility, holds, and reserves. Purchased resets are excluded from automatic use.</p><button type="submit">Save policy settings</button></form></section>
-<div class="section-heading"><div><h2>Accounts & manual reset expiry</h2><p class="muted">Each credit belongs to the account and workspace shown here.</p></div><label>Sort accounts<select id="sort"><option value="expiry">Earliest manual reset expiry</option><option value="alias">Account alias</option></select></label></div>
-<div id="accounts"></div><section class="panel"><h2>Local redemption schedules</h2><p class="muted">A local schedule cannot change a provider's expiry.</p><div id="schedules"></div></section><section class="panel"><h2>Redemption history</h2><div id="operations"></div></section><section class="panel"><h2>Routing decisions</h2><p class="muted">Actual backend decisions include model eligibility and affinity. Display advice below is not an inference selection.</p><div id="decisions"></div></section></div>
-</main><dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-detail"></p><div class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="confirm" id="confirm-action">Confirm</button></div></form></dialog><footer>Account policy is an optional native module. <a href="/management.html">Open existing management panel</a></footer></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Account policy · CLIProxyAPI</title>
+    <link rel="stylesheet" href="/account-policy.css" />
+    <script defer src="/account-policy.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <a href="/management.html">CLIProxyAPI</a
+      ><span class="crumb">/ Account policy</span
+      ><span id="connection" class="badge">Disconnected</span>
+    </header>
+    <main>
+      <div class="heading">
+        <div>
+          <p class="eyebrow">ACCOUNT ROUTING & RESET CONTROLS</p>
+          <h1>Use the allowance that matters next.</h1>
+          <p class="muted">
+            Normal renewals, saved credits, and local routing state — each with
+            its own clock.
+          </p>
+        </div>
+        <div class="heading-tools">
+          <label
+            >Display time zone<select id="zone">
+              <option value="Europe/Berlin">
+                Europe/Berlin · seasonal offset
+              </option>
+              <option value="GMT+2">GMT+2 · fixed offset</option>
+              <option value="UTC">UTC</option>
+            </select></label
+          >
+        </div>
+      </div>
+      <section id="login" class="panel">
+        <h2>Connect to management</h2>
+        <p>
+          Use the management key for this proxy. The client inference API key is
+          separate. Your key stays in this page's memory.
+        </p>
+        <form id="login-form" class="inline">
+          <label
+            >Management key<input
+              id="key"
+              type="password"
+              autocomplete="off"
+              required
+              placeholder="Management key" /></label
+          ><button type="submit">Connect</button>
+        </form>
+      </section>
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <p id="fixture-banner" class="panel" hidden>
+        Sanitized fixture preview only. These accounts and reset operations are
+        test data. No provider credentials are loaded and no live credit can be
+        redeemed. Management key: fixture-key.
+      </p>
+      <div id="workspace" hidden>
+        <div class="toolbar">
+          <div>
+            <span id="summary" class="muted"></span
+            ><button id="reload" class="secondary">Reload snapshots</button
+            ><button id="refresh" class="secondary">
+              Refresh observations
+            </button>
+          </div>
+          <div>
+            <button id="export" class="secondary">Export diagnostics</button
+            ><button id="disconnect" class="quiet">Disconnect</button>
+          </div>
+        </div>
+        <section class="panel" id="policy">
+          <div class="section-heading">
+            <div>
+              <h2>Routing policy</h2>
+              <p class="muted">
+                Automation starts off. Save explicitly to change behavior.
+              </p>
+            </div>
+            <span id="policy-status" class="badge"></span>
+          </div>
+          <form id="settings-form">
+            <div class="settings-grid">
+              <label class="check"
+                ><input id="enabled" type="checkbox" /> Enable earliest deadline
+                policy</label
+              ><label
+                >Automation<select id="automation">
+                  <option value="off">Off · discover and display</option>
+                  <option value="notify">Notify · advice only</option>
+                  <option value="auto_expiring">
+                    Auto expiring · known expiry only
+                  </option>
+                  <option value="auto_all_saved">
+                    Auto all saved · reserve rules
+                  </option>
+                </select></label
+              ><label
+                >Fallback strategy<select id="fallback">
+                  <option value="round-robin">Round robin</option>
+                  <option value="fill-first">Fill first</option>
+                  <option value="weighted-round-robin">
+                    Weighted round robin
+                  </option>
+                </select></label
+              ><label
+                >Affinity<select id="affinity">
+                  <option value="strict">Strict</option>
+                  <option value="deadline_at_boundary">
+                    Deadline at safe boundary
+                  </option>
+                </select></label
+              ><label
+                >Expiry guard (seconds)<input
+                  id="guard"
+                  type="number"
+                  min="0"
+                  step="1"
+                  required /></label
+              ><label
+                >Saved credit reserve<input
+                  id="saved-reserve"
+                  type="number"
+                  min="0"
+                  step="1"
+                  required /></label
+              ><label
+                >Force account<select id="force">
+                  <option value="">Automatic choice</option>
+                </select></label
+              ><label class="check"
+                ><input id="read-only" type="checkbox" /> Read only · no
+                provider writes</label
+              >
+            </div>
+            <p class="muted">
+              Force selection still respects authentication, quota, model
+              eligibility, holds, and reserves. Purchased resets are excluded
+              from automatic use.
+            </p>
+            <button type="submit">Save policy settings</button>
+          </form>
+        </section>
+        <div class="section-heading">
+          <div>
+            <h2>Accounts & manual reset expiry</h2>
+            <p class="muted">
+              Each credit belongs to the account and workspace shown here.
+            </p>
+          </div>
+          <label
+            >Sort accounts<select id="sort">
+              <option value="expiry">Earliest manual reset expiry</option>
+              <option value="alias">Account alias</option>
+            </select></label
+          >
+        </div>
+        <div id="accounts"></div>
+        <section class="panel">
+          <h2>Local redemption schedules</h2>
+          <p class="muted">
+            A local schedule cannot change a provider's expiry.
+          </p>
+          <div id="schedules"></div>
+        </section>
+        <section class="panel">
+          <h2>Redemption history</h2>
+          <div id="operations"></div>
+        </section>
+        <section class="panel">
+          <h2>Routing decisions</h2>
+          <p class="muted">
+            Actual backend decisions include model eligibility and affinity.
+            Display advice below is not an inference selection.
+          </p>
+          <div id="decisions"></div>
+        </section>
+      </div>
+    </main>
+    <dialog id="confirm">
+      <form method="dialog">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-detail"></p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary">Cancel</button
+          ><button value="confirm" id="confirm-action">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+    <footer>
+      Account policy is an optional native module.
+      <a href="/management.html">Open existing management panel</a>
+    </footer>
+  </body>
+</html>

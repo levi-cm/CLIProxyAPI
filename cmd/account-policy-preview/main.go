@@ -45,6 +45,8 @@ func newFixture() *fixture {
 	}
 	f.accounts[1].AvailableCredits = 3
 	f.accounts[1].Credits = []accountpolicy.Credit{{ID: "october-05", Type: "codex_rate_limits", Status: "available", Title: "Reset 1", ExpiresAt: ptr("2026-10-05T04:18:00Z"), DetailsKnown: true, Scopes: []string{"ordinary"}}, {ID: "october-22", Type: "codex_rate_limits", Status: "available", Title: "Reset 2", ExpiresAt: ptr("2026-10-22T20:27:00Z"), DetailsKnown: true, Scopes: []string{"ordinary"}}, {ID: "october-29", Type: "codex_rate_limits", Status: "available", Title: "Reset 3", ExpiresAt: ptr("2026-10-29T17:48:00Z"), DetailsKnown: true, Scopes: []string{"ordinary"}}}
+	// Deliberately unsorted inventory proves display sorting never changes selection.
+	f.accounts[1].Credits = []accountpolicy.Credit{f.accounts[1].Credits[2], f.accounts[1].Credits[0], f.accounts[1].Credits[1]}
 	unknown := f.accounts[0]
 	unknown.Identity = accountpolicy.Identity{CredentialID: "inventory-c", AccountID: "upstream-c", WorkspaceID: "workspace-c", Alias: "Inventory edge cases", Provider: "codex", Generation: 1}
 	unknown.ObservedAt = now.Add(-10 * time.Minute)
@@ -117,7 +119,8 @@ func (f *fixture) handler() http.Handler {
 			f.failure = body.Failure
 			if body.NearExpiry {
 				expiry := time.Now().UTC().Add(45 * time.Second)
-				f.accounts[1].Credits[0].ExpiresAt = &expiry
+				_, credit := f.selected("account-b", "october-05")
+				credit.ExpiresAt = &expiry
 			}
 			write(w, 200, map[string]bool{"fixture_only": true})
 			return
