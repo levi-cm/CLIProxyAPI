@@ -246,3 +246,39 @@ func TestDeadlineLCPAffinityMovesOnlyAtSafeBoundary(t *testing.T) {
 		t.Fatalf("safe LCP continuation=%v err=%v", next, err)
 	}
 }
+
+func TestDeadlineChildInheritanceRejectsChangedCredentialOwner(t *testing.T) {
+	for _, body := range []string{`{"previous_response_id":"resp-old-account","input":"continue"}`, `{"input":[{"type":"reasoning","encrypted_content":"old-account"}]}`} {
+		t.Run(body, func(t *testing.T) {
+			s, p, auths, _ := deadlineFixture(t)
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": []string{"parent"}}, OriginalRequest: []byte(`{"input":"parent full input"}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller"}}
+			parent, err := s.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+			if err != nil || parent.ID != "a" {
+				t.Fatalf("parent=%v err=%v", parent, err)
+			}
+			auths[0].RegistrationEpoch++
+			a := p.snapshots["a"]
+			a.Identity.AccountID = "replacement-owner"
+			a.Identity.WorkspaceID = "replacement-workspace"
+			p.snapshots["a"] = a
+			child := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": []string{"parent"}, "X-Claude-Code-Agent-Id": []string{"new-child"}}, OriginalRequest: []byte(body), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller"}}
+			if _, err = s.Pick(context.Background(), "codex", "gpt-5", child, auths); err == nil {
+				t.Fatal("child inherited replacement credential for old account state")
+			}
+		})
+	}
+}
+
+func TestDeadlineChildInheritanceRetainsHealthyParent(t *testing.T) {
+	s, p, auths, now := deadlineFixture(t)
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": []string{"parent"}}, OriginalRequest: []byte(`{"input":"parent full input"}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller"}}
+	if _, err := s.Pick(context.Background(), "codex", "gpt-5", opts, auths); err != nil {
+		t.Fatal(err)
+	}
+	addExpiringCredit(p, now)
+	child := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": []string{"parent"}, "X-Claude-Code-Agent-Id": []string{"child"}}, OriginalRequest: []byte(`{"input":"independent child full input"}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller"}}
+	got, err := s.Pick(context.Background(), "codex", "gpt-5", child, auths)
+	if err != nil || got.ID != "a" {
+		t.Fatalf("child=%v err=%v", got, err)
+	}
+}

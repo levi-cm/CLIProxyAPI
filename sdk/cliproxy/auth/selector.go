@@ -1144,6 +1144,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
 						// Child sessions inherit the parent binding without deadline migration.
+						if policy, ok := s.fallback.(interface {
+							PickParent(context.Context, string, string, cliproxyexecutor.Options, string, *Auth, []*Auth) (*Auth, error)
+						}); ok {
+							var errParent error
+							auth, errParent = policy.PickParent(ctx, provider, model, opts, fallbackID, auth, available)
+							if errParent != nil || auth == nil {
+								return auth, errParent
+							}
+						}
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
@@ -1152,6 +1161,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						}
 						return auth, nil
 					}
+				}
+			}
+			if !isSubagent || s.subagentAffinity {
+				if errUnavailable := s.checkUnavailableAffinity(ctx, provider, model, opts, cachedAuthID); errUnavailable != nil {
+					return nil, errUnavailable
 				}
 			}
 		}

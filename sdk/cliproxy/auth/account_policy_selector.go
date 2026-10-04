@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 // AccountPolicySource supplies immutable observations; selection performs no I/O.
@@ -356,7 +357,7 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 	idle := s.idle
 	s.mu.Unlock()
 	snapshot, _ := s.policy.Snapshot(bound.ID)
-	if exists && (binding.epoch != bound.RegistrationEpoch || binding.account != snapshot.Identity.AccountID || binding.workspace != snapshot.Identity.WorkspaceID) {
+	if exists && (binding.authID != bound.ID || binding.epoch != bound.RegistrationEpoch || binding.account != snapshot.Identity.AccountID || binding.workspace != snapshot.Identity.WorkspaceID) {
 		if err := r.PickUnavailable(ctx, provider, model, opts, bound.ID); err != nil {
 			return nil, err
 		}
@@ -383,6 +384,26 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 		}
 	}
 	s.decision(bound, provider, model, reason, e, false)
+	return bound, nil
+}
+
+// PickParent verifies the parent's credential generation and logical ownership
+// before inheritance. It deliberately does not apply deadline migration.
+func (r *deadlineRankingSelector) PickParent(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, parent string, bound *Auth, auths []*Auth) (*Auth, error) {
+	s := r.owner
+	key := policyAffinityNamespace(provider, opts) + "::" + cliproxysession.BoundSessionIdentity(parent) + "::" + canonicalModelKey(model)
+	s.mu.Lock()
+	binding, exists := s.bindings[key]
+	s.mu.Unlock()
+	snapshot, _ := s.policy.Snapshot(bound.ID)
+	if !exists || binding.authID != bound.ID || binding.epoch != bound.RegistrationEpoch || binding.account != snapshot.Identity.AccountID || binding.workspace != snapshot.Identity.WorkspaceID {
+		if err := r.PickUnavailable(ctx, provider, model, opts, bound.ID); err != nil {
+			return nil, err
+		}
+		return r.Pick(ctx, provider, model, opts, auths)
+	}
+	_, evaluations, _ := s.evaluate(provider, model, auths)
+	s.decision(bound, provider, model, "parent_affinity", evaluations[bound.ID], false)
 	return bound, nil
 }
 
