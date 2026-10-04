@@ -94,3 +94,42 @@ test("redeemed credit stops advertising a remaining redeemable expiry", () => {
     "Redeemed",
   );
 });
+
+test("provider writes reject purchased or unknown coverage and unhealthy accounts", () => {
+  const now = Date.parse("2026-10-04T16:00:00Z"),
+    settings = {
+      enabled: true,
+      credit_types: ["codex_rate_limits"],
+      freshness_seconds: 120,
+    };
+  const account = {
+    status: "healthy",
+    inventory_observed_at: "2026-10-04T16:00:00Z",
+    active_requests: 0,
+  };
+  const credit = {
+    id: "saved",
+    status: "available",
+    details_known: true,
+    type: "codex_rate_limits",
+    scopes: ["ordinary"],
+    expires_at: null,
+  };
+  assert.equal(ui.writeBlock(account, credit, settings, now), "");
+  assert.match(
+    ui.writeBlock(account, { ...credit, type: "purchased" }, settings, now),
+    /unsupported/i,
+  );
+  assert.match(
+    ui.writeBlock(account, { ...credit, scopes: [] }, settings, now),
+    /coverage/i,
+  );
+  assert.match(
+    ui.writeBlock({ ...account, status: "auth_failed" }, credit, settings, now),
+    /authentication/i,
+  );
+  assert.match(
+    ui.writeBlock(account, credit, { ...settings, enabled: false }, now),
+    /enable/i,
+  );
+});

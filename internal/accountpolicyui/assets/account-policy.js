@@ -81,6 +81,39 @@
   function selectedCredit(account, id) {
     return (account.credits || []).find((c) => c.id === id);
   }
+  function writeBlock(account, credit, settings, now) {
+    if (!settings.enabled)
+      return "Enable policy to use selected reset controls.";
+    if (settings.read_only || account.writes_disabled)
+      return "Provider writes disabled.";
+    if (
+      !["healthy", "ready", "quota", "quota_blocked", "cooldown"].includes(
+        account.status,
+      )
+    )
+      return "Account authentication or health is unavailable.";
+    if (!credit || !credit.id || !credit.details_known)
+      return "Credit details or selected ID unavailable.";
+    if (
+      credit.type !== "codex_rate_limits" ||
+      !(settings.credit_types || []).includes(credit.type)
+    )
+      return "Unsupported or unauthorized credit class.";
+    if (!(credit.scopes || []).includes("ordinary"))
+      return "Covered allowance unknown; ordinary coverage required.";
+    if (credit.status !== "available")
+      return "Credit is " + (credit.status || "unavailable") + ".";
+    if (
+      credit.expires_at != null &&
+      (stamp(credit.expires_at) === null || stamp(credit.expires_at) <= now)
+    )
+      return "Credit expired or expiry unavailable.";
+    if (!fresh(account.inventory_observed_at, settings, now))
+      return "Inventory stale; refresh observations before using a reset.";
+    if (account.active_requests > 0)
+      return "Waiting for active inference to complete.";
+    return "";
+  }
   const helpers = {
     instant,
     countdown,
@@ -88,6 +121,7 @@
     scheduleInstant,
     decisionFor,
     selectedCredit,
+    writeBlock,
   };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = helpers;
@@ -248,17 +282,7 @@
     );
   }
   function allowed(a, c, now) {
-    return (
-      !!state.settings.enabled &&
-      !!c.id &&
-      c.details_known &&
-      c.status === "available" &&
-      !a.writes_disabled &&
-      !state.settings.read_only &&
-      (c.expires_at == null || stamp(c.expires_at) > now) &&
-      fresh(a.inventory_observed_at, state.settings, now) &&
-      a.active_requests === 0
-    );
+    return writeBlock(a, c, state.settings, now) === "";
   }
   function renderAccount(a, first) {
     const now = Date.now(),
@@ -268,9 +292,13 @@
       pending = state.operations.find(
         (o) =>
           o.credential_id === id &&
-          ["prepared", "submitted", "verifying", "outcome_unknown"].includes(
-            o.state,
-          ),
+          [
+            "planned",
+            "prepared",
+            "submitted",
+            "verifying",
+            "outcome_unknown",
+          ].includes(o.state),
       );
     const credits = [...(a.credits || [])].sort(
       (x, y) =>
@@ -430,6 +458,9 @@
             escape(c.status || "Status unknown") +
             " · Affects " +
             escape((c.scopes || []).join(", ") || "unknown allowance") +
+            '<div class="time" data-credit-reason="' +
+            attr(c.id) +
+            '"></div>' +
             '</div></div><div><div class="time">Manual reset expires: ' +
             escape(
               c.details_known && c.expires_at == null
@@ -624,7 +655,10 @@
         status: el.dataset.status,
       };
       el.textContent = creditState(c, now);
-      const remaining = stamp(c.expires_at) - now;
+      const remaining =
+        c.details_known && stamp(c.expires_at) !== null
+          ? stamp(c.expires_at) - now
+          : Infinity;
       el.className =
         "countdown" +
         (remaining <= 0 && stamp(c.expires_at) !== null
@@ -663,15 +697,29 @@
       const pending = state.operations.some(
         (o) =>
           o.credential_id === a.identity.credential_id &&
-          ["prepared", "submitted", "verifying", "outcome_unknown"].includes(
-            o.state,
-          ),
+          [
+            "planned",
+            "prepared",
+            "submitted",
+            "verifying",
+            "outcome_unknown",
+          ].includes(o.state),
       );
       article.querySelectorAll("[data-credit]").forEach((b) => {
         b.disabled =
           !selectedCredit(a, b.dataset.credit) ||
           !allowed(a, selectedCredit(a, b.dataset.credit), now) ||
           pending;
+      });
+      article.querySelectorAll("[data-credit-reason]").forEach((el) => {
+        el.textContent = pending
+          ? "An unresolved redemption blocks further resets."
+          : writeBlock(
+              a,
+              selectedCredit(a, el.dataset.creditReason),
+              state.settings,
+              now,
+            );
       });
       const el = article.querySelector(".inventory-status");
       el.innerHTML = badge(
@@ -818,10 +866,21 @@
           ))
         )
           return;
-        const data = await request("/resets/redeem", "POST", {
-          credential_id: a.identity.credential_id,
-          credit_id: c.id,
-        });
+        let data;
+        try {
+          data = await request("/resets/redeem", "POST", {
+            credential_id: a.identity.credential_id,
+            credit_id: c.id,
+          });
+        } catch (error) {
+          // A failed response may still have a durable operation to display.
+          try {
+            await load();
+          } catch (_) {
+            /* Preserve the original error. */
+          }
+          throw error;
+        }
         await load();
         notice(
           "Redemption operation: " +
