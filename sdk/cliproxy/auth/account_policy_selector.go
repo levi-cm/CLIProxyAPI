@@ -33,11 +33,13 @@ type policyBinding struct {
 type EarliestDeadlineSelector struct {
 	policy           AccountPolicySource
 	fallback         Selector
+	fallbacks        map[string]Selector
 	disabledFallback Selector
 	affinity         *SessionAffinitySelector
 	now              func() time.Time
 	mu               sync.Mutex
 	idle             func(string) bool
+	modelResolver    func(*Auth, string) string
 	bindings         map[string]policyBinding
 }
 
@@ -46,6 +48,15 @@ func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, 
 		fallback = &RoundRobinSelector{}
 	}
 	s := &EarliestDeadlineSelector{policy: policy, fallback: fallback, now: time.Now, bindings: make(map[string]policyBinding)}
+	s.fallbacks = map[string]Selector{"round-robin": &RoundRobinSelector{}, "fill-first": &FillFirstSelector{}, "weighted-round-robin": &WeightedRoundRobinSelector{}}
+	switch fallback.(type) {
+	case *RoundRobinSelector:
+		s.fallbacks["round-robin"] = fallback
+	case *FillFirstSelector:
+		s.fallbacks["fill-first"] = fallback
+	case *WeightedRoundRobinSelector:
+		s.fallbacks["weighted-round-robin"] = fallback
+	}
 	if len(clocks) > 0 && clocks[0] != nil {
 		s.now = clocks[0]
 	}
@@ -58,6 +69,14 @@ func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, 
 func (s *EarliestDeadlineSelector) SetIdleCheck(check func(string) bool) {
 	s.mu.Lock()
 	s.idle = check
+	s.mu.Unlock()
+}
+
+// SetModelResolver keeps alias and reasoning-suffix quota checks aligned with
+// the manager's actual provider model, without changing requested model output.
+func (s *EarliestDeadlineSelector) SetModelResolver(resolve func(*Auth, string) string) {
+	s.mu.Lock()
+	s.modelResolver = resolve
 	s.mu.Unlock()
 }
 
@@ -187,7 +206,7 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 	}
 	// Missing client identity cannot safely share persistent conversation state.
 	if policyClientScope(opts) == "" {
-		if !policyRequestReplayable(ctx, opts) && ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata) != "" {
+		if policyRequestHasLocalState(opts) && pinnedAuthIDFromMetadata(opts.Metadata) == "" {
 			return nil, &Error{Code: "account_policy_client_unknown", Message: "client identity is required for account-specific continuation", HTTPStatus: 409}
 		}
 		return (&deadlineRankingSelector{owner: s}).Pick(ctx, provider, model, opts, eligible)
@@ -218,9 +237,15 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 
 func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Auth) ([]*Auth, map[string]accountpolicy.Evaluation, bool) {
 	settings := s.policy.Settings()
+	s.mu.Lock()
+	resolve := s.modelResolver
+	s.mu.Unlock()
 	now := s.now()
 	unknown := false
 	eligible := make([]*Auth, 0, len(auths))
+	if _, weighted := s.effectiveFallback().(*WeightedRoundRobinSelector); weighted {
+		auths = positiveWeightAuths(auths)
+	}
 	evaluations := make(map[string]accountpolicy.Evaluation, len(auths))
 	for _, a := range auths {
 		if a == nil {
@@ -233,7 +258,11 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		if snapshot.Identity.CredentialID != a.ID || snapshot.Identity.Provider != a.Provider {
 			continue
 		}
-		evaluation := accountpolicy.Evaluate(snapshot, model, settings, now)
+		quotaModel := canonicalModelKey(model)
+		if resolve != nil {
+			quotaModel = resolve(a, model)
+		}
+		evaluation := accountpolicy.Evaluate(snapshot, quotaModel, settings, now)
 		if !evaluation.Eligible {
 			continue
 		}
@@ -242,6 +271,16 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		unknown = unknown || !evaluation.Known
 	}
 	return eligible, evaluations, unknown
+}
+
+func (s *EarliestDeadlineSelector) effectiveFallback() Selector {
+	name := s.policy.Settings().Fallback
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fallback := s.fallbacks[name]; fallback != nil {
+		return fallback
+	}
+	return s.fallback
 }
 
 func (s *EarliestDeadlineSelector) decision(a *Auth, provider, model, reason string, e accountpolicy.Evaluation, fallback bool) {
@@ -264,8 +303,18 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 	if len(eligible) == 0 {
 		return nil, &Error{Code: "account_policy_unavailable", Message: "no account satisfies account policy", HTTPStatus: 503}
 	}
+	if policyRequestHasLocalState(opts) {
+		pinned := pinnedAuthIDFromMetadata(opts.Metadata)
+		for _, a := range eligible {
+			if pinned != "" && a.ID == pinned {
+				s.decision(a, provider, model, "explicit_continuation_owner", evaluations[a.ID], false)
+				return a, nil
+			}
+		}
+		return nil, &Error{Code: "account_policy_owner_unknown", Message: "account-specific continuation requires an established binding or explicit account owner", HTTPStatus: 409}
+	}
 	if unknown {
-		a, err := s.fallback.Pick(ctx, provider, model, opts, eligible)
+		a, err := s.effectiveFallback().Pick(ctx, provider, model, opts, eligible)
 		s.decision(a, provider, model, "missing_or_stale_evidence", accountpolicy.Evaluation{}, true)
 		return a, err
 	}
@@ -343,9 +392,38 @@ func policyRequestReplayable(ctx context.Context, opts cliproxyexecutor.Options)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) {
 		return false
 	}
-	for _, key := range []string{cliproxyexecutor.ExecutionSessionMetadataKey, "turn_state", "previous_response_id", "encrypted_reasoning"} {
+	if policyRequestHasLocalState(opts) {
+		return false
+	}
+	for _, key := range []string{cliproxyexecutor.ExecutionSessionMetadataKey} {
 		if v, ok := opts.Metadata[key]; ok && v != nil && v != "" {
 			return false
+		}
+	}
+	var root map[string]any
+	if json.Unmarshal(opts.OriginalRequest, &root) != nil {
+		return false
+	}
+	if input, ok := root["input"]; ok {
+		switch v := input.(type) {
+		case string:
+			return strings.TrimSpace(v) != ""
+		case []any:
+			return len(v) > 0
+		}
+	}
+	if messages, ok := root["messages"].([]any); ok {
+		return len(messages) > 0
+	}
+	return false
+}
+
+// Transport/session identifiers alone do not imply stateful input: a new
+// websocket with full input still needs its first account assignment.
+func policyRequestHasLocalState(opts cliproxyexecutor.Options) bool {
+	for _, key := range []string{"turn_state", "previous_response_id", "encrypted_reasoning", "encrypted_content"} {
+		if v, ok := opts.Metadata[key]; ok && v != nil && v != "" {
+			return true
 		}
 	}
 	var root map[string]any
@@ -382,19 +460,5 @@ func policyRequestReplayable(ctx context.Context, opts cliproxyexecutor.Options)
 		}
 		return false
 	}
-	if unsafe(root) {
-		return false
-	}
-	if input, ok := root["input"]; ok {
-		switch v := input.(type) {
-		case string:
-			return strings.TrimSpace(v) != ""
-		case []any:
-			return len(v) > 0
-		}
-	}
-	if messages, ok := root["messages"].([]any); ok {
-		return len(messages) > 0
-	}
-	return false
+	return unsafe(root)
 }

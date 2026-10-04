@@ -1244,7 +1244,19 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
-			return auth, true, nil
+			boundID := auth.ID
+			selected, errBound := s.pickBound(ctx, provider, model, opts, auth, available)
+			if errBound != nil || selected == nil {
+				return selected, true, errBound
+			}
+			if selected.ID != boundID {
+				// Only a policy-approved completed boundary may replace this owner.
+				s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, selected.ID)
+			}
+			return selected, true, nil
+		}
+		if errUnavailable := s.checkUnavailableAffinity(ctx, provider, model, opts, match.AuthID); errUnavailable != nil {
+			return nil, true, errUnavailable
 		}
 	}
 

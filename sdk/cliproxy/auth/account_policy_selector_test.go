@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type policyTestSource struct {
@@ -167,5 +168,81 @@ func TestDeadlineAffinityIsolatesClientsAndUnsafeUnavailable(t *testing.T) {
 	p.settings.Accounts["a"] = accountpolicy.AccountControl{Hold: true}
 	if _, err = s.Pick(context.Background(), "codex", "gpt-5", opts, auths); err == nil {
 		t.Fatal("unsafe unavailable continuation changed account")
+	}
+}
+
+func TestDeadlineAffinityRejectsUnknownOwnerContinuation(t *testing.T) {
+	for _, body := range []string{`{"previous_response_id":"resp-owned-elsewhere","input":"continue"}`, `{"input":[{"type":"reasoning","encrypted_content":"opaque"}]}`, `{"turn_state":"opaque","input":"continue"}`} {
+		t.Run(body, func(t *testing.T) {
+			s, _, auths, _ := deadlineFixture(t)
+			opts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": []string{"new"}}, OriginalRequest: []byte(body), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "client-1"}}
+			if _, err := s.Pick(context.Background(), "codex", "gpt-5", opts, auths); err == nil {
+				t.Fatal("unknown account owner accepted account-specific continuation")
+			}
+		})
+	}
+}
+
+func TestDeadlineAffinityAllowsNewWebsocketWithFullInput(t *testing.T) {
+	s, p, auths, now := deadlineFixture(t)
+	addExpiringCredit(p, now)
+	opts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": []string{"new"}}, OriginalRequest: []byte(`{"input":"hello"}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "client-1"}}
+	got, err := s.Pick(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), "codex", "gpt-5", opts, auths)
+	if err != nil || got.ID != "b" {
+		t.Fatalf("new websocket selected=%v err=%v", got, err)
+	}
+}
+
+func TestDeadlineSelectorAppliesModelSpecificQuotaAfterAliasResolution(t *testing.T) {
+	s, p, auths, now := deadlineFixture(t)
+	addExpiringCredit(p, now)
+	b := p.snapshots["b"]
+	blocked := false
+	b.Buckets = append(b.Buckets, accountpolicy.Bucket{Scope: "ordinary", Model: "upstream-model", DurationSeconds: 18000, Allowed: &blocked, UsedPercent: 100, ObservedAt: now})
+	p.snapshots["b"] = b
+	s.SetModelResolver(func(*Auth, string) string { return "upstream-model" })
+	got, err := s.Pick(context.Background(), "codex", "friendly-alias", cliproxyexecutor.Options{}, auths)
+	if err != nil || got.ID != "a" {
+		t.Fatalf("model-blocked alias picked=%v err=%v", got, err)
+	}
+}
+
+func TestDeadlineFallbackSettingsChangeTakesEffect(t *testing.T) {
+	s, p, auths, now := deadlineFixture(t)
+	p.settings.Fallback = "fill-first"
+	a := p.snapshots["a"]
+	a.ObservedAt = now.Add(-time.Hour)
+	p.snapshots["a"] = a
+	for _, candidate := range auths {
+		candidate.Attributes = nil
+	}
+	if _, err := s.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths); err != nil {
+		t.Fatal(err)
+	}
+	p.settings.Fallback = "round-robin"
+	first, err := s.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == second.ID {
+		t.Fatal("dynamic fallback settings remained fill-first")
+	}
+}
+
+func TestDeadlineLCPAffinityMovesOnlyAtSafeBoundary(t *testing.T) {
+	s, p, auths, now := deadlineFixture(t)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: []byte(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"first"}]}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller"}}
+	initial, err := s.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil || initial.ID != "a" {
+		t.Fatalf("initial=%v err=%v", initial, err)
+	}
+	addExpiringCredit(p, now)
+	next, err := s.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil || next.ID != "b" {
+		t.Fatalf("safe LCP continuation=%v err=%v", next, err)
 	}
 }
