@@ -137,6 +137,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist registered auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
 	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
+	m.requestPolicyRefresh(auth.ID)
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
@@ -226,6 +227,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	} else {
 		auth.Generation++
 	}
+	policyCredentialChanged := CredentialsChanged(existing, auth) || policyIdentityMaterialChanged(existing, auth)
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
@@ -295,6 +297,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		}
 	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	if policyCredentialChanged {
+		m.requestPolicyRefresh(auth.ID)
+	}
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}

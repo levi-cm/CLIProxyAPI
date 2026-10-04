@@ -916,58 +916,6 @@ type SessionAffinitySelector struct {
 	subagentAffinity bool
 }
 
-// SelectorAcrossPriorities opts a dynamic selector into all eligible priority tiers.
-type SelectorAcrossPriorities interface {
-	SelectorWantsAcrossPriorities() bool
-}
-
-func selectorWantsAcrossPriorities(selector Selector) bool {
-	opt, ok := selector.(SelectorAcrossPriorities)
-	return ok && opt.SelectorWantsAcrossPriorities()
-}
-
-func (s *SessionAffinitySelector) SelectorWantsAcrossPriorities() bool {
-	return s != nil && selectorWantsAcrossPriorities(s.fallback)
-}
-
-func (s *SessionAffinitySelector) fallbackCandidates(available []*Auth) []*Auth {
-	if selectorWantsAcrossPriorities(s.fallback) {
-		return available
-	}
-	return highestPriorityAuths(available)
-}
-
-// BoundAffinitySelector may retain or safely replace an eligible binding.
-// It must never return another account for an unsafe continuation.
-type BoundAffinitySelector interface {
-	PickBound(context.Context, string, string, cliproxyexecutor.Options, *Auth, []*Auth) (*Auth, error)
-}
-
-func (s *SessionAffinitySelector) pickBound(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, bound *Auth, available []*Auth) (*Auth, error) {
-	if policy, ok := s.fallback.(BoundAffinitySelector); ok {
-		return policy.PickBound(ctx, provider, model, opts, bound, available)
-	}
-	return bound, nil
-}
-
-func (s *SessionAffinitySelector) affinityNamespace(provider string, opts cliproxyexecutor.Options) string {
-	if scoped, ok := s.fallback.(interface {
-		AffinityNamespace(string, cliproxyexecutor.Options) string
-	}); ok {
-		return scoped.AffinityNamespace(provider, opts)
-	}
-	return provider
-}
-
-func (s *SessionAffinitySelector) checkUnavailableAffinity(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, id string) error {
-	if policy, ok := s.fallback.(interface {
-		PickUnavailable(context.Context, string, string, cliproxyexecutor.Options, string) error
-	}); ok {
-		return policy.PickUnavailable(ctx, provider, model, opts, id)
-	}
-	return nil
-}
-
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback         Selector
@@ -1144,14 +1092,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
 						// Child sessions inherit the parent binding without deadline migration.
-						if policy, ok := s.fallback.(interface {
-							PickParent(context.Context, string, string, cliproxyexecutor.Options, string, *Auth, []*Auth) (*Auth, error)
-						}); ok {
-							var errParent error
-							auth, errParent = policy.PickParent(ctx, provider, model, opts, fallbackID, auth, available)
-							if errParent != nil || auth == nil {
-								return auth, errParent
-							}
+						var errParent error
+						auth, errParent = s.pickParent(ctx, provider, model, opts, fallbackID, auth, available)
+						if errParent != nil || auth == nil {
+							return auth, errParent
 						}
 						bind(auth.ID)
 						if isFork {
