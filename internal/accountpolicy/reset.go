@@ -45,6 +45,16 @@ func weeklyExhausted(s Snapshot) bool {
 	}
 	return false
 }
+
+func naturalWeeklyReset(s Snapshot, now time.Time) time.Time {
+	var deadline time.Time
+	for _, bucket := range s.Buckets {
+		if bucket.Scope == "ordinary" && bucket.DurationSeconds == 604800 && bucket.ResetAt.After(now) && (deadline.IsZero() || bucket.ResetAt.Before(deadline)) {
+			deadline = bucket.ResetAt
+		}
+	}
+	return deadline
+}
 func coveredUsed(s Snapshot) bool {
 	for _, b := range s.Buckets {
 		if b.Scope == "ordinary" && b.UsedPercent > 0 {
@@ -54,8 +64,28 @@ func coveredUsed(s Snapshot) bool {
 	return false
 }
 func confirmedRecovery(op Operation, after Snapshot) bool {
-	if op.Before == nil || !recovered(*op.Before, after) {
+	if op.Before == nil {
 		return false
+	}
+	before := clone(*op.Before)
+	before.Identity.Generation = after.Identity.Generation
+	if !recovered(before, after) {
+		quotaChanged := false
+		if (op.Result == "reset" || op.Result == "already_redeemed") && sameIdentity(before.Identity, after.Identity) && !after.ObservedAt.Before(before.ObservedAt) {
+			for _, old := range before.Buckets {
+				if old.Scope != "ordinary" {
+					continue
+				}
+				for _, next := range after.Buckets {
+					if next.Scope == old.Scope && next.Model == old.Model && next.DurationSeconds == old.DurationSeconds && !next.ObservedAt.Before(old.ObservedAt) && next.Allowed != nil && *next.Allowed && next.UsedPercent < old.UsedPercent {
+						quotaChanged = true
+					}
+				}
+			}
+		}
+		if !quotaChanged {
+			return false
+		}
 	}
 	credit, found := findCredit(after, op.CreditID)
 	return after.InventoryComplete && fresh(after.InventoryObservedAt, after.ObservedAt, 120) && (!found || credit.Status != "available")
@@ -126,7 +156,12 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 		return op, policyError("read_only", "reset writes are disabled")
 	}
 	if op.ID != "" {
-		if op.AccountID != identity.AccountID || op.WorkspaceID != identity.WorkspaceID || op.Before == nil || !sameIdentity(op.Before.Identity, identity) {
+		beforeIdentity := Identity{}
+		if op.Before != nil {
+			beforeIdentity = op.Before.Identity
+			beforeIdentity.Generation = identity.Generation
+		}
+		if op.AccountID != identity.AccountID || op.WorkspaceID != identity.WorkspaceID || op.Before == nil || !sameIdentity(beforeIdentity, identity) {
 			return op, policyError("identity_mismatch", "pending operation belongs to a different credential generation")
 		}
 		if confirmedRecovery(op, snapshot) {
@@ -176,6 +211,17 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 	if errConsume != nil {
 		op.State = "outcome_unknown"
 		op.Error = "provider consume outcome unknown"
+		delay := 30 * time.Second
+		var retry interface{ RetryDelay() time.Duration }
+		if errors.As(errConsume, &retry) && retry.RetryDelay() > delay {
+			delay = retry.RetryDelay()
+		}
+		s.mu.Lock()
+		if s.state.RetryAt == nil {
+			s.state.RetryAt = map[string]time.Time{}
+		}
+		s.state.RetryAt[op.ID] = s.now().Add(delay)
+		s.mu.Unlock()
 		if err = s.saveOperation(op); err != nil {
 			return op, err
 		}
@@ -183,6 +229,9 @@ func (s *Service) Redeem(ctx context.Context, id, creditID string) (Operation, e
 	}
 	op.Result = result.Code
 	op.Error = ""
+	s.mu.Lock()
+	delete(s.state.RetryAt, op.ID)
+	s.mu.Unlock()
 	switch result.Code {
 	case "nothing_to_reset", "no_credit":
 		op.State = result.Code
@@ -227,14 +276,52 @@ func (s *Service) Tick(ctx context.Context) error {
 	if !s.Settings().Enabled {
 		return nil
 	}
+	identities := s.opts.Accounts()
+	jobs := make(chan Identity)
+	results := make(chan error, len(identities))
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for identity := range jobs {
+				results <- s.tickAccount(ctx, identity)
+			}
+		}()
+	}
+	for _, identity := range identities {
+		select {
+		case jobs <- identity:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	var errs []error
+	for err := range results {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Service) tickAccount(ctx context.Context, account Identity) error {
+	if !s.Settings().Enabled {
+		return nil
+	}
 	now := s.now()
 	var errs []error
 	var due []Identity
-	for _, identity := range s.opts.Accounts() {
+	for _, identity := range []Identity{account} {
 		s.mu.RLock()
 		tracking, known := s.discovery[identity.CredentialID]
 		s.mu.RUnlock()
-		if !known || !tracking.Next.After(now) {
+		if !known || !sameIdentity(tracking.Identity, identity) || !tracking.Next.After(now) {
 			due = append(due, identity)
 		}
 	}
@@ -272,8 +359,24 @@ func (s *Service) Tick(ctx context.Context) error {
 		return errors.Join(errs...)
 	}
 	for _, sch := range s.Schedules() {
+		if sch.CredentialID != account.CredentialID {
+			continue
+		}
 		if sch.At.After(now) {
 			continue
+		}
+		if snapshot, ok := s.Snapshot(sch.CredentialID); ok {
+			if credit, found := findCredit(snapshot, sch.CreditID); found && credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
+				op := Operation{ID: uuid.NewString(), RequestID: uuid.NewString(), CredentialID: sch.CredentialID, AccountID: snapshot.Identity.AccountID, WorkspaceID: snapshot.Identity.WorkspaceID, CreditID: sch.CreditID, State: "expired", CreatedAt: now, UpdatedAt: now, Before: &snapshot}
+				if err := s.saveOperation(op); err != nil {
+					errs = append(errs, err)
+				} else {
+					if err := s.CancelSchedule(sch.ID); err != nil {
+						errs = append(errs, err)
+					}
+				}
+				continue
+			}
 		}
 		if _, err := s.Redeem(ctx, sch.CredentialID, sch.CreditID); err != nil {
 			errs = append(errs, err)
@@ -285,18 +388,30 @@ func (s *Service) Tick(ctx context.Context) error {
 		return errors.Join(errs...)
 	}
 	for _, snapshot := range s.Accounts() {
+		if snapshot.Identity.CredentialID != account.CredentialID {
+			continue
+		}
 		id := snapshot.Identity.CredentialID
-		if settings.Accounts[id].Hold || snapshot.WritesDisabled || !fresh(snapshot.ObservedAt, now, settings.FreshnessSeconds) || !fresh(snapshot.InventoryObservedAt, now, settings.FreshnessSeconds) {
+		if settings.Accounts[id].Hold || snapshot.WritesDisabled || snapshot.LastError != "" || !fresh(snapshot.ObservedAt, now, settings.FreshnessSeconds) || !fresh(snapshot.InventoryObservedAt, now, settings.FreshnessSeconds) {
 			continue
 		}
 		pending := ""
+		waitPending := false
 		for _, op := range s.Operations() {
 			if op.CredentialID == id && unresolved(op.State) {
 				pending = op.CreditID
+				waitPending = op.State == "outcome_unknown" && now.Sub(op.UpdatedAt) < 30*time.Second
+				s.mu.RLock()
+				retryAt := s.state.RetryAt[op.ID]
+				s.mu.RUnlock()
+				waitPending = waitPending || retryAt.After(now)
 				break
 			}
 		}
 		if pending != "" {
+			if waitPending {
+				continue
+			}
 			if _, err := s.Redeem(ctx, id, pending); err != nil {
 				errs = append(errs, err)
 			}
@@ -321,12 +436,31 @@ func (s *Service) Tick(ctx context.Context) error {
 			return credits[i].ExpiresAt.Before(*credits[j].ExpiresAt)
 		})
 		for _, credit := range credits {
+			blocked := false
+			for _, op := range s.Operations() {
+				if op.CredentialID != id {
+					continue
+				}
+				if op.CreditID == credit.ID && op.State == "nothing_to_reset" && op.Before != nil && !changedAllowance(*op.Before, snapshot) {
+					blocked = true
+				}
+				if op.State == "confirmed" && op.After != nil && (!snapshot.ObservedAt.After(op.After.ObservedAt) || !weeklyExhausted(snapshot)) {
+					blocked = true
+				}
+			}
+			if blocked {
+				continue
+			}
 			demand := s.opts.HasDemand != nil && s.opts.HasDemand(id)
 			due := credit.ExpiresAt != nil && !credit.ExpiresAt.Add(-time.Duration(settings.ExpiryGuardSeconds)*time.Second).After(now)
+			// Expiring allowance is refreshed immediately after weekly depletion when the benefit
+			// would otherwise expire before natural renewal. This does not require queued work.
+			earlyExpiring := weeklyExhausted(snapshot) && credit.ExpiresAt != nil && naturalWeeklyReset(snapshot, now).After(*credit.ExpiresAt)
+			earlySaved := credit.ExpiresAt == nil && settings.Automation == "auto_all_saved" && weeklyExhausted(snapshot) && demand
 			if credit.ExpiresAt == nil && (settings.Automation != "auto_all_saved" || !snapshot.InventoryComplete || snapshot.AvailableCredits <= settings.SavedCreditReserve) {
 				continue
 			}
-			if !(weeklyExhausted(snapshot) && demand) && !(due && coveredUsed(snapshot)) {
+			if !earlyExpiring && !earlySaved && !(due && coveredUsed(snapshot)) {
 				continue
 			}
 			if _, err := s.Redeem(ctx, id, credit.ID); err != nil {
