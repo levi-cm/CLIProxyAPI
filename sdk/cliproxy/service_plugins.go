@@ -110,6 +110,9 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	if s.rejectConflictingPolicyPlugins(ctx, cfg, s.pluginHost != nil && s.pluginHost.HasScheduler()) {
+		return false
+	}
 	if s.coreManager != nil {
 		s.coreManager.SetPluginScheduler(s.pluginHost)
 	}
@@ -129,6 +132,11 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	if s.server != nil {
 		s.server.RefreshPluginManagementRoutes()
 	}
+	s.accountPolicyMu.Lock()
+	if cfg != nil {
+		s.accountPolicyPluginConfig = cfg.CloneForRuntime()
+	}
+	s.accountPolicyMu.Unlock()
 	return ctx.Err() == nil
 }
 

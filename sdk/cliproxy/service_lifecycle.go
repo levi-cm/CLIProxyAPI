@@ -36,6 +36,15 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if s.cfg != nil {
+		settings := normalizedPolicySettings(s.cfg.AccountPolicy)
+		if s.accountPolicy != nil {
+			settings = s.accountPolicy.Settings()
+		}
+		if errPolicy := validatePolicyOwnership(s.cfg, settings, s.pluginHost != nil && s.pluginHost.HasScheduler()); errPolicy != nil {
+			return errPolicy
+		}
+	}
 	ctx, runCancel := context.WithCancel(ctx)
 	s.cfgMu.Lock()
 	s.antigravityContext = ctx
@@ -115,6 +124,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// legacy clients removed; no caches to refresh
+	s.startAccountPolicy(ctx)
 
 	s.ensureWebsocketGateway()
 	if homeEnabled {
@@ -247,6 +257,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if runCancel != nil {
 			runCancel()
 		}
+		s.stopAccountPolicy()
 
 		s.homeLifecycleMu.Lock()
 		if supervisor := s.homeSupervisor; supervisor != nil {
