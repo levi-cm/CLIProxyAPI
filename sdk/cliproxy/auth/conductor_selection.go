@@ -1013,11 +1013,6 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
 }
 
-// PolicyModelForAuth resolves the same quota key used by normal routing.
-func (m *Manager) PolicyModelForAuth(auth *Auth, model string) string {
-	return m.selectionModelForAuth(auth, model)
-}
-
 func (m *Manager) normalizeProviders(providers []string) []string {
 	if len(providers) == 0 {
 		return nil

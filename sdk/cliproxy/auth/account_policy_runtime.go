@@ -21,13 +21,14 @@ type PolicyRuntimeStatus struct {
 }
 
 type policyRequestLease struct {
-	mu        sync.Mutex
-	manager   *Manager
-	authID    string
-	transport string
-	released  bool
-	ctx       context.Context
-	streaming bool
+	mu             sync.Mutex
+	manager        *Manager
+	authID         string
+	transport      string
+	released       bool
+	ctx            context.Context
+	streaming      bool
+	refreshPending bool
 }
 
 type policyRequestDemand struct {
@@ -141,12 +142,21 @@ func (l *policyRequestLease) release() {
 	if l == nil {
 		return
 	}
+	refreshPending := false
+	refreshID := ""
+	defer func() {
+		if refreshPending {
+			l.manager.requestPolicyRefresh(refreshID)
+		}
+	}()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.released {
 		return
 	}
 	l.released = true
+	refreshPending = l.refreshPending
+	refreshID = l.authID
 	l.manager.policyRuntimeMu.Lock()
 	defer l.manager.policyRuntimeMu.Unlock()
 	delete(l.manager.policyPending, l)
@@ -272,6 +282,11 @@ func (m *Manager) CredentialRoundTripper(id string) http.RoundTripper {
 }
 
 type policyInvalidProxyTransport struct{}
+
+// PolicyModelForAuth resolves the same quota key used by normal routing.
+func (m *Manager) PolicyModelForAuth(auth *Auth, model string) string {
+	return m.selectionModelForAuth(auth, model)
+}
 
 func (policyInvalidProxyTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, &accountpolicy.Error{Code: "invalid_proxy", Message: "configured credential proxy is invalid"}
