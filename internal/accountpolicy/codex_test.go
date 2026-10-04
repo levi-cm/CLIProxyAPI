@@ -449,3 +449,11 @@ func TestCodexMissingOrdinaryWindowsCannotAuthorizeWrite(t *testing.T) {
 		t.Fatalf("model allowance authorized ordinary reset %#v %v", s, err)
 	}
 }
+
+func TestCodexPermanentFailureCanBeClassifiedWithoutResponseDetails(t *testing.T) {
+	err := fmt.Errorf("provider request: %w", &CodexError{Code: "consume_schema_changed"})
+	var classified interface{ FailureCode() string }
+	if !errors.As(err, &classified) || classified.FailureCode() != "consume_schema_changed" {
+		t.Fatal("schema failure cannot disable future reset submissions")
+	}
+}
