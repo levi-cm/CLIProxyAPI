@@ -1,0 +1,19 @@
+{
+  "account_id": "fixture-account-a",
+  "user_id": "fixture-user",
+  "plan_type": "plus",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {"used_percent": 25, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": 1791154800},
+    "secondary_window": {"used_percent": 60, "limit_window_seconds": 604800, "reset_after_seconds": 345600, "reset_at": 1791496800}
+  },
+  "additional_rate_limits": [{
+    "limit_name": "Model allowance",
+    "metered_feature": "codex_model_fixture",
+    "normal_model_slug": "fixture-model",
+    "rate_limit": {"allowed": false, "limit_reached": true, "primary_window": {"used_percent": 100, "limit_window_seconds": 300, "reset_after_seconds": 60, "reset_at": 1791151260}}
+  }],
+  "credits": {"has_credits": true, "unlimited": false, "balance": "9.99"},
+  "rate_limit_reset_credits": {"available_count": 3}
+}
