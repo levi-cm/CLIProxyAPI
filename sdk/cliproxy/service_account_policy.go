@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -126,12 +128,22 @@ func (s *Service) rejectConflictingPolicyPlugins(ctx context.Context, candidate 
 	return true
 }
 
-func (s *Service) startAccountPolicy(ctx context.Context) {
+func (s *Service) startAccountPolicy(ctx context.Context) error {
+	if s.accountPolicy == nil {
+		return nil
+	}
+	settings := s.accountPolicy.Settings()
 	s.accountPolicyMu.Lock()
 	defer s.accountPolicyMu.Unlock()
 	if s.accountPolicy == nil || s.accountPolicyCancel != nil {
-		return
+		return nil
 	}
+	sink, err := accountpolicyusage.New(settings.StateDir, func() bool { return s.accountPolicy.Settings().Enabled })
+	if err != nil {
+		return &accountpolicy.Error{Code: "usage_state_unavailable", Message: "cannot initialize durable usage state"}
+	}
+	s.accountPolicyUsage = sink
+	usage.RegisterNamedPlugin("account-policy-durable-usage", sink)
 	policyCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	s.accountPolicyCancel, s.accountPolicyDone = cancel, done
@@ -151,6 +163,32 @@ func (s *Service) startAccountPolicy(ctx context.Context) {
 			}
 		}
 	}()
+	return nil
+}
+
+func (s *Service) closeAccountPolicyUsage(ctx context.Context) {
+	s.accountPolicyMu.Lock()
+	sink := s.accountPolicyUsage
+	s.accountPolicyUsage = nil
+	s.accountPolicyMu.Unlock()
+	if sink == nil {
+		return
+	}
+	usage.StopDefault()
+	if errWait := usage.WaitDefault(ctx); errWait != nil {
+		log.WithField("component", "account-policy-usage").Warn("usage drain continues after service shutdown context ended")
+		go func() {
+			if usage.WaitDefault(context.Background()) == nil {
+				if errClose := sink.Close(); errClose != nil {
+					log.WithField("component", "account-policy-usage").Error("durable usage close failed")
+				}
+			}
+		}()
+		return
+	}
+	if errClose := sink.Close(); errClose != nil {
+		log.WithField("component", "account-policy-usage").Error("durable usage close failed")
+	}
 }
 
 func (s *Service) wakeAccountPolicy(id string) {

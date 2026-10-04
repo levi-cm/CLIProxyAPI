@@ -124,7 +124,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// legacy clients removed; no caches to refresh
-	s.startAccountPolicy(ctx)
+	if errPolicy := s.startAccountPolicy(ctx); errPolicy != nil {
+		return errPolicy
+	}
 
 	s.ensureWebsocketGateway()
 	if homeEnabled {
@@ -356,6 +358,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+		s.closeAccountPolicyUsage(ctx)
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
