@@ -74,9 +74,10 @@ type event struct {
 
 var _ usage.Plugin = (*Sink)(nil)
 
-// New validates the state directory without creating or modifying anything.
-// A nil enable callback keeps the sink disabled. Storage is initialized lazily
-// on the first enabled completion, preserving the default disabled behavior.
+// New resolves the state directory without creating or modifying anything.
+// An enabled sink validates directory safety immediately; a disabled sink defers
+// that validation until its first enabled completion. A nil callback keeps the
+// sink disabled, preserving existing startup behavior for optional collection.
 func New(dir string, enabled func() bool) (*Sink, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, errors.New("usage sink state directory is required")
@@ -85,8 +86,10 @@ func New(dir string, enabled func() bool) (*Sink, error) {
 	if errAbs != nil {
 		return nil, fmt.Errorf("resolve usage state directory: %w", errAbs)
 	}
-	if errCheck := checkDirectory(abs); errCheck != nil {
-		return nil, errCheck
+	if enabled != nil && enabled() {
+		if errCheck := checkDirectory(abs); errCheck != nil {
+			return nil, errCheck
+		}
 	}
 	return &Sink{dir: abs, enabled: enabled, maxFileBytes: 10 * 1024 * 1024}, nil
 }
