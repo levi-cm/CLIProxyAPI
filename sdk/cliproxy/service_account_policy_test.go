@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,58 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
+
+func TestAccountPolicyDisabledStartsThroughSymlinkConfigurationDirectory(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "config-directory")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := &config.Config{AccountPolicy: accountpolicy.DefaultSettings()}
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath(filepath.Join(link, "config.yaml")).WithAccountPolicyProvider(&policyFixtureProvider{}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = service.startAccountPolicy(ctx); err != nil {
+		t.Fatalf("disabled policy prevented normal startup via symlink: %v", err)
+	}
+	service.stopAccountPolicy()
+	if _, err = os.Stat(filepath.Join(dir, "account-policy-state")); !os.IsNotExist(err) {
+		t.Fatalf("disabled module created state at symlink destination: %v", err)
+	}
+}
+
+func TestAccountPolicyDisabledPreservesUnreadableJournalAndNormalProxy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	corrupt := []byte("{unresolved and unreadable journal")
+	if err := os.WriteFile(path, corrupt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AccountPolicy: accountpolicy.DefaultSettings()}
+	cfg.AccountPolicy.StateDir = dir
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath("config.yaml").WithAccountPolicyProvider(&policyFixtureProvider{}).Build()
+	if err != nil {
+		t.Fatalf("disabled optional module prevented ordinary startup: %v", err)
+	}
+	if service.accountPolicy != nil {
+		t.Fatal("unreadable journal was silently replaced with empty policy state")
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil || string(saved) != string(corrupt) {
+		t.Fatalf("unreadable journal overwritten: %v", err)
+	}
+	enabled := cfg.CloneForRuntime()
+	enabled.AccountPolicy.Enabled = true
+	if commit := service.commitConfigUpdate(enabled); commit.cfg != nil {
+		t.Fatal("unavailable policy automatically reactivated through reload")
+	}
+	if _, err = NewBuilder().WithConfig(enabled).WithConfigPath("config.yaml").WithAccountPolicyProvider(&policyFixtureProvider{}).Build(); err == nil {
+		t.Fatal("enabled policy accepted unreadable operation journal")
+	}
+}
 
 type lastPolicySelector struct{}
 
