@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -14,23 +15,35 @@ import (
 )
 
 type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	postAuthPersistHook   auth.PostAuthHook
-	pluginHost            *pluginhost.Host
-	configReloadHook      func(context.Context, *config.Config)
-	exampleAPIKeySafeMode bool
+	extraMiddleware        []gin.HandlerFunc
+	engineConfigurator     func(*gin.Engine)
+	routerConfigurator     func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory   func(*config.Config, string) logging.RequestLogger
+	localPassword          string
+	keepAliveEnabled       bool
+	keepAliveTimeout       time.Duration
+	keepAliveOnTimeout     func()
+	postAuthHook           auth.PostAuthHook
+	postAuthPersistHook    auth.PostAuthHook
+	pluginHost             *pluginhost.Host
+	configReloadHook       func(context.Context, *config.Config)
+	exampleAPIKeySafeMode  bool
+	accountPolicy          *accountpolicy.Service
+	accountPolicyValidator func(accountpolicy.Settings) error
 }
 
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
+
+// WithAccountPolicy attaches the lifecycle-owned optional account policy service.
+func WithAccountPolicy(service *accountpolicy.Service) ServerOption {
+	return func(cfg *serverOptionConfig) { cfg.accountPolicy = service }
+}
+
+// WithAccountPolicySettingsValidator enforces runtime scheduler ownership on settings updates.
+func WithAccountPolicySettingsValidator(validate func(accountpolicy.Settings) error) ServerOption {
+	return func(cfg *serverOptionConfig) { cfg.accountPolicyValidator = validate }
+}
 
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)

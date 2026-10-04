@@ -211,6 +211,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
+	s.mgmt.SetAccountPolicy(optionState.accountPolicy)
+	s.mgmt.SetAccountPolicySettingsValidator(optionState.accountPolicyValidator)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
@@ -232,6 +234,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Setup routes
 	s.setupRoutes()
+	for _, path := range []string{"/account-policy.html", "/account-policy.js", "/account-policy.css"} {
+		s.engine.GET(path, s.serveAccountPolicyPanel)
+	}
 
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {
