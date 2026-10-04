@@ -27,7 +27,7 @@ The user's subsequent instruction supersedes any queued-work or near-expiry cond
 - `Evaluation`: Eligible, Known bool; Deadline time.Time; Reason string.
 - `Decision`: CredentialID, Provider, Model, Reason string; Deadline, At time.Time; Fallback bool.
 - `Operation`: ID, RequestID, CredentialID, AccountID, WorkspaceID, CreditID, State, Result, Error string; CreatedAt, UpdatedAt time.Time; Before, After *Snapshot.
-- `Schedule`: ID, CredentialID, CreditID string; At time.Time.
+- `Schedule`: ID, CredentialID, AccountID, WorkspaceID, Provider, CreditID string; At time.Time. Upstream ownership is captured when scheduling and rechecked before submission; legacy schedules missing ownership fail closed.
 - `ConsumeResult`: Code string; WindowsReset int.
 - `Provider` interface: `Discover(context.Context, Identity) (Snapshot,error)` and `Consume(context.Context,Identity,string,string) (ConsumeResult,error)`; final two arguments request ID and selected credit ID.
 - `Options`: Settings Settings; Provider Provider; Accounts func() []Identity; Recover func(context.Context, Snapshot, Snapshot) error; Now func() time.Time; HasDemand func(string) bool; IsIdle func(string) bool; AcquireReset func(context.Context,string) (func(),error). AcquireReset is an atomic reset reservation sharing account concurrency state with the inference request lease; its release ends the reservation. A read-only idle check alone cannot prevent a new request starting during redemption.
@@ -35,6 +35,8 @@ The user's subsequent instruction supersedes any queued-work or near-expiry cond
 - `CodexClient`: `Credential func(context.Context,string)(CodexCredential,error)`; `RefreshCredential func(context.Context,string) error`; `HTTPClient *http.Client`; `HTTPClientForCredential func(string)*http.Client` for existing account-specific transports; `BaseURL string` (trusted deployment configuration only, default https://chatgpt.com); `PathStyle string` (chatgpt or codex). `CodexCredential`: AccessToken, AccountID, WorkspaceID string. Implements Provider. Fixture-only clients may inject a localhost base URL.
 
 Core owns defaults, validation, persistent state, discovery, evaluation, redemption, scheduling. Adapter owns CodexClient and sanitized protocol fixtures. Routing owns auth selector, affinity, narrow cooldown recovery, and runtime signal reporting. Lead owns configuration and service lifecycle wiring. Operators own management handlers/registration options and proxyctl. UI owns embedded maintained page and asset handler, without editing server routing; operators register its route. Companion owns deployment/workflow material.
+
+Post-review additive signal: `Service.RequestRefresh(string)` coalesces credential/quota events in the background loop. SDK `Manager.SetPolicyRefreshCallback(func(string))` notifies outside its lock; no provider polling runs inside inference handlers. Routine result generations do not bypass cadence; provider backoff survives queued signals. Custom optional affinity capabilities live in `account_policy_affinity.go`, leaving upstream selector signatures unchanged.
 
 ## Public API contracts
 

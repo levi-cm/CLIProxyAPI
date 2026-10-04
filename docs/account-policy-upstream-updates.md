@@ -98,6 +98,9 @@ go run ./cmd/account-policy-preview -listen 127.0.0.1:18318
 Do not run a live redemption as an update gate. Fixture tests cover provider
 outcomes and idempotency without spending credits. Production tailnet/device ACL
 checks and service provisioning are separate operator-controlled deployment gates.
+Preserve durable consume-contract write guards during updates; ordinary healthy
+usage reads do not authorize clearing them. Legacy schedules lacking stored
+upstream ownership fail closed and must be reviewed/recreated explicitly.
 
 ## Rollback
 

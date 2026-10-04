@@ -6,6 +6,58 @@ Verification date: 2026-10-04. Isolated Go 1.26.0, Node 22, Chromium and the
 Playwright CLI wrapper were used. No provider credentials or live resets were
 used by the new fixture tests or browser preview.
 
+## Final verification gates
+
+The final code was reviewed at `78287818`; subsequent edits are documentation.
+
+- Full repository suite: PASS, uncached, using `go test ./... -count=1
+  -parallel=1`, Go package concurrency1 and GOMAXPROCS4.
+- Changed module/API/auth/config/UI/CLI/usage race tests: PASS. The new SDK policy
+  lifecycle and legacy-disabled-selector race regressions are checked separately.
+- Required `go build -o test-output ./cmd/server`: PASS; temporary binary removed
+  and reproducible. `gofmt -w .`, `git diff --check` and focused `go vet`: PASS.
+- JavaScript helpers:7/7 PASS. Companion:9 inbox tests and the real Caddy edge
+  smoke PASS. Final real transport suite on100.82.251.30: PASS.
+- Playwright checks below: PASS, including both numeric tailnet address and
+  MagicDNS origin. `proxyctl accounts`/`explain` also succeeded against the private
+  fixture listener. These are local-interface checks, not remote ACL proof.
+
+### Upstream baseline failures observed
+
+Parallel/fresh full runs intermittently failed the unchanged executor tests
+`TestWebsocketRetryBindFailureClearsActiveSessionState` (4 connections instead
+of3) and sessionless upload keepalive cases. An isolated connection-count rerun
+passed; repeated connection-count testing also failed on pristine upstream
+`8ef43e4d`. The final complete serial suite passed without altering these files.
+
+Broad SDK `-race` runs are not consistently green: the unchanged
+`TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch` and the
+end-to-end auth replacement/patch model-list tests failed. All three identical
+failures reproduced in the pristine upstream worktree; there was no data-race
+warning. One isolated whole-SDK race run passed, but the broader repeat failures
+remain an upstream baseline limitation. The feature-specific race gates pass.
+No test was skipped, weakened, or edited to conceal these failures.
+
+Read-only diagnosis: the legacy batch test blocks the second invocation of a
+shared hook and assumes it belongs to B, although the unchanged task processor
+uses concurrent workers. That can instead block A. Cleanup releases the barrier
+without joining the batch before removing global model registrations, which
+can explain the following model-list failures. This is an upstream test-ordering
+issue, not a reason to refactor its processor in the feature branch.
+
+Reproduce the baseline comparison in a detached worktree at the base commit:
+
+```bash
+go test ./internal/runtime/executor -run '^TestWebsocketRetryBindFailureClearsActiveSessionState$' -count=30
+go test -race ./sdk/cliproxy -run 'TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch|TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart|TestEndToEndAuthFilePatch_RestoresModelsInV1ModelsWithoutRestart' -count=1
+```
+
+Session logs are preserved under `/tmp/cliproxy-policy-final-*` and
+`/tmp/cliproxy-policy-baseline-*`; the full-suite passing log is
+`/tmp/cliproxy-policy-final-full-serial.log`. The broad race baseline limitation
+must remain visible in future update verification; it is not a reason to accept
+a newly failing custom regression or change unrelated upstream executors.
+
 ## Acceptance evidence
 
 | Requirement | Evidence |
@@ -81,6 +133,10 @@ mutation, remote-worker provisioning, production key setup or live credit
 redemption occurred. Follow [the deployment guide](account-policy-deployment.md)
 for explicit positive and negative remote-device tests before rollout.
 
+Build-artifact scan found no stale generated repository directory meeting the
+250MiB removal threshold. Verification evidence and all uncertain/existing
+artifacts were preserved; no material build collection was deleted.
+
 Known limits:
 
 - Distinct workspace identity is unsupported by the pinned provider protocol and
@@ -89,6 +145,10 @@ Known limits:
   durable reset writes. Run one protected writer/state directory.
 - Some existing native WebSocket refusals close with1006 before a structured
   client error. Fixtures prove no unsafe business-payload replay.
+- Runtime diagnostics report observed downstream transport and honestly mark
+  upstream transport unknown unless an executor reports it. Capability settings
+  are not proof of actual transport; the fixture suite verifies real upstream
+  HTTP/WebSocket handshakes separately.
 - Cold stateful continuations without provable original owner fail closed;
   pre-policy cache entries cannot invent client provenance.
 - The external panel's manual consume path is outside the native durable journal;
@@ -96,7 +156,10 @@ Known limits:
 - Legacy schedules without stored upstream ownership fail closed rather than
   inheriting a newly mapped account.
 - Permanent contract failures preserve uncertain UUIDs and inhibit further
-  writes; repair/review is required, not automatic blind retry.
+  writes across healthy reads and restart. There is no automatic or one-click
+  repair: intentional journal-guard maintenance after provider-contract review
+  must preserve pending UUIDs. Healthy GET evidence cannot verify a changed
+  consume contract, so it cannot silently restore write authority.
 
 The original untracked specification and existing `.dockerignore` edit remain
 untouched. No custom change was made to executors or translators. Integration
