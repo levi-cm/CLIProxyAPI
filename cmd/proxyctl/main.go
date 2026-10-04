@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -108,7 +110,11 @@ func run(ctx context.Context, args []string, out io.Writer, getenv func(string) 
 	if errResponse != nil {
 		return failure(out, "connection_error", "Cannot reach the private proxy endpoint; check tailnet connectivity and listener configuration.")
 	}
-	defer func() { _ = response.Body.Close() }()
+	defer func() {
+		if errClose := response.Body.Close(); errClose != nil {
+			log.Warn("Could not close the management response body.")
+		}
+	}()
 	content, errRead := io.ReadAll(io.LimitReader(response.Body, 8<<20+1))
 	if errRead != nil || len(content) > 8<<20 {
 		return failure(out, "invalid_response", "Cannot read a bounded management response.")
@@ -139,7 +145,7 @@ func run(ctx context.Context, args []string, out io.Writer, getenv func(string) 
 
 func safeErrorCode(code string) bool {
 	switch code {
-	case "unavailable", "invalid_request", "invalid_settings", "unknown_account", "unknown_credit", "unknown_schedule", "conflict", "persistence", "read_only", "disabled", "expired", "stale_evidence", "identity_mismatch", "provider_error", "invalid_schedule", "unauthorized", "forbidden":
+	case "unavailable", "invalid_request", "invalid_settings", "unknown_account", "unknown_credit", "unknown_schedule", "conflict", "account_busy", "persistence", "read_only", "disabled", "expired", "stale_evidence", "identity_mismatch", "provider_error", "invalid_schedule", "unauthorized", "forbidden":
 		return true
 	}
 	return false

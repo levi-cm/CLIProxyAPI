@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +20,7 @@ import (
 type policyFixtureProvider struct{}
 
 func (policyFixtureProvider) Discover(_ context.Context, id accountpolicy.Identity) (accountpolicy.Snapshot, error) {
-	return accountpolicy.Snapshot{Identity: id, Eligible: true, InventoryComplete: true, ObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), InventoryObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), LastError: "Bearer secret-token prompt-secret", Credits: []accountpolicy.Credit{{ID: "c", Type: "weekly", Status: "available", DetailsKnown: true}}}, nil
+	return accountpolicy.Snapshot{Identity: id, Eligible: true, InventoryComplete: true, ObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), InventoryObservedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), LastError: "Bearer secret-token prompt-secret", Credits: []accountpolicy.Credit{{ID: "c", Type: "codex_rate_limits", Status: "available", DetailsKnown: true, Scopes: []string{"ordinary"}}}}, nil
 }
 func (policyFixtureProvider) Consume(context.Context, accountpolicy.Identity, string, string) (accountpolicy.ConsumeResult, error) {
 	return accountpolicy.ConsumeResult{Code: "nothing_to_reset"}, nil
@@ -36,7 +38,7 @@ func policyTestRouter(t *testing.T, enabled bool) (*gin.Engine, *accountpolicy.S
 		var err error
 		service, err = accountpolicy.NewService(accountpolicy.Options{Settings: settings, Provider: policyFixtureProvider{}, Accounts: func() []accountpolicy.Identity {
 			return []accountpolicy.Identity{{CredentialID: "a", AccountID: "upstream-a", WorkspaceID: "workspace-a", Provider: "codex"}}
-		}, Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) }})
+		}, Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) }, IsIdle: func(string) bool { return true }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -49,6 +51,7 @@ func policyTestRouter(t *testing.T, enabled bool) (*gin.Engine, *accountpolicy.S
 	g.POST("/refresh", h.RefreshAccountPolicy)
 	g.POST("/resets/redeem", h.RedeemAccountPolicyReset)
 	g.POST("/resets/schedule", h.ScheduleAccountPolicyReset)
+	g.DELETE("/resets/schedule/:schedule_id", h.CancelAccountPolicySchedule)
 	g.GET("/diagnostics", h.GetAccountPolicyDiagnostics)
 	return r, service
 }
@@ -116,6 +119,9 @@ func TestAccountPolicyDiagnosticsSanitizeProviderErrors(t *testing.T) {
 	if w.Code != 200 || !json.Valid(w.Body.Bytes()) || strings.Contains(w.Body.String(), "secret-token") || strings.Contains(w.Body.String(), "prompt-secret") {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	if snapshot, ok := service.Snapshot("a"); !ok || snapshot.LastError != "Bearer secret-token prompt-secret" {
+		t.Fatal("diagnostic export changed stored provider evidence")
+	}
 }
 
 func TestAccountPolicyConcurrentPatchesPreserveIndependentControls(t *testing.T) {
@@ -143,5 +149,64 @@ func TestAccountPolicyInvalidAccountPatchDoesNotMutateSettings(t *testing.T) {
 	response := policyRequest(r, http.MethodPatch, "/settings", `{"accounts":{"a":{"hold":true,"reserve_percent":101}}}`, "operator-test")
 	if response.Code != 400 || service.Settings().Accounts["a"].Hold {
 		t.Fatalf("invalid patch mutated settings: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAccountPolicyRejectsNonObjectAndOversizedRequests(t *testing.T) {
+	r, _ := policyTestRouter(t, true)
+	for _, body := range []string{"null", "[]", `"a"`, `{"credential_id":"a","unknown":true}`, `{"credential_id":"` + strings.Repeat("a", 65<<10) + `"}`} {
+		response := policyRequest(r, http.MethodPost, "/refresh", body, "operator-test")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_request"`) {
+			t.Fatalf("unexpected status=%d response=%s", response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestAccountPolicyScheduleRetainsInstantAndCancel(t *testing.T) {
+	r, service := policyTestRouter(t, true)
+	if err := service.Refresh(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	w := policyRequest(r, http.MethodPost, "/resets/schedule", `{"credential_id":"a","credit_id":"c","at":"2026-10-25T01:30:00+02:00"}`, "operator-test")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	schedules := service.Schedules()
+	if len(schedules) != 1 || schedules[0].At.Format(time.RFC3339) != "2026-10-24T23:30:00Z" {
+		t.Fatalf("wrong instant: %+v", schedules)
+	}
+	w = policyRequest(r, http.MethodDelete, "/resets/schedule/"+schedules[0].ID, "", "operator-test")
+	if w.Code != 200 || len(service.Schedules()) != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestAccountPolicyRedeemReturnsSelectedOperation(t *testing.T) {
+	r, _ := policyTestRouter(t, true)
+	w := policyRequest(r, http.MethodPost, "/resets/redeem", `{"credential_id":"a","credit_id":"c"}`, "operator-test")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var result struct {
+		Operation accountpolicy.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Operation.CredentialID != "a" || result.Operation.CreditID != "c" || result.Operation.State != "nothing_to_reset" || result.Operation.RequestID == "" {
+		t.Fatal(w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-token") {
+		t.Fatal("operation leaked upstream diagnostics")
+	}
+}
+
+func TestAccountPolicyPersistenceFailureRollsBackPatch(t *testing.T) {
+	r, service := policyTestRouter(t, true)
+	stateDir := service.Settings().StateDir
+	// A directory at the journal destination forces persistence to fail on every platform.
+	if err := os.Mkdir(filepath.Join(stateDir, "state.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	w := policyRequest(r, http.MethodPatch, "/settings", `{"time_zone":"UTC"}`, "operator-test")
+	if w.Code != 500 || !strings.Contains(w.Body.String(), `"code":"persistence"`) || service.Settings().TimeZone != "Europe/Berlin" {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
