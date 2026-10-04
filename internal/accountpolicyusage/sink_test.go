@@ -305,6 +305,28 @@ func TestSinkRejectsSymlinkInDirectoryPath(t *testing.T) {
 	}
 }
 
+func TestSinkDisabledDefersUnsafeDirectoryCheckUntilEnabled(t *testing.T) {
+	parent := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(parent, "external")); err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	sink := openSink(t, filepath.Join(parent, "external", "policy"), func() bool { return enabled })
+	sink.HandleUsage(context.Background(), usage.Record{Provider: "codex"})
+	if _, err := os.Stat(filepath.Join(outside, "policy")); !os.IsNotExist(err) {
+		t.Fatalf("disabled sink touched unsafe state path: %v", err)
+	}
+	enabled = true
+	sink.HandleUsage(context.Background(), usage.Record{Provider: "codex"})
+	if _, err := os.Stat(filepath.Join(outside, "policy")); !os.IsNotExist(err) {
+		t.Fatalf("enabled sink wrote through directory symlink: %v", err)
+	}
+	if got := sink.Summary().WriteErrors; got != 1 {
+		t.Fatalf("deferred unsafe path must report one blocked write, got %d", got)
+	}
+}
+
 func TestSinkRejectsOversizedEventsWithoutGrowingStorage(t *testing.T) {
 	dir := t.TempDir()
 	sink := openSink(t, dir, func() bool { return true })
