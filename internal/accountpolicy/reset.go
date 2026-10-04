@@ -388,7 +388,7 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 		s.refreshMu.Lock()
 		requested := s.requested[identity.CredentialID] + s.requested[""]
 		s.refreshMu.Unlock()
-		if !known || !sameOwnership(tracking.Identity, identity) || tracking.Requested != requested || !tracking.Next.After(now) {
+		if !known || !sameOwnership(tracking.Identity, identity) || tracking.Requested != requested && tracking.Failures == 0 || !tracking.Next.After(now) {
 			due = append(due, identity)
 		}
 	}
