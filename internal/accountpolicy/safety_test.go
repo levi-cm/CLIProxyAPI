@@ -457,6 +457,7 @@ func TestDiscoveryHonorsRateLimitBackoffAndKeepsStaleVisible(t *testing.T) {
 		t.Fatal("read failure hid stale evidence")
 	}
 	now = now.Add(4 * time.Minute)
+	s.RequestRefresh("b")
 	_ = s.Tick(context.Background())
 	if reads != 1 {
 		t.Fatal("rate limit backoff ignored")
