@@ -120,6 +120,8 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
+	defer policyLease.release()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -180,6 +182,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
+	defer policyLease.release()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -233,6 +237,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
+	ctx = context.WithValue(ctx, policyRequestLeaseKey{}, policyLease)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			policyLease.release()
+		}
+	}()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
@@ -259,6 +271,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
+			handedOff = true
 			return result, nil
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -307,6 +320,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
 				return nil, errCredits
 			} else if ok {
+				handedOff = true
 				return result, nil
 			}
 		}
