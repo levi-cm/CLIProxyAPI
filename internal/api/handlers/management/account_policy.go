@@ -37,6 +37,7 @@ func (h *Handler) SetAccountPolicySettingsValidator(validate func(accountpolicy.
 // remote-access restrictions, with the policy API's stable error envelope.
 func (h *Handler) AccountPolicyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		key := c.GetHeader("X-Management-Key")
 		if authorization := c.GetHeader("Authorization"); authorization != "" {
 			parts := strings.SplitN(authorization, " ", 2)
@@ -101,14 +102,20 @@ func (h *Handler) policyService(c *gin.Context) *accountpolicy.Service {
 func decodePolicyJSON(c *gin.Context, destination any) bool {
 	reader := http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	decoder := json.NewDecoder(reader)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil || len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '{' {
 		policyFailure(c, http.StatusBadRequest, "invalid_request", "Expected a valid JSON object with supported fields.")
 		return false
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		policyFailure(c, http.StatusBadRequest, "invalid_request", "Expected exactly one JSON object.")
+		return false
+	}
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(destination); err != nil {
+		policyFailure(c, http.StatusBadRequest, "invalid_request", "Expected a valid JSON object with supported fields.")
 		return false
 	}
 	return true
