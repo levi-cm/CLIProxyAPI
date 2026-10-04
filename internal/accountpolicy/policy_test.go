@@ -22,6 +22,8 @@ func TestEvaluateDeadlineAndEligibility(t *testing.T) {
 	settings.Enabled = true
 	settings.Automation = "auto_expiring"
 	a, b := testSnapshot("a", 4), testSnapshot("b", 7)
+	a.Status = "ready"
+	b.Status = "ready"
 	expiry := now.Add(24 * time.Hour)
 	if !Evaluate(a, "model", settings, now).Deadline.Before(Evaluate(b, "model", settings, now).Deadline) {
 		t.Fatal("A must precede B without credits")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,17 +15,24 @@ import (
 )
 
 type storedState struct {
-	Version    int                 `json:"version"`
-	Revision   uint64              `json:"revision"`
-	Settings   Settings            `json:"settings"`
-	Snapshots  map[string]Snapshot `json:"snapshots"`
-	Operations []Operation         `json:"operations"`
-	Schedules  []Schedule          `json:"schedules"`
-	Decisions  []Decision          `json:"decisions"`
+	Version    int                       `json:"version"`
+	Revision   uint64                    `json:"revision"`
+	Settings   Settings                  `json:"settings"`
+	Snapshots  map[string]Snapshot       `json:"snapshots"`
+	Operations []Operation               `json:"operations"`
+	Schedules  []Schedule                `json:"schedules"`
+	Decisions  []Decision                `json:"decisions"`
+	Recoveries map[string]recoveryRecord `json:"recoveries,omitempty"`
+	RetryAt    map[string]time.Time      `json:"retry_at,omitempty"`
+}
+type recoveryRecord struct {
+	Before Snapshot `json:"before"`
+	After  Snapshot `json:"after"`
 }
 type discoveryState struct {
 	Next     time.Time
 	Failures int
+	Identity Identity
 }
 type Service struct {
 	mu        sync.RWMutex
@@ -70,7 +78,12 @@ func NewService(opts Options) (*Service, error) {
 		seen[logical] = true
 	}
 	if s.stateDir != "" {
-		if err := os.MkdirAll(s.stateDir, 0700); err != nil {
+		if err := func() error {
+			if !opts.Settings.Enabled {
+				return nil
+			}
+			return os.MkdirAll(s.stateDir, 0700)
+		}(); err != nil {
 			return nil, policyError("persistence", "cannot create policy state directory")
 		}
 		data, err := os.ReadFile(filepath.Join(s.stateDir, "state.json"))
@@ -145,6 +158,10 @@ func (s *Service) persistLocked(before storedState) error {
 	}
 	if s.stateDir == "" {
 		return nil
+	}
+	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
+		s.state = before
+		return policyError("persistence", "cannot create policy state directory")
 	}
 	unlock, err := lockNamed(s.stateDir, "state.lock")
 	if err != nil {
@@ -223,6 +240,9 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	if s.opts.Settings.ReadOnly && !next.ReadOnly {
 		return policyError("read_only", "replica configuration requires read-only mode")
 	}
+	if s.replica && !next.ReadOnly {
+		return policyError("read_only", "another proxy owns automatic redemption")
+	}
 	before := clone(s.state)
 	s.state.Settings = clone(next)
 	return s.persistLocked(before)
@@ -242,8 +262,16 @@ func (s *Service) RecordDecision(d Decision) {
 	}
 }
 func (s *Service) identity(id string) (Identity, error) {
-	for _, v := range s.opts.Accounts() {
+	ids := s.opts.Accounts()
+	for _, v := range ids {
 		if v.CredentialID == id {
+			if v.AccountID != "" {
+				for _, other := range ids {
+					if other.CredentialID != v.CredentialID && other.Provider == v.Provider && other.AccountID == v.AccountID && other.WorkspaceID == v.WorkspaceID {
+						return Identity{}, policyError("conflict", "duplicate logical account ownership")
+					}
+				}
+			}
 			return v, nil
 		}
 	}
@@ -321,12 +349,22 @@ func (s *Service) Refresh(ctx context.Context, id string) error {
 }
 
 func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, error) {
+	started := s.now()
 	select {
 	case s.semaphore <- struct{}{}:
 	case <-ctx.Done():
 		return Snapshot{}, ctx.Err()
 	}
 	next, errRead := s.opts.Provider.Discover(ctx, id)
+	if errRead == nil {
+		for _, b := range next.Buckets {
+			if math.IsNaN(b.UsedPercent) || math.IsInf(b.UsedPercent, 0) || b.UsedPercent < 0 || b.UsedPercent > 100 {
+				errRead = policyError("provider_error", "invalid quota observation")
+				next.WritesDisabled = true
+				break
+			}
+		}
+	}
 	next = clone(next)
 	<-s.semaphore
 	now := s.now()
@@ -340,6 +378,7 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 		next.WritesDisabled = true
 	}
 	if errRead != nil {
+		tracking.Identity = id
 		old.Identity = id
 		old.LastError = "provider discovery failed"
 		old.WritesDisabled = old.WritesDisabled || next.WritesDisabled
@@ -370,7 +409,32 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	next.Version = old.Version + 1
 	next.ObservedAt = next.ObservedAt.UTC()
 	next.InventoryObservedAt = next.InventoryObservedAt.UTC()
+	for i := range next.Buckets {
+		next.Buckets[i].ObservedAt = next.Buckets[i].ObservedAt.UTC()
+		next.Buckets[i].ResetAt = next.Buckets[i].ResetAt.UTC()
+	}
+	for i := range next.Credits {
+		next.Credits[i].GrantedAt = next.Credits[i].GrantedAt.UTC()
+		if next.Credits[i].ExpiresAt != nil {
+			instant := next.Credits[i].ExpiresAt.UTC()
+			next.Credits[i].ExpiresAt = &instant
+		}
+	}
 	s.state.Snapshots[id.CredentialID] = clone(next)
+	recoveryBefore := clone(old)
+	recoveryBefore.Identity.Generation = id.Generation
+	recoveryBefore.ObservedAt = started
+	if settings.Enabled && s.opts.Recover != nil && recovered(recoveryBefore, next) {
+		if s.state.Recoveries == nil {
+			s.state.Recoveries = map[string]recoveryRecord{}
+		}
+		s.state.Recoveries[id.CredentialID] = recoveryRecord{Before: recoveryBefore, After: clone(next)}
+	}
+	pendingRecovery, hasRecovery := s.state.Recoveries[id.CredentialID]
+	if hasRecovery {
+		pendingRecovery.Before.Identity.Generation = id.Generation
+		pendingRecovery.Before.ObservedAt = started
+	}
 	interval := 5 * time.Minute
 	if next.ActiveRequests > 0 || next.ActiveBindings > 0 {
 		interval = time.Minute
@@ -389,16 +453,25 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 		hash = hash*31 + uint32(r)
 	}
 	tracking = discoveryState{Next: now.Add(interval + time.Duration(hash%6)*time.Second)}
+	tracking.Identity = id
 	s.discovery[id.CredentialID] = tracking
 	errSave := s.persistLocked(before)
 	s.mu.Unlock()
 	if errSave != nil {
 		return next, errSave
 	}
-	if settings.Enabled && s.opts.Recover != nil && recovered(old, next) {
+	if settings.Enabled && s.opts.Recover != nil && hasRecovery && recovered(pendingRecovery.Before, next) {
 		if current, errCurrent := s.identity(id.CredentialID); errCurrent == nil && sameIdentity(id, current) {
-			if errRecover := s.opts.Recover(ctx, old, next); errRecover != nil {
+			if errRecover := s.opts.Recover(ctx, pendingRecovery.Before, next); errRecover != nil {
 				return next, policyError("recovery_failed", "local cooldown reconciliation failed")
+			}
+			s.mu.Lock()
+			beforeRecovery := clone(s.state)
+			delete(s.state.Recoveries, id.CredentialID)
+			errPersist := s.persistLocked(beforeRecovery)
+			s.mu.Unlock()
+			if errPersist != nil {
+				return next, errPersist
 			}
 		}
 	}
@@ -426,7 +499,13 @@ func recovered(before, after Snapshot) bool {
 }
 
 func (s *Service) Schedule(id, creditID string, at time.Time) (Schedule, error) {
-	snapshot, ok := s.Snapshot(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	settings := s.state.Settings
+	if settings.ReadOnly {
+		return Schedule{}, policyError("read_only", "scheduled reset writes are read-only")
+	}
+	snapshot, ok := s.state.Snapshots[id]
 	if !ok {
 		return Schedule{}, policyError("unknown_account", "account snapshot not found")
 	}
@@ -435,12 +514,13 @@ func (s *Service) Schedule(id, creditID string, at time.Time) (Schedule, error) 
 		return Schedule{}, policyError("unknown_credit", "selected credit not found")
 	}
 	now := s.now()
-	if !at.After(now) || !usableCredit(credit, s.Settings(), now) || credit.ExpiresAt != nil && !at.Before(*credit.ExpiresAt) {
+	if !fresh(snapshot.InventoryObservedAt, now, settings.FreshnessSeconds) || snapshot.LastError != "" || snapshot.WritesDisabled {
+		return Schedule{}, policyError("stale_evidence", "fresh verified credit inventory is required")
+	}
+	if !at.After(now) || !usableCredit(credit, settings, now) || credit.ExpiresAt != nil && !at.Before(*credit.ExpiresAt) {
 		return Schedule{}, policyError("invalid_schedule", "schedule must be before selected credit expiry and after current time")
 	}
 	sch := Schedule{ID: uuid.NewString(), CredentialID: id, CreditID: creditID, At: at.UTC()}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	before := clone(s.state)
 	for _, old := range s.state.Schedules {
 		if old.CredentialID == id && old.CreditID == creditID {
@@ -472,7 +552,17 @@ func findCredit(snapshot Snapshot, id string) (Credit, bool) {
 }
 
 func (s *Service) Run(ctx context.Context) {
-	if s.stateDir != "" {
+	var releaseOwner func()
+	defer func() {
+		if releaseOwner != nil {
+			releaseOwner()
+		}
+	}()
+	acquireOwner := func() {
+		if releaseOwner != nil || !s.Settings().Enabled || s.stateDir == "" {
+			return
+		}
+		_ = os.MkdirAll(s.stateDir, 0700)
 		unlock, err := lockNamed(s.stateDir, "owner.lock")
 		if err != nil {
 			s.mu.Lock()
@@ -480,12 +570,35 @@ func (s *Service) Run(ctx context.Context) {
 			s.state.Settings.ReadOnly = true
 			s.mu.Unlock()
 		} else {
-			defer unlock()
+			releaseOwner = unlock
 		}
 	}
-	if s.Settings().Enabled {
-		_ = s.Refresh(ctx, "")
+	acquireOwner()
+	var workers sync.WaitGroup
+	var workMu sync.Mutex
+	busy := map[string]bool{}
+	defer workers.Wait()
+	dispatch := func() {
+		if !s.Settings().Enabled {
+			return
+		}
+		for _, identity := range s.opts.Accounts() {
+			workMu.Lock()
+			if busy[identity.CredentialID] {
+				workMu.Unlock()
+				continue
+			}
+			busy[identity.CredentialID] = true
+			workMu.Unlock()
+			workers.Add(1)
+			go func(account Identity) {
+				defer workers.Done()
+				defer func() { workMu.Lock(); delete(busy, account.CredentialID); workMu.Unlock() }()
+				_ = s.tickAccount(ctx, account)
+			}(identity)
+		}
 	}
+	dispatch()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -493,7 +606,8 @@ func (s *Service) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = s.Tick(ctx)
+			acquireOwner()
+			dispatch()
 		}
 	}
 }

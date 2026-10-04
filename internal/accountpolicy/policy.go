@@ -68,7 +68,7 @@ func Evaluate(snapshot Snapshot, model string, s Settings, now time.Time) Evalua
 	if s.ForceAccount != "" && s.ForceAccount != snapshot.Identity.CredentialID {
 		return blocked("different_forced_account")
 	}
-	if snapshot.Status != "" && snapshot.Status != "healthy" && snapshot.Status != "quota" && snapshot.Status != "cooldown" {
+	if snapshot.Status != "" && snapshot.Status != "ready" && snapshot.Status != "healthy" && snapshot.Status != "quota" && snapshot.Status != "cooldown" {
 		return blocked("authentication_or_account_unavailable")
 	}
 	if !snapshot.Eligible && !snapshot.ObservedAt.IsZero() {
