@@ -117,11 +117,12 @@ type Provider interface {
 	Consume(context.Context, Identity, string, string) (ConsumeResult, error)
 }
 type Options struct {
-	Settings  Settings
-	Provider  Provider
-	Accounts  func() []Identity
-	Recover   func(context.Context, Snapshot, Snapshot) error
-	Now       func() time.Time
-	HasDemand func(string) bool
-	IsIdle    func(string) bool
+	Settings     Settings
+	Provider     Provider
+	Accounts     func() []Identity
+	Recover      func(context.Context, Snapshot, Snapshot) error
+	Now          func() time.Time
+	HasDemand    func(string) bool
+	IsIdle       func(string) bool
+	AcquireReset func(context.Context, string) (func(), error)
 }
