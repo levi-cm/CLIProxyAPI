@@ -1,10 +1,13 @@
 # Keeping the account-policy fork mergeable
 
 The implementation base is `8ef43e4df3b216a42493105d31c2873b69191473`.
+The reviewed upstream integration is `a4acc9f7` (2026-10-05), including all twelve
+subsequent `main` commits. Experimental `dev` is not an update source.
 The feature is optional and ships disabled with automatic redemption off.
 Upstream `Selector`, executor, credential, HTTP, and usage plugin interfaces are
 preserved; extension capabilities are additive optional interfaces or callbacks.
-No executor payload-building or translator code was changed. The downloaded
+Custom policy code does not change executor payload-building or translators;
+upstream executor/translator improvements remain upstream-owned. The downloaded
 management panel remains upstream-owned and is not patched after download.
 
 The independent Telegram companion is a locally excluded nested repository at
@@ -40,6 +43,10 @@ credential resolver in `service_account_policy.go`. See
 `docs/account-policy-conversation-ownership.md` for resume/fork validation and
 recovery. The independent client usage endpoint/MCP adapter and completion tracking
 hooks are documented in `client-usage/README.md`; they do not infer conversation owners.
+Upstream `8a01bc02` added credential mutation gates and manager-read-safe store
+persistence. `RecoverPolicyQuota` joins that transaction and uses `persistLocked`
+instead of calling `persist` with the manager write lock held. Preserve that
+adapter and its read-callback regression; resetting or bypassing locks is unsafe.
 
 ## Integration points to recheck after a merge
 
@@ -87,6 +94,13 @@ cd ../CLIProxyAPI-update
 git merge --no-ff --no-commit UPSTREAM_TAG
 ```
 
+   For an explicitly requested update in the existing checkout, first finish,
+   test, commit and push the fork changes. Back up private configuration/state,
+   verify remaining edits are unrelated to upstream paths, then run the same
+   `git merge --no-ff --no-commit UPSTREAM_TAG` there. Never stash or discard all
+   untracked files: media, credentials and other local work may be unique. If an
+   overlapping edit prevents the merge, preserve that exact path separately.
+
 3. Resolve each conflict using the integration table: retain upstream behavior
    and keep only the optional hook. Update custom adapters if a supported upstream
    interface changed. Do not copy old executor request-building paths over newer
@@ -98,8 +112,10 @@ git merge --no-ff --no-commit UPSTREAM_TAG
 gofmt -w .
 git diff --check
 go test ./...
+go test -race ./internal/accountpolicybindings ./internal/accountpolicyclient
 go test -race ./internal/accountpolicy ./internal/accountpolicyusage ./internal/accountpolicyui ./internal/api ./internal/api/handlers/management ./sdk/cliproxy ./sdk/cliproxy/auth ./sdk/cliproxy/usage ./cmd/proxyctl ./cmd/account-policy-preview
 node --test internal/accountpolicyui/*test.cjs
+node --test client-usage/codex-auth-headers.test.mjs
 python3 -m unittest discover -s companion -v
 go build -o test-output ./cmd/server
 rm test-output
@@ -124,6 +140,16 @@ go run ./cmd/account-policy-preview -listen 127.0.0.1:18318
    overwrite a dirty checkout. Stage deployment with observation and automation
    off, then enable routing and explicitly reviewed automatic redemption. Record
    the new upstream base and any changed hook in this document.
+
+   For the existing-checkout variant, review the combined merge and publish only
+   its explicit source/test/documentation paths. Rebuild the backend (which embeds
+   the Web UI), deploy with the existing private mounts and operator permissions,
+   and recheck authenticated LAN/Tailscale access. Seed a genuine encrypted Codex
+   conversation, restart the container, then verify resume and fork ownership via
+   SOCKS. An unbound encrypted conversation must still fail with 409. The live
+   smoke helper in `client-usage/verify-owner-continuation.mjs` uses a restricted
+   loopback SOCKS relay; this does not verify a different device's tunnel. Retain
+   the saved conversation state privately, never in Git.
 
 Do not run a live redemption as an update gate. Fixture tests cover provider
 outcomes and idempotency without spending credits. Production tailnet/device ACL

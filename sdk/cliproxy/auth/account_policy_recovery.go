@@ -91,6 +91,11 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		return nil
 	}
 	id := before.Identity.CredentialID
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, id)
+	if errMutation != nil {
+		return errMutation
+	}
+	defer releaseMutation()
 	// Keep the published credential blocked until both persistence layers accept
 	// recovery, serialized with every independent cooldown save.
 	m.configCooldownMu.Lock()
@@ -117,6 +122,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 			return &accountpolicy.Error{Code: "identity_mismatch", Message: "current credential ownership changed"}
 		}
 	}
+	publishedBefore := auth.Clone()
 	auth = auth.Clone()
 	changed := false
 	now := after.ObservedAt
@@ -156,12 +162,14 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 	}
 	auth.Generation++
 	auth.UpdatedAt = now
-	snapshot := auth.Clone()
-	errPersist := m.persist(context.WithoutCancel(ctx), auth)
+	errPersist := m.persistLocked(context.WithoutCancel(ctx), auth)
 	if errPersist != nil {
 		m.mu.Unlock()
 		return fmt.Errorf("persist recovered credential: %w", errPersist)
 	}
+	// Preserve runtime-only changes made while upstream persistence released m.mu.
+	mergeAuthSaveDelta(auth, publishedBefore, m.auths[id], false)
+	snapshot := auth.Clone()
 	if store := m.cooldownStore; store != nil {
 		records := make([]CooldownStateRecord, 0)
 		for candidateID, candidate := range m.auths {
@@ -186,6 +194,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 	}
 	m.auths[id] = auth
 	m.mu.Unlock()
+	releaseMutation()
 	supported, epoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supported))
 	for _, model := range supported {

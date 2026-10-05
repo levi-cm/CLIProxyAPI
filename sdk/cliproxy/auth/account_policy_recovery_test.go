@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
@@ -59,6 +60,58 @@ func TestPolicyRecoveryPersistenceFailureRemainsRetryable(t *testing.T) {
 	if a.ModelStates["gpt-5"].Quota.Exceeded {
 		t.Fatal("retry did not clear quota")
 	}
+}
+
+func TestPolicyRecoveryUsesUpstreamPersistenceTransaction(t *testing.T) {
+	m, before, after := recoveryFixture()
+	m.auths["a"].Metadata = map[string]any{"type": "codex", "account_id": "account-a", "workspace_id": "workspace-a"}
+	saved := false
+	m.store = &callbackAuthStore{save: func(auth *Auth) error {
+		current, ok := m.GetByID(auth.ID)
+		if !ok || !current.ModelStates["gpt-5"].Quota.Exceeded {
+			t.Error("recovered credential published before persistence completed")
+		}
+		// Upstream stores may read the manager and enrich saved fields.
+		auth.FileName = "recovered.json"
+		saved = true
+		return nil
+	}}
+	if err := m.RecoverPolicyQuota(context.Background(), before, after); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := m.GetByID("a")
+	if !saved || current.ModelStates["gpt-5"].Quota.Exceeded || current.FileName != "recovered.json" {
+		t.Fatal("recovery did not retain the upstream persistence contract")
+	}
+}
+
+func TestPolicyRecoveryPreservesRuntimeChangesDuringSave(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m, before, after := recoveryFixture()
+		m.auths["a"].Metadata = map[string]any{"type": "codex"}
+		entered, release := make(chan struct{}), make(chan struct{})
+		m.store = &callbackAuthStore{save: func(auth *Auth) error {
+			close(entered)
+			<-release
+			return nil
+		}}
+		finished := make(chan error, 1)
+		go func() { finished <- m.RecoverPolicyQuota(context.Background(), before, after) }()
+		<-entered
+		// Runtime-only refresh scheduling remains live during upstream store I/O.
+		nextRefresh := after.ObservedAt.Add(time.Minute)
+		m.mu.Lock()
+		m.auths["a"].NextRefreshAfter = nextRefresh
+		m.mu.Unlock()
+		close(release)
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+		current, _ := m.GetByID("a")
+		if current.ModelStates["gpt-5"].Quota.Exceeded || !current.NextRefreshAfter.Equal(nextRefresh) {
+			t.Fatal("recovery lost a concurrent runtime-only scheduling change")
+		}
+	})
 }
 
 // Recovery must clear the covered model, preserve another quota, and persist it.

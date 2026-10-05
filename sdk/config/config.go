@@ -15,6 +15,7 @@ type Config = internalconfig.Config
 
 type AccountPolicySettings = accountpolicy.Settings
 type AccountPolicyAccountControl = accountpolicy.AccountControl
+type ModelCatalogs = internalconfig.ModelCatalogs
 
 type ClientConfig = internalconfig.ClientConfig
 type CodexClientConfig = internalconfig.CodexClientConfig
