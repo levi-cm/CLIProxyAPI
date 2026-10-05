@@ -137,31 +137,29 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       await page.setViewportSize({ width, height: 1000 });
       for (const theme of ["light", "dark"]) {
         await page.locator("#theme").selectOption(theme);
-        const ratios = await page
+        const labels = await page
           .locator(".weekly-cycle")
           .evaluateAll((cycles) =>
             cycles.map((cycle) => {
-              const fill = cycle.querySelector(".weekly-cycle-quota");
-              const outline = cycle.querySelector(".weekly-cycle-outline");
-              return (
-                fill.getBoundingClientRect().height /
-                outline.getBoundingClientRect().height
-              );
+              const label = cycle.querySelector(".timeline-cycle-label");
+              return {
+                text: label.textContent,
+                font: parseFloat(getComputedStyle(label).fontSize),
+              };
             }),
           );
-        assert.equal(ratios.length, 2);
-        assert.ok(ratios.some((ratio) => Math.abs(ratio - 0.49) < 0.0001));
-        assert.ok(ratios.some((ratio) => Math.abs(ratio - 0.93) < 0.0001));
+        assert.equal(labels.length, 2);
+        assert.ok(labels.some((label) => /49% left/.test(label.text)));
+        assert.ok(labels.some((label) => /93% left/.test(label.text)));
+        assert.ok(labels.every((label) => label.font >= 11));
         assert.equal(
           await page.evaluate(() => document.documentElement.scrollWidth),
           width,
         );
         if (width === 390)
-          await page
-            .locator("#timeline")
-            .screenshot({
-              path: `output/playwright/weekly-quota-unequal-mobile-${theme}.png`,
-            });
+          await page.locator("#timeline").screenshot({
+            path: `output/playwright/weekly-quota-unequal-mobile-${theme}.png`,
+          });
       }
     }
     assert.equal(await metric("Last known saved resets").textContent(), "4");

@@ -13,18 +13,24 @@ downloaded assets.
 
 Weekly allowance is shown for each account, not averaged across accounts. The
 allowance list and reset timeline follow the current Accounts filters/page, so
-large account pools remain bounded and searchable. Weekly timeline rectangles
-span the provider's seven-day window ending at the observed refresh; the start
-is inferred from that duration. Solid fill height is proportional to the observed
-allowance left, not elapsed time or opacity. A separate thin top strip marks
-elapsed time. Width remains chronological and is never scaled by quota consumed.
-The axis includes the previous seven days plus the next seven days by default;
-the 24-hour option provides a closer look. It never stretches to distant credits.
+large account pools remain bounded and searchable. The reference-style calendar
+timeline has one compact account row, aligned date columns, rounded quota windows
+and a shared Now line. Weekly mode covers fourteen local calendar days, starting
+seven days before today; 5-hour mode covers twelve hours around now. Previous,
+Today and Next change this local view only, without fetching providers or writing
+settings. The selected display timezone determines day boundaries, including
+23/25-hour DST days; quota windows retain their exact provider durations.
+Bars span the window ending at the observed refresh; the start is inferred from
+that duration. Neutral shading marks elapsed time, green marks time remaining.
+Exact allowance left and refresh time are labels, never inferred from width,
+height or opacity. Dashed upcoming outlines are explicitly estimated, not future
+provider observations; manual resets can shift them. Missing periods have no
+invented observed cycles. The main view never stretches to distant credits.
 Saved manual-reset expiries and safety guards remain lines on a separate lane.
 Later expiries are summarized by count with a link to the owning account's full
-inventory, without extra dates cluttering the overview. Unknown allowance has no
-fill; zero allowance has zero fill. Unknown cycles are not invented; stale
-observations remain labelled last-known.
+inventory, without extra dates cluttering the overview. Unknown allowance is
+labelled unavailable; zero allowance is explicitly 0% left. Unknown cycles are
+not invented; stale observations remain labelled last-known.
 On mobile the timeline fits the available width, with account names above each
 chart and unscaled readable date labels; it does not hide cycles in a horizontal
 scroller. The measured traffic chart retains its independent scrollable layout.
@@ -137,6 +143,14 @@ after connection. The two main accounts exercise four-day and seven-day weekly
 windows, with three detailed credits owned by B. Their UTC expiries reproduce
 the reported October 5/22/29 times in fixed GMT+2. Berlin mode instead shows
 October 29 as 18:48 GMT+1 without changing its provider instant.
+
+The timeline regression suite checks 320–1440px layouts in both themes, actual
+elapsed-segment screenshot pixels, fixed bar/font dimensions, timezone changes,
+Weekly/5-hour navigation and keyboard focus across snapshot polling. It also
+asserts that viewing the timeline makes no settings writes or provider refreshes.
+Unit cases cover DST boundaries, exact fractional quota labels, clipped windows,
+unknown/stale evidence and accessible estimated dates. These checks stay inside
+this module; no upstream management assets or routing interfaces are patched.
 
 Fixture controls require `Authorization: Bearer fixture-key`:
 

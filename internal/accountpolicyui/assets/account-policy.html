@@ -158,31 +158,67 @@
           <section class="panel">
             <div class="section-heading">
               <div>
-                <h2>Refresh &amp; reset timeline</h2>
-                <p class="muted">
-                  This week’s allowance and nearby reset expiries.
-                </p>
+                <h2>Quota windows</h2>
+                <p id="timeline-period" class="muted">Two weeks · current</p>
               </div>
-              <label
-                >Timeline range<select id="timeline-range">
-                  <option value="1">Next 24 hours</option>
-                  <option value="7" selected>Next 7 days</option>
-                </select></label
-              >
-            </div>
-            <div class="timeline-legend">
-              <span class="quota">Allowance left (fill height)</span
-              ><span class="elapsed">Elapsed time (top strip)</span
-              ><span class="window">Short-window refresh</span
-              ><span class="expiry">Manual reset expires</span>
+              <div class="timeline-controls">
+                <div
+                  class="timeline-navigation"
+                  role="group"
+                  aria-label="Timeline navigation"
+                >
+                  <button
+                    id="timeline-previous"
+                    type="button"
+                    aria-label="Previous timeline period"
+                  >
+                    ‹
+                  </button>
+                  <button id="timeline-today" type="button">Today</button>
+                  <button
+                    id="timeline-next"
+                    type="button"
+                    aria-label="Next timeline period"
+                  >
+                    ›
+                  </button>
+                </div>
+                <div
+                  class="timeline-modes"
+                  role="group"
+                  aria-label="Quota window"
+                >
+                  <button
+                    type="button"
+                    data-timeline-mode="weekly"
+                    aria-pressed="true"
+                  >
+                    Weekly
+                  </button>
+                  <button
+                    type="button"
+                    data-timeline-mode="5h"
+                    aria-pressed="false"
+                  >
+                    5-hour
+                  </button>
+                </div>
+              </div>
             </div>
             <div id="timeline"></div>
+            <div class="timeline-legend">
+              <span class="current">Current window</span>
+              <span class="upcoming">Upcoming (estimated)</span>
+              <span class="elapsed">Elapsed time</span>
+              <span class="now">Now</span>
+              <span class="expiry">Manual reset expiry</span>
+            </div>
             <p class="field-help">
-              Width shows the seven-day cycle; fill height matches the account’s
-              allowance left. The top strip marks elapsed time. Manual reset
-              expiries stay lines; later expiries are in account details. Hover
-              or focus for exact dates. A red dashed line, when present, is the
-              expiry safety fallback.
+              Bars show time from window opening to refresh, not quota consumed.
+              Labels show allowance left. Upcoming outlines are estimates;
+              manual resets can shift them. Expiry lines stay separate, with
+              later dates in account details. Hover or focus for exact dates; a
+              red dashed line is the expiry safety fallback.
             </p>
           </section>
         </section>

@@ -157,6 +157,7 @@
     settingsDirty = false,
     lastActivityStatus = "unavailable";
   let lastSnapshotAt = 0;
+  const timelineView = { mode: "weekly", offset: 0 };
   const accountDrafts = new Map();
   function replaceMarkup(id, html) {
     const element = $(id);
@@ -412,6 +413,28 @@
       " of " +
       page.total +
       " matching accounts. Uses the Accounts filters and page.";
+    const timelineNow = Date.now();
+    const timelineBounds = dashboard.timelineRange(
+      timelineNow,
+      timelineView.mode,
+      timelineView.offset,
+      zone,
+    );
+    const dateOnly = (at) => absolute(new Date(at).toISOString()).split(",")[0];
+    $("timeline-period").textContent =
+      dateOnly(timelineBounds.start) +
+      " – " +
+      dateOnly(timelineBounds.end - 1) +
+      (timelineView.mode === "weekly" ? " · two weeks" : " · 12 hours") +
+      (timelineView.offset === 0 ? " · current" : " · observed windows only");
+    $("timeline-previous").disabled = timelineView.offset <= -52;
+    $("timeline-next").disabled = timelineView.offset >= 52;
+    document.querySelectorAll("[data-timeline-mode]").forEach((button) => {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.timelineMode === timelineView.mode),
+      );
+    });
     replaceMarkup(
       "timeline",
       '<p class="field-help">Showing ' +
@@ -426,9 +449,10 @@
         dashboard.renderTimeline(
           page.items,
           state.settings,
-          Date.now(),
-          Number($("timeline-range").value),
+          timelineNow,
+          7,
           absolute,
+          { ...timelineView, zone },
         ),
     );
     $("summary").textContent =
@@ -1372,7 +1396,25 @@
     renderOverview();
   });
   $("measure").addEventListener("change", renderOverview);
-  $("timeline-range").addEventListener("change", renderOverview);
+  document.querySelectorAll("[data-timeline-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      timelineView.mode = button.dataset.timelineMode;
+      timelineView.offset = 0;
+      renderOverview();
+    });
+  });
+  $("timeline-previous").addEventListener("click", () => {
+    timelineView.offset = Math.max(-52, timelineView.offset - 1);
+    renderOverview();
+  });
+  $("timeline-next").addEventListener("click", () => {
+    timelineView.offset = Math.min(52, timelineView.offset + 1);
+    renderOverview();
+  });
+  $("timeline-today").addEventListener("click", () => {
+    timelineView.offset = 0;
+    renderOverview();
+  });
   $("range").addEventListener("change", () => poller.refresh());
   $("theme").addEventListener("change", () => {
     if ($("theme").value === "system")

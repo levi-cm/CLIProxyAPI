@@ -126,15 +126,16 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
       await page.evaluate(() => document.activeElement.dataset.openAccount),
       servingID,
     );
-    const marker = page.locator(".timeline-marker").first();
-    await marker.focus();
-    const markerID = await marker.getAttribute("data-focus-key");
+    // Account A's distant credits are intentionally absent from the main axis.
+    const cycle = page.locator(".weekly-cycle").first();
+    await cycle.focus();
+    const cycleID = await cycle.getAttribute("data-focus-key");
     await page.waitForResponse((response) =>
       response.url().includes("/dashboard?range="),
     );
     assert.equal(
       await page.evaluate(() => document.activeElement.dataset.focusKey),
-      markerID,
+      cycleID,
     );
     await control({ stale_activity: true });
     await page.waitForFunction(
@@ -214,6 +215,12 @@ const base = process.env.ACCOUNT_POLICY_PREVIEW_URL || "http://127.0.0.1:18318";
           if (account.identity.credential_id === "account-b") {
             account.observed_at = account.inventory_observed_at =
               new Date().toISOString();
+            // Draft tests must not depend on a fixed fixture expiry being future.
+            for (const credit of account.credits)
+              if (credit.expires_at != null)
+                credit.expires_at = new Date(
+                  Date.now() + 3600000,
+                ).toISOString();
           }
         await route.fulfill({ response, json });
       },

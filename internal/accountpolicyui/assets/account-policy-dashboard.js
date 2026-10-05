@@ -30,29 +30,47 @@
           value,
         )
       : "Unavailable";
+  // Subtract decimal provider percentages without rounding or binary float noise.
+  function remainingPercentage(used) {
+    const [coefficient, exponent = "0"] = String(used).split("e");
+    const fractional = (coefficient.split(".")[1] || "").length;
+    const decimals = Math.max(0, fractional - Number(exponent));
+    const scale = 10n ** BigInt(decimals);
+    const units =
+      BigInt(coefficient.replace(".", "")) *
+      10n ** BigInt(Math.max(0, Number(exponent) - fractional));
+    const remaining = (100n * scale - units)
+      .toString()
+      .padStart(decimals + 1, "0");
+    if (!decimals) return remaining;
+    const fraction = remaining.slice(-decimals).replace(/0+$/, "");
+    return remaining.slice(0, -decimals) + (fraction ? "." + fraction : "");
+  }
   // Display evidence may outlive the stricter backend action freshness window.
-  function quotaView(account, settings, now) {
+  function quotaView(account, settings, now, duration = 604800) {
     const validTime = (value) => {
       const at = stamp(value);
       return at !== null && at <= now ? at : null;
     };
     const bucket = (account.buckets || []).find(
       (b) =>
-        b.duration_seconds === 604800 &&
+        b.duration_seconds === duration &&
         !b.model &&
         (!b.scope || b.scope === "ordinary"),
     );
     const at = validTime(bucket?.observed_at || account.observed_at);
     const inventoryAt = validTime(account.inventory_observed_at);
     const limit = (settings.freshness_seconds || 120) * 1000;
+    const validAllowance =
+      bucket &&
+      at !== null &&
+      measured(bucket.used_percent) &&
+      bucket.used_percent <= 100;
     return {
-      remaining:
-        bucket &&
-        at !== null &&
-        measured(bucket.used_percent) &&
-        bucket.used_percent <= 100
-          ? 100 - bucket.used_percent
-          : null,
+      remaining: validAllowance ? 100 - bucket.used_percent : null,
+      remainingLabel: validAllowance
+        ? remainingPercentage(bucket.used_percent)
+        : null,
       observedAt: at,
       fresh: at !== null && now - at <= limit,
       resetAt: bucket?.reset_at,
@@ -94,15 +112,18 @@
     };
   }
   function weeklyCycle(bucket, now, start, end) {
+    return quotaCycle(bucket, now, start, end, 604800);
+  }
+  function quotaCycle(bucket, now, start, end, duration) {
     const reset = stamp(bucket.reset_at);
     if (
-      bucket.duration_seconds !== 604800 ||
+      bucket.duration_seconds !== duration ||
       bucket.model ||
       (bucket.scope && bucket.scope !== "ordinary") ||
       reset === null
     )
       return null;
-    const cycleStart = reset - 604800000;
+    const cycleStart = reset - duration * 1000;
     const visibleStart = Math.max(start, cycleStart),
       visibleEnd = Math.min(end, reset);
     if (visibleEnd <= visibleStart) return null;
@@ -112,6 +133,80 @@
       visibleStart,
       visibleEnd,
       elapsedEnd: Math.max(visibleStart, Math.min(now, visibleEnd)),
+    };
+  }
+  function timelineRange(
+    now,
+    mode = "weekly",
+    offset = 0,
+    zone = "Europe/Berlin",
+  ) {
+    offset = Math.max(-52, Math.min(52, Math.trunc(Number(offset) || 0)));
+    const fixed = zone === "GMT+2";
+    const timeZone = fixed ? "UTC" : zone;
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const wall = (at) =>
+      Object.fromEntries(
+        formatter
+          .formatToParts(new Date(at + (fixed ? 7200000 : 0)))
+          .filter((p) => p.type !== "literal")
+          .map((p) => [p.type, Number(p.value)]),
+      );
+    if (mode === "5h") {
+      const start =
+        Math.floor(now / 3600000) * 3600000 -
+        6 * 3600000 +
+        offset * 12 * 3600000;
+      return {
+        start,
+        end: start + 12 * 3600000,
+        ticks: Array.from({ length: 12 }, (_, i) => ({
+          at: start + i * 3600000,
+          end: start + (i + 1) * 3600000,
+        })),
+        mode,
+      };
+    }
+    const today = wall(now);
+    const calendar = Date.UTC(
+      today.year,
+      today.month - 1,
+      today.day - 7 + offset * 14,
+    );
+    const midnight = (day) => {
+      const target = calendar + day * 86400000;
+      let at = target;
+      // Solve local midnight against the actual offset on each date, not today's
+      // offset. DST days can be 23/25 hours while quota durations stay exact.
+      for (let i = 0; i < 3; i++) {
+        const parts = wall(at);
+        const local = Date.UTC(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          parts.hour,
+          parts.minute,
+        );
+        at += target - local;
+      }
+      return at;
+    };
+    const boundaries = Array.from({ length: 15 }, (_, i) => midnight(i));
+    return {
+      start: boundaries[0],
+      end: boundaries[14],
+      ticks: boundaries
+        .slice(0, 14)
+        .map((at, i) => ({ at, end: boundaries[i + 1] })),
+      mode: "weekly",
     };
   }
   function renderAllowances(accounts, settings, now, absolute) {
@@ -411,20 +506,66 @@
       `<text x="${left}" y="${height - 10}">${escape(absolute(new Date(start).toISOString()))}</text><text x="${width - right}" y="${height - 10}" text-anchor="end">${escape(absolute(new Date(end).toISOString()))}</text></svg>`
     );
   }
-  function renderTimeline(accounts, settings, now, days, absolute) {
-    // Include the past week so elapsed cycle time is visible, not clipped at Now.
-    const start = now - 604800000;
-    const end = now + (days === 1 ? 1 : 7) * 86400000;
-    const x = (at) => 20 + ((at - start) / (end - start)) * 860;
-    const ticks = [start, now, end];
+  function renderTimeline(
+    accounts,
+    settings,
+    now,
+    days,
+    absolute,
+    options = {},
+  ) {
+    const zone = options.zone || "Europe/Berlin";
+    const mode = options.mode === "5h" ? "5h" : "weekly";
+    const duration = mode === "5h" ? 18000 : 604800;
+    const { start, end, ticks } = timelineRange(
+      now,
+      mode,
+      options.offset,
+      zone,
+    );
+    const x = (at) => (100 * (at - start)) / (end - start);
+    const pct = (value) => `${value.toFixed(6)}%`;
+    const local = (at, format) =>
+      new Intl.DateTimeFormat("en-GB", {
+        timeZone: zone === "GMT+2" ? "UTC" : zone,
+        ...format,
+      }).format(new Date(at + (zone === "GMT+2" ? 7200000 : 0)));
+    const shortDate = (at) =>
+      local(at, {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      });
+    const nowLine = (height) =>
+      now >= start && now <= end
+        ? `<line x1="${pct(x(now))}" x2="${pct(x(now))}" y1="0" y2="${height}" class="timeline-now"><title>Now: ${escape(absolute(new Date(now).toISOString()))}</title></line>`
+        : "";
+    const grid = (height) =>
+      ticks
+        .map(
+          (t) =>
+            `<line x1="${pct(x(t.at))}" x2="${pct(x(t.at))}" y1="0" y2="${height}" class="timeline-day-grid"/>`,
+        )
+        .join("");
     const axis = ticks
-      .map(
-        (at) =>
-          `<span class="timeline-tick ${at === start ? "start" : at === end ? "end" : "now"}">${escape(at === now ? "Now" : absolute(new Date(at).toISOString()).replace(/(\d{2}\/\d{2})\/\d{4}, (\d{2}:\d{2}).*/, "$1 $2"))}</span>`,
-      )
+      .map((t) => {
+        const center = pct(x((t.at + t.end) / 2));
+        const today = now >= t.at && now < t.end;
+        const primary =
+          mode === "weekly"
+            ? local(t.at, { day: "2-digit", month: "2-digit" })
+            : local(t.at, {
+                hour: "2-digit",
+                minute: "2-digit",
+                hourCycle: "h23",
+              });
+        return `<g class="timeline-day${today ? " today" : ""}"><title>${escape(absolute(new Date(t.at).toISOString()))}</title><text x="${center}" y="15" text-anchor="middle" class="timeline-day-weekday">${escape(local(t.at, { weekday: "short" }))}</text><text x="${center}" y="34" text-anchor="middle" class="timeline-day-date">${escape(primary)}</text><text x="${center}" y="34" text-anchor="middle" class="timeline-day-mobile">${escape(local(t.at, mode === "weekly" ? { day: "2-digit" } : { hour: "2-digit", hourCycle: "h23" }))}</text></g>`;
+      })
       .join("");
     const rows = accounts
-      .map((a) => {
+      .map((a, index) => {
         const events = timelineEvents(a, settings, now);
         const inside = events.filter(
           (e) =>
@@ -434,40 +575,52 @@
           (e) => e.kind === "expiry" && stamp(e.at) > end,
         );
         const marker = (e) => {
-          const position = x(stamp(e.at));
-          return `<g class="timeline-marker ${e.kind}" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":" + e.kind + ":" + (e.credit || "") + ":" + e.at)}" role="img" aria-label="${escape(e.label + ": " + absolute(e.at))}"><title>${escape(e.label + ": " + absolute(e.at) + (e.credit ? " (credit " + e.credit + ")" : ""))}</title><line x1="${position}" y1="8" x2="${position}" y2="34"/></g>`;
+          const position = pct(x(stamp(e.at)));
+          return `<g class="timeline-marker ${e.kind}" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":" + e.kind + ":" + (e.credit || "") + ":" + e.at)}" role="img" aria-label="${escape(e.label + ": " + absolute(e.at))}"><title>${escape(e.label + ": " + absolute(e.at) + (e.credit ? " (credit " + e.credit + ")" : ""))}</title><line x1="${position}" y1="3" x2="${position}" y2="19"/></g>`;
         };
         const manualMarks = inside
           .filter((e) => e.kind !== "window")
           .map(marker)
           .join("");
-        const windowMarks = inside
-          .filter((e) => e.kind === "window")
-          .map(marker)
-          .join("");
         const bands = (a.buckets || [])
-          .map((b) => {
-            const e = weeklyCycle(b, now, start, end);
+          .map((b, bucketIndex) => {
+            const e = quotaCycle(b, now, start, end, duration);
             if (!e) return "";
-            const quota = quotaView({ ...a, buckets: [b] }, settings, now);
-            const height =
-              quota.remaining === null ? null : quota.remaining * 0.4;
+            const quota = quotaView(
+              { ...a, buckets: [b] },
+              settings,
+              now,
+              duration,
+            );
             const allowance =
-              height === null
-                ? "Weekly allowance unavailable"
-                : `${number(quota.remaining)}% left${quota.fresh ? "" : " (last known)"}`;
-            const label = `Seven-day weekly cycle: ${absolute(new Date(e.start).toISOString())} to ${absolute(new Date(e.end).toISOString())}. Start inferred from provider refresh and seven-day duration. ${allowance}. Fill height shows allowance left; the top strip shows elapsed time.`;
+              quota.remaining === null
+                ? "Allowance unavailable"
+                : `${quota.remainingLabel}% left${quota.fresh ? "" : " (last known)"}`;
+            const label = `${mode === "weekly" ? "Seven-day weekly cycle" : "Five-hour window"}: ${absolute(new Date(e.start).toISOString())} to ${absolute(new Date(e.end).toISOString())}. Start inferred from provider refresh and duration. ${allowance}. Width and shading show time, not quota consumed.`;
             const left = x(e.visibleStart),
               width = x(e.visibleEnd) - left;
-            return `<g class="weekly-cycle" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":cycle:" + e.end)}" role="img" aria-label="${escape(label)}"><title>${escape(label)}</title><rect x="${left}" y="14" width="${width}" height="40" class="weekly-cycle-remaining"/>${height !== null ? `<rect x="${left}" y="${54 - height}" width="${width}" height="${height}" class="weekly-cycle-quota"/>` : ""}<rect x="${left}" y="6" width="${width}" height="4" class="weekly-cycle-remaining"/>${e.elapsedEnd > e.visibleStart ? `<rect x="${left}" y="6" width="${x(e.elapsedEnd) - left}" height="4" class="weekly-cycle-elapsed"/>` : ""}<rect x="${left}" y="14" width="${width}" height="40" class="weekly-cycle-outline"/></g>`;
+            const clip = `timeline-clip-${index}-${bucketIndex}`;
+            const futureEnd = Math.min(end, e.end + duration * 1000);
+            const projectedLabel = `Estimated next window: ${absolute(new Date(e.end).toISOString())} to ${absolute(new Date(e.end + duration * 1000).toISOString())}. Not observed; manual resets may shift it.`;
+            const future =
+              e.end > now && futureEnd > e.end
+                ? `<g class="timeline-projection" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":projected:" + duration + ":" + e.end)}" role="img" aria-label="${escape(projectedLabel)}"><title>${escape(projectedLabel)}</title><rect x="${pct(x(e.end))}" y="9" width="${pct(x(futureEnd) - x(e.end))}" height="24" rx="12"/></g>`
+                : "";
+            return `${future}<g class="weekly-cycle" tabindex="0" data-focus-key="${escape(a.identity.credential_id + ":cycle:" + duration + ":" + e.end)}" role="img" aria-label="${escape(label)}"><title>${escape(label)}</title><defs><clipPath id="${clip}"><rect x="${pct(left)}" y="9" width="${pct(width)}" height="24" rx="12"/></clipPath></defs><rect x="${pct(left)}" y="9" width="${pct(width)}" height="24" rx="12" class="weekly-cycle-remaining"/>${e.elapsedEnd > e.visibleStart ? `<rect x="${pct(left)}" y="9" width="${pct(x(e.elapsedEnd) - left)}" height="24" clip-path="url(#${clip})" class="weekly-cycle-elapsed"/>` : ""}<rect x="${pct(left)}" y="9" width="${pct(width)}" height="24" rx="12" class="weekly-cycle-outline"/><text x="${pct(left)}" dx="8" y="25" clip-path="url(#${clip})" class="timeline-cycle-label">${escape(allowance + " · " + shortDate(e.end))}</text></g>`;
           })
           .join("");
-        const nowLine = `<line x1="${x(now)}" x2="${x(now)}" y1="3" y2="39" class="timeline-now"/>`;
-        const quota = quotaView(a, settings, now);
-        return `<div class="timeline-row"><div class="timeline-name">${escape(name(a))}${quota.remaining !== null ? `<small>${escape(number(quota.remaining))}% left${quota.fresh ? "" : " (last known)"}</small>` : ""}</div><div class="timeline-lanes"><div class="timeline-lane"><span class="timeline-lane-label">Weekly allowance</span><svg viewBox="0 0 900 64" preserveAspectRatio="none" class="timeline-track timeline-weekly" role="img" aria-label="${escape(name(a))} automatic allowance refresh">${bands}${windowMarks}<line x1="${x(now)}" x2="${x(now)}" y1="3" y2="61" class="timeline-now"/></svg>${!bands ? '<span class="muted">No observed weekly cycle in this range</span>' : ""}</div><div class="timeline-lane"><span class="timeline-lane-label">Saved manual resets</span><svg viewBox="0 0 900 42" preserveAspectRatio="none" class="timeline-track timeline-manual" role="img" aria-label="${escape(name(a))} manual reset expiry"><line x1="20" y1="21" x2="880" y2="21" class="chart-grid"/>${manualMarks}${nowLine}</svg>${!inside.some((e) => e.kind === "expiry") ? '<span class="muted">No expiry in this range</span>' : ""}${later.length ? `<button type="button" class="timeline-later" data-open-account="${escape(a.identity.credential_id)}">${later.length} later ${later.length === 1 ? "expiry" : "expiries"} · View account</button>` : ""}</div></div></div>`;
+        const quota = quotaView(a, settings, now, duration);
+        const description =
+          quota.remaining === null
+            ? "Allowance unavailable"
+            : `${quota.remainingLabel}% left${quota.fresh ? "" : " (last known)"}`;
+        const resets = manualMarks
+          ? `<div class="timeline-reset-lane"><span class="timeline-lane-label">Saved manual resets</span><svg class="timeline-track timeline-manual" role="img" aria-label="${escape(name(a))} manual reset expiry">${grid(22)}${manualMarks}${nowLine(22)}</svg></div>`
+          : "";
+        return `<div class="timeline-row"><div class="timeline-name"><button type="button" class="timeline-account" data-focus-key="${escape(a.identity.credential_id + ":timeline-account")}" data-open-account="${escape(a.identity.credential_id)}" title="${escape(name(a))}">${escape(name(a))}</button><span class="timeline-duration">${mode === "weekly" ? "7d" : "5h"}</span><small>${escape(description)}${stamp(quota.resetAt) !== null ? `<span class="timeline-refresh-label"> · ${escape(shortDate(stamp(quota.resetAt)))}</span>` : ""}</small></div><div class="timeline-lanes"><div class="timeline-lane"><svg class="timeline-track timeline-weekly" role="img" aria-label="${escape(name(a))} ${mode === "weekly" ? "Weekly allowance" : "Five-hour window"}">${grid(42)}${bands}${nowLine(42)}</svg>${!bands ? '<span class="timeline-missing">No observed window in this range</span>' : ""}</div>${resets}${later.length ? `<button type="button" class="timeline-later" data-focus-key="${escape(a.identity.credential_id + ":timeline-later")}" data-open-account="${escape(a.identity.credential_id)}">${later.length} later ${later.length === 1 ? "expiry" : "expiries"} · View account</button>` : ""}</div></div>`;
       })
       .join("");
-    return `<div class="timeline-axis"><span></span><div class="timeline-ticks ${days === 1 ? "day" : "week"}">${axis}</div></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}`;
+    return `<div class="timeline-table"><div class="timeline-axis"><span>Account</span><svg class="timeline-axis-track" role="img" aria-label="${escape(mode === "weekly" ? "Daily date columns" : "Hourly time columns")}">${grid(44)}${axis}</svg></div>${rows || '<div class="empty-state">No accounts match these filters.</div>'}</div>`;
   }
   const help = {
     automation: {
@@ -498,6 +651,8 @@
     activityView,
     quotaView,
     weeklyCycle,
+    quotaCycle,
+    timelineRange,
     renderAllowances,
     pageAccounts,
     mergeAccounts,
