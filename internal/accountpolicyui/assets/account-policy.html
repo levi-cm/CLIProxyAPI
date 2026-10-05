@@ -448,6 +448,21 @@
                   transfers an active stream, live WebSocket or account-specific
                   continuation blindly.
                 </dd>
+                <dt>Restart, resume &amp; forked agents</dt>
+                <dd>
+                  Successful conversation owners are saved in the private policy
+                  state volume. Resume and child inheritance require a matching
+                  caller, session, model and unchanged credential/account/workspace
+                  identity. A cache expiry or restart does not erase saved ownership.
+                </dd>
+                <dt>Lost conversation ownership</dt>
+                <dd>
+                  A 409 ownership error is not a quota measurement. Already-lost
+                  owners cannot be guessed from account usage or recent activity.
+                  Restore a verified ownership backup, or start a new conversation
+                  with a plain-text summary. Retrying or changing the routing mode
+                  does not safely recover encrypted conversation state.
+                </dd>
                 <dt>Account hold / Allowance reserve</dt>
                 <dd>
                   A hold excludes the account from new deadline-policy routing

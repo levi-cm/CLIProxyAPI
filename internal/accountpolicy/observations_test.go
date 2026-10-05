@@ -198,8 +198,8 @@ func TestObservationOnlyTicksRefreshAndPersist(t *testing.T) {
 	if err = service.Tick(context.Background()); err != nil || reads != 2 {
 		t.Fatalf("coalesced event did not refresh once: reads=%d err=%v", reads, err)
 	}
-	// Account b has a stable two-second jitter after the five-minute idle interval.
-	now = now.Add(5*time.Minute + time.Second)
+	// Account b retains two-second jitter inside the two-minute freshness window.
+	now = now.Add(time.Minute + time.Second)
 	if err = service.Tick(context.Background()); err != nil || reads != 2 {
 		t.Fatalf("observation ignored account polling jitter: reads=%d err=%v", reads, err)
 	}

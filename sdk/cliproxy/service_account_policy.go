@@ -9,7 +9,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
-	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -95,6 +94,7 @@ func (s *Service) newPolicyRoutingSelector(state routingRuntimeState) coreauth.S
 	selector := coreauth.NewEarliestDeadlineSelector(s.accountPolicy, newRoutingSelector(bare))
 	selector.SetIdleCheck(s.coreManager.PolicyIsIdle)
 	selector.SetModelResolver(s.coreManager.PolicyModelForAuth)
+	selector.SetBindingAuthResolver(s.coreManager.GetByID)
 	disabledFallback := s.accountPolicyDisabledFallback
 	if disabledFallback == nil {
 		disabledFallback = newRoutingSelector(state)
@@ -295,35 +295,7 @@ func policyMetadata(auth *coreauth.Auth, name string) string {
 }
 
 func policyIdentity(auth *coreauth.Auth) (accountpolicy.Identity, error) {
-	identity := accountpolicy.Identity{}
-	if auth == nil || auth.Provider != "codex" || auth.ID == "" {
-		return identity, &accountpolicy.Error{Code: "invalid_account", Message: "Codex credential identity is unavailable"}
-	}
-	account := policyMetadata(auth, "account_id")
-	for _, tokenKey := range []string{"id_token", "access_token"} {
-		token := policyMetadata(auth, tokenKey)
-		if token == "" || strings.Count(token, ".") != 2 {
-			continue
-		}
-		claims, err := codexauth.ParseJWTToken(token)
-		if err != nil {
-			return identity, &accountpolicy.Error{Code: "identity_mismatch", Message: "Codex credential claims are invalid"}
-		}
-		claimAccount := strings.TrimSpace(claims.GetAccountID())
-		if claimAccount == "" {
-			continue
-		}
-		if account != "" && account != claimAccount {
-			return identity, &accountpolicy.Error{Code: "identity_mismatch", Message: "Codex account metadata conflicts with credential claims"}
-		}
-		account = claimAccount
-	}
-	workspace := policyMetadata(auth, "workspace_id")
-	if account == "" || workspace != "" && workspace != account {
-		return identity, &accountpolicy.Error{Code: "identity_mismatch", Message: "Codex account and workspace mapping is unsupported"}
-	}
-	// ChatGPT account identity is the workspace identity used by the Codex backend.
-	return accountpolicy.Identity{CredentialID: auth.ID, AccountID: account, WorkspaceID: account, Provider: "codex", Alias: auth.Label, Generation: auth.Generation}, nil
+	return coreauth.PolicyAccountIdentity(auth)
 }
 
 func (s *Service) policyAccountIdentities() []accountpolicy.Identity {

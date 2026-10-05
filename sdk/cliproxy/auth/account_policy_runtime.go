@@ -23,14 +23,16 @@ type PolicyRuntimeStatus struct {
 }
 
 type policyRequestLease struct {
-	mu             sync.Mutex
-	manager        *Manager
-	authID         string
-	transport      string
-	released       bool
-	ctx            context.Context
-	streaming      bool
-	refreshPending bool
+	mu              sync.Mutex
+	manager         *Manager
+	authID          string
+	transport       string
+	released        bool
+	ctx             context.Context
+	streaming       bool
+	refreshPending  bool
+	clientKey       policyClientKey
+	clientSelection policyClientSelection
 }
 
 type policyRequestDemand struct {
@@ -47,6 +49,7 @@ func (m *Manager) trackPolicyRequest(ctx context.Context, opts cliproxyexecutor.
 		ctx = context.Background()
 	}
 	lease := &policyRequestLease{manager: m, ctx: ctx, transport: "downstream_http;upstream_unknown"}
+	lease.clientKey = policyClientKeyFromOptions(opts)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) {
 		lease.transport = "downstream_websocket;upstream_unknown"
 	}

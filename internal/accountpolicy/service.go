@@ -503,12 +503,7 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 			interval = time.Minute
 		}
 	}
-	// Stable per-account jitter avoids synchronized provider polling without delaying expiry checks.
-	var hash uint32
-	for _, r := range id.CredentialID {
-		hash = hash*31 + uint32(r)
-	}
-	tracking = discoveryState{Next: now.Add(interval + time.Duration(hash%6)*time.Second)}
+	tracking = discoveryState{Next: now.Add(observationDelay(interval, settings.FreshnessSeconds, id.CredentialID))}
 	tracking.Identity = id
 	tracking.Requested = requested
 	s.discovery[id.CredentialID] = tracking

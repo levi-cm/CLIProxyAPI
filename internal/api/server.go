@@ -236,6 +236,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Setup routes
 	s.setupRoutes()
 	s.registerAccountPolicyPanelRoutes()
+	s.registerAccountPolicyClientRoutes(optionState.accountPolicy)
 
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {

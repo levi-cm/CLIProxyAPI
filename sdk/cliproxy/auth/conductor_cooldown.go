@@ -746,6 +746,7 @@ func cooldownReason(statusMessage string, quota QuotaState, lastErr *Error) stri
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	defer func() { m.recordPolicyClientResult(result) }()
 	policyQuotaWake := false
 	defer func() { m.observePolicyResult(result, policyQuotaWake) }()
 	defer finishPolicyAttempt(result.Options)

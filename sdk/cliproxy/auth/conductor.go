@@ -210,6 +210,7 @@ type Manager struct {
 	persistLocks            sync.Map
 	policyRuntimeMu         sync.Mutex
 	policyRuntime           map[string]PolicyRuntimeStatus
+	policyClientHistory     map[policyClientKey]policyClientSelection
 	policyPending           map[*policyRequestLease]policyRequestDemand
 	policyResetReservations map[string]chan struct{}
 	policyRefreshCallback   func(string)

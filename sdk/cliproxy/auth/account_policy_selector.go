@@ -11,11 +11,12 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicybindings"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
-// AccountPolicySource supplies immutable observations; selection performs no I/O.
+// AccountPolicySource supplies immutable observations; selection never polls providers.
 type AccountPolicySource interface {
 	Settings() accountpolicy.Settings
 	Snapshot(string) (accountpolicy.Snapshot, bool)
@@ -42,6 +43,8 @@ type EarliestDeadlineSelector struct {
 	idle             func(string) bool
 	modelResolver    func(*Auth, string) string
 	bindings         map[string]policyBinding
+	bindingStore     *accountpolicybindings.Store
+	bindingAuth      func(string) (*Auth, bool)
 }
 
 func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, clocks ...func() time.Time) *EarliestDeadlineSelector {
@@ -122,6 +125,7 @@ func (s *EarliestDeadlineSelector) OnResult(result Result) {
 	// A failed account remains the thread's owner until a subsequent request
 	// proves that failover can preserve its conversation state.
 	if result.Success {
+		s.persistDurableBinding(result)
 		s.affinity.OnResult(result)
 	}
 }
@@ -212,6 +216,9 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 		}
 		return (&deadlineRankingSelector{owner: s}).Pick(ctx, provider, model, opts, eligible)
 	}
+	if errRestore := s.restoreDurableBindings(ctx, provider, model, opts, eligible); errRestore != nil {
+		return nil, errRestore
+	}
 	selected, errPick := s.affinity.Pick(ctx, provider, model, opts, eligible)
 	if errPick != nil || selected == nil {
 		return selected, errPick
@@ -233,6 +240,7 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 		}
 		s.mu.Unlock()
 	}
+	s.captureDurableBinding(provider, model, opts, selected)
 	return selected, nil
 }
 

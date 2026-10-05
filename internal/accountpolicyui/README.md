@@ -73,9 +73,9 @@ account rows follow the Accounts filters and current page.
 reads and private completion records while `enabled: false` and `automation: off`
 preserve ordinary routing and disable reset execution/cooldown recovery. Both
 switches default false. The observations opt-in is config-authoritative on restart;
-UI changes apply at runtime, so also set YAML for a persistent opt-in. Idle provider
-discovery is approximately five minutes plus stable jitter; active/near-expiry
-accounts refresh approximately once a minute, respecting provider backoff.
+UI changes apply at runtime, so also set YAML for a persistent opt-in. With the
+default two-minute freshness window, provider discovery refreshes idle and active
+accounts approximately every 60–65 seconds, respecting provider backoff.
 The two-minute action freshness window is deliberately stricter: the UI keeps
 last-known evidence with stale labels, but does not treat it as permission to route
 or redeem. Inventory counts require an actual inventory observation. Empty usage

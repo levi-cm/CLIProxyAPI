@@ -29,10 +29,17 @@ Companion failure/rollback does not stop the proxy. No deprecated v0 changes.
 | `internal/api/handlers/management/account_policy*.go` | Authenticated v8 controls, sanitized diagnostics and read-only dashboard telemetry |
 | `internal/accountpolicyui/` | Maintained embedded extension, without changing the upstream panel |
 | `internal/accountpolicyusage/` | Private bounded allowlisted usage records and cached local dashboard aggregates through the existing usage plugin interface |
+| `internal/accountpolicybindings/` | Private atomic conversation ownership state; caller/session/model isolation and ownership CAS |
 | `cmd/proxyctl/`, `cmd/account-policy-preview/`, `companion/` | Operator CLI, fixture-only browser preview and separate fleet workflow |
 
 Keep business rules in these modules, not in upstream hooks. Avoid renaming,
 moving, or reformatting unrelated upstream functions when updating the fork.
+
+Preserve the durable binding hooks in `account_policy_selector.go` and the fresh
+credential resolver in `service_account_policy.go`. See
+`docs/account-policy-conversation-ownership.md` for resume/fork validation and
+recovery. The independent client usage endpoint/MCP adapter and completion tracking
+hooks are documented in `client-usage/README.md`; they do not infer conversation owners.
 
 ## Integration points to recheck after a merge
 
