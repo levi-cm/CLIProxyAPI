@@ -15,18 +15,19 @@ import (
 )
 
 type storedState struct {
-	Override         RoutingOverride           `json:"routing_override"`
-	OverrideIdentity Identity                  `json:"routing_override_identity"`
-	Version          int                       `json:"version"`
-	Revision         uint64                    `json:"revision"`
-	Settings         Settings                  `json:"settings"`
-	Snapshots        map[string]Snapshot       `json:"snapshots"`
-	Operations       []Operation               `json:"operations"`
-	Schedules        []Schedule                `json:"schedules"`
-	Decisions        []Decision                `json:"decisions"`
-	Recoveries       map[string]recoveryRecord `json:"recoveries,omitempty"`
-	RetryAt          map[string]time.Time      `json:"retry_at,omitempty"`
-	WriteFailures    map[string]string         `json:"write_failures,omitempty"`
+	Override           RoutingOverride           `json:"routing_override"`
+	OverrideIdentity   Identity                  `json:"routing_override_identity"`
+	OverrideIdentities []Identity                `json:"routing_override_identities,omitempty"`
+	Version            int                       `json:"version"`
+	Revision           uint64                    `json:"revision"`
+	Settings           Settings                  `json:"settings"`
+	Snapshots          map[string]Snapshot       `json:"snapshots"`
+	Operations         []Operation               `json:"operations"`
+	Schedules          []Schedule                `json:"schedules"`
+	Decisions          []Decision                `json:"decisions"`
+	Recoveries         map[string]recoveryRecord `json:"recoveries,omitempty"`
+	RetryAt            map[string]time.Time      `json:"retry_at,omitempty"`
+	WriteFailures      map[string]string         `json:"write_failures,omitempty"`
 }
 type recoveryRecord struct {
 	Before Snapshot `json:"before"`
@@ -97,7 +98,7 @@ func NewService(opts Options) (*Service, error) {
 		}
 		data, err := os.ReadFile(filepath.Join(s.stateDir, "state.json"))
 		if err == nil {
-			if json.Unmarshal(data, &s.state) != nil || s.state.Version != 1 || ValidateSettings(s.state.Settings) != nil {
+			if json.Unmarshal(data, &s.state) != nil || s.state.Version != 1 || ValidateSettings(s.state.Settings) != nil || !validStoredRoutingOverride(s.state) {
 				return nil, policyError("persistence", "invalid policy journal")
 			}
 			if s.state.Snapshots == nil {

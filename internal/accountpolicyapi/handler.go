@@ -60,7 +60,7 @@ func policyFailure(c *gin.Context, err error) {
 	if errors.As(err, &e) {
 		status := 409
 		switch e.Code {
-		case "invalid_duration", "invalid_request":
+		case "invalid_duration", "invalid_request", "invalid_split":
 			status = 400
 		case "unknown_account":
 			status = 404
@@ -91,18 +91,38 @@ func (h *Handler) replace(c *gin.Context) {
 		return
 	}
 	var body struct {
-		CredentialID     string  `json:"credential_id"`
-		DurationHours    int     `json:"duration_hours"`
-		ExpectedRevision *uint64 `json:"expected_revision"`
+		Mode             string                       `json:"mode"`
+		Accounts         []accountpolicy.RoutingShare `json:"accounts"`
+		CredentialID     string                       `json:"credential_id"`
+		DurationHours    int                          `json:"duration_hours"`
+		ExpectedRevision *uint64                      `json:"expected_revision"`
 	}
 	d := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10))
 	d.DisallowUnknownFields()
 	var extra any
-	if err := d.Decode(&body); err != nil || body.ExpectedRevision == nil || strings.TrimSpace(body.CredentialID) == "" || d.Decode(&extra) != io.EOF {
-		failure(c, 400, "invalid_request", "Provide credential_id, whole duration_hours and expected_revision.")
+	if err := d.Decode(&body); err != nil || body.ExpectedRevision == nil || d.Decode(&extra) != io.EOF {
+		failure(c, 400, "invalid_request", "Provide supported routing fields, whole duration_hours and expected_revision.")
 		return
 	}
-	o, err := h.Service.ReplaceOverride(body.CredentialID, body.DurationHours, *body.ExpectedRevision)
+	var o accountpolicy.RoutingOverride
+	var err error
+	switch body.Mode {
+	case "", "single":
+		if strings.TrimSpace(body.CredentialID) == "" || len(body.Accounts) != 0 {
+			failure(c, 400, "invalid_request", "Single routing requires credential_id and no account shares.")
+			return
+		}
+		o, err = h.Service.ReplaceOverride(body.CredentialID, body.DurationHours, *body.ExpectedRevision)
+	case "split":
+		if body.CredentialID != "" {
+			failure(c, 400, "invalid_request", "Percentage routing accepts accounts instead of credential_id.")
+			return
+		}
+		o, err = h.Service.ReplaceSplitOverride(body.Accounts, body.DurationHours, *body.ExpectedRevision)
+	default:
+		failure(c, 400, "invalid_request", "Routing mode must be single or split.")
+		return
+	}
 	if err != nil {
 		policyFailure(c, err)
 		return
@@ -140,7 +160,7 @@ func (h *Handler) accounts(c *gin.Context) {
 		}
 		out = append(out, gin.H{"credential_id": s.Identity.CredentialID, "provider": s.Identity.Provider, "label": "Account", "eligible": evaluation.Eligible, "evidence_known": evaluation.Known, "eligibility_reason": evaluation.Reason, "observed_at": s.ObservedAt, "buckets": buckets, "temporary_routing_supported": s.Identity.Provider == "codex"})
 	}
-	c.JSON(200, gin.H{"schema_version": 1, "sampled_at": time.Now().UTC(), "accounts": out, "capabilities": gin.H{"global_override": true, "policy_enabled": settings.Enabled, "duration_min_hours": 1, "duration_max_hours": 24, "account_bound_conversations_retain_owner": true}})
+	c.JSON(200, gin.H{"schema_version": 1, "sampled_at": time.Now().UTC(), "accounts": out, "capabilities": gin.H{"global_override": true, "percentage_split": true, "split_min_percent": 1, "split_max_percent": 99, "policy_enabled": settings.Enabled, "duration_min_hours": 1, "duration_max_hours": 24, "account_bound_conversations_retain_owner": true}})
 }
 func parseQuery(c *gin.Context) (accountpolicyledger.Query, error) {
 	q := accountpolicyledger.Query{Provider: c.Query("provider"), Model: c.Query("model"), CredentialID: c.Query("credential_id"), Cursor: c.Query("cursor"), Limit: 100}

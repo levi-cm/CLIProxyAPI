@@ -55,6 +55,52 @@ Durations are integers 1–24. Replacing starts a new duration. Mutations return
 
 The preference applies to eligible new work for that provider across all callers, ahead of deadline and allowance-reserve preferences. Holds, authentication, model support and actual quota/cooldown restrictions still apply. Unsupported models use ordinary eligible routing. Active streams are not interrupted. Existing account-bound and encrypted conversations keep their owner; replayable conversations use the existing proven idle-boundary rules. The override never redeems credits. Absolute expiry is checked during selection, and maintenance persists terminal expiry, removal, reassignment, policy disablement and exhaustion. A verified ordinary short or weekly window signal may terminate immediately; uncertain throttling only requests discovery. Terminated overrides never reactivate on refill.
 
+### Percentage split
+
+The same endpoint supports two-account percentage routing. Omitting `mode` retains
+the single-account contract. Set `mode` to `split` and supply exactly two distinct
+Codex accounts with integer percentages from 1 to 99 summing to 100:
+
+```json
+{
+  "mode": "split",
+  "accounts": [
+    {"credential_id": "account-a", "percent": 50},
+    {"credential_id": "account-b", "percent": 50}
+  ],
+  "duration_hours": 2,
+  "expected_revision": 12
+}
+```
+
+For 37/63 or 1/99, change both percentages accordingly; 99/1 is the opposite
+extreme. Do not include `credential_id` at the top level of a split request.
+The response includes `mode: "split"` and the same `accounts` array, alongside
+the shared revision, expiry and terminal state. The account capabilities report
+`percentage_split`, `split_min_percent` and `split_max_percent`. Authentication
+and cancellation remain unchanged under both API prefixes.
+
+Smooth weighted round robin distributes eligible routing decisions across models
+and callers. Ratios count selections, including retries, rather than tokens,
+quota consumption or every downstream conversation turn. With both accounts
+eligible, each complete 100-decision cycle follows the configured percentages.
+Strict, parent-bound, active and account-local/encrypted continuations keep their
+owner; safe idle self-contained requests may participate. Other configured
+accounts remain ordinary fallbacks when neither split participant supports a
+request. Temporarily unavailable participants do not accumulate catch-up credit.
+The accumulator resets on override replacement or process restart; the durable
+configuration and absolute expiry survive restart.
+
+Verified ordinary quota exhaustion, permanent removal or identity reassignment
+of either participant ends the entire split and restores smart routing. A
+temporary authentication refresh alone does not end it. Cancelling and expiry
+also restore smart routing without interrupting in-flight requests.
+
+The standalone controls expose Single account / Percentage split, two account
+selectors and a first-account percentage input defaulting to 50. The complementary
+percentage is calculated automatically. Selecting a percentage does not change
+provider quota or configured credential weights.
+
 ### History queries
 
 ```http

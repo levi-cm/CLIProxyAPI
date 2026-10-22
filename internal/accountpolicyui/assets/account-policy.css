@@ -280,6 +280,22 @@ main {
 .inline label {
   flex: 1;
 }
+.override-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  align-items: end;
+  gap: 12px;
+  margin-top: 20px;
+}
+.override-controls label {
+  min-width: 0;
+}
+.override-controls select {
+  width: 100%;
+}
+#override-split-fields {
+  display: contents;
+}
 .toolbar {
   margin-bottom: 16px;
 }

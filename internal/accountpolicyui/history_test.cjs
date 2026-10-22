@@ -86,6 +86,29 @@ const emptyResponse = (path) =>
     : path.startsWith("/usage-history/summary")
       ? { groups: [] }
       : { enabled: true, healthy: true };
+test("percentage routing sends complementary shares and displays the active split", async () => {
+  let sent;
+  const { c, element } = fakeController(async (path, method, body) => {
+    if (path === "/routing-override" && method === "PUT") {
+      sent = body;
+      return { revision: 1, state: "active", mode: "split", accounts: body.accounts, expires_at: "2026-10-23T00:00:00Z" };
+    }
+    if (path === "/routing-override") return { revision: 0, state: "inactive" };
+    return emptyResponse(path);
+  });
+  await c.refresh();
+  element("override-mode").value = "split";
+  element("override-account").value = "a";
+  element("override-account-secondary").value = "b";
+  element("override-percent").value = "37";
+  element("override-hours").value = "2";
+  await element("override-apply").listeners.click();
+  assert.deepEqual(sent, { mode: "split", accounts: [{ credential_id: "a", percent: 37 }, { credential_id: "b", percent: 63 }], duration_hours: 2, expected_revision: 0 });
+  assert.match(element("override-status").textContent, /a 37%/);
+  assert.match(element("override-status").textContent, /b 63%/);
+  c.reset();
+  delete global.document;
+});
 test("history health exposes retained collection coverage gaps", async () => {
   const { c, element } = fakeController(async (path) => {
     if (path === "/routing-override") return { revision: 0, state: "inactive" };

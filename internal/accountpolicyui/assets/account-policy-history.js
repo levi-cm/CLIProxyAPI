@@ -195,8 +195,11 @@
     function renderOverride() {
       if (!override) return;
       const active = override.state === "active";
+      const selected = override.mode === "split"
+        ? (override.accounts || []).map((a) => `${accountName(a.credential_id)} ${a.percent}%`).join(" / ")
+        : accountName(override.credential_id);
       $("override-status").textContent = active
-        ? `${accountName(override.credential_id)} · expires ${options.instant(override.expires_at, options.zone())} · ${options.countdown(override.expires_at, Date.now())}`
+        ? `${selected} · expires ${options.instant(override.expires_at, options.zone())} · ${options.countdown(override.expires_at, Date.now())}`
         : `Smart routing · ${override.termination_reason || override.state}`;
       $("override-apply").disabled =
         mutationBusy || uncertain || revision === null;
@@ -217,6 +220,31 @@
     }
     async function mutate(cancel) {
       if (mutationBusy || uncertain || revision === null) return;
+      let payload;
+      if (!cancel) {
+        payload = {
+          credential_id: $("override-account").value,
+          duration_hours: Number($("override-hours").value),
+          expected_revision: revision,
+        };
+        if ($("override-mode").value === "split") {
+          const secondary = $("override-account-secondary").value;
+          const percent = Number($("override-percent").value);
+          if (!payload.credential_id || !secondary || secondary === payload.credential_id || !Number.isInteger(percent) || percent < 1 || percent > 99) {
+            options.notice("Select two different accounts and a whole first-account percentage from 1 to 99.", true);
+            return;
+          }
+          payload = {
+            mode: "split",
+            accounts: [
+              { credential_id: payload.credential_id, percent },
+              { credential_id: secondary, percent: 100 - percent },
+            ],
+            duration_hours: payload.duration_hours,
+            expected_revision: revision,
+          };
+        }
+      }
       mutationBusy = true;
       const epoch = generation;
       renderOverride();
@@ -225,13 +253,7 @@
           "/routing-override" +
             (cancel ? "?expected_revision=" + revision : ""),
           cancel ? "DELETE" : "PUT",
-          cancel
-            ? undefined
-            : {
-                credential_id: $("override-account").value,
-                duration_hours: Number($("override-hours").value),
-                expected_revision: revision,
-              },
+          payload,
         );
         if (epoch !== generation) return;
         if (revision === null || value.revision >= revision) {
@@ -271,12 +293,13 @@
       lastAccounts = fingerprint;
       for (const id of [
         "override-account",
+        "override-account-secondary",
         "allowance-account",
         "history-account",
       ]) {
         const selected = $(id).value,
           first =
-            id === "override-account"
+            id.startsWith("override-account")
               ? "Select account"
               : id === "allowance-account"
                 ? "Accounts on filtered page"
@@ -533,6 +556,15 @@
     ).join("");
     $("override-apply").addEventListener("click", () => mutate(false));
     $("override-cancel").addEventListener("click", () => mutate(true));
+    function splitControls() {
+      $("override-split-fields").hidden = $("override-mode").value !== "split";
+      const percent = Number($("override-percent").value);
+      $("override-percent-other").textContent = Number.isInteger(percent) && percent >= 1 && percent <= 99 ? `${100 - percent}%` : "Unavailable";
+    }
+    if (!$("override-percent").value) $("override-percent").value = "50";
+    $("override-mode").addEventListener("change", splitControls);
+    $("override-percent").addEventListener("input", splitControls);
+    splitControls();
     for (const id of ["allowance-account", "allowance-window"])
       $(id).addEventListener("change", allowances);
     for (const [id, step] of [

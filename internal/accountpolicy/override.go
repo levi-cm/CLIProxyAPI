@@ -1,23 +1,22 @@
 package accountpolicy
 
-import (
-	"github.com/google/uuid"
-	"time"
-)
+import "time"
 
 // RoutingOverride is the global operational view. Logical identity is stored
 // separately in the policy journal and is never returned to integration clients.
 type RoutingOverride struct {
-	SchemaVersion     int        `json:"schema_version"`
-	ID                string     `json:"id"`
-	Revision          uint64     `json:"revision"`
-	CredentialID      string     `json:"credential_id"`
-	Provider          string     `json:"provider"`
-	StartedAt         time.Time  `json:"started_at"`
-	ExpiresAt         time.Time  `json:"expires_at"`
-	State             string     `json:"state"`
-	TerminationReason string     `json:"termination_reason,omitempty"`
-	EndedAt           *time.Time `json:"ended_at,omitempty"`
+	SchemaVersion     int            `json:"schema_version"`
+	Mode              string         `json:"mode,omitempty"`
+	Accounts          []RoutingShare `json:"accounts,omitempty"`
+	ID                string         `json:"id"`
+	Revision          uint64         `json:"revision"`
+	CredentialID      string         `json:"credential_id"`
+	Provider          string         `json:"provider"`
+	StartedAt         time.Time      `json:"started_at"`
+	ExpiresAt         time.Time      `json:"expires_at"`
+	State             string         `json:"state"`
+	TerminationReason string         `json:"termination_reason,omitempty"`
+	EndedAt           *time.Time     `json:"ended_at,omitempty"`
 }
 
 func (s *Service) RoutingOverride() RoutingOverride {
@@ -42,45 +41,7 @@ func overrideEvaluation(snapshot Snapshot, settings Settings, now time.Time) Eva
 	return Evaluate(snapshot, "", settings, now)
 }
 func (s *Service) ReplaceOverride(id string, hours int, revision uint64) (RoutingOverride, error) {
-	if hours < 1 || hours > 24 {
-		return RoutingOverride{}, policyError("invalid_duration", "duration must be 1 through 24 whole hours")
-	}
-	identity, err := s.identity(id)
-	if err != nil {
-		return RoutingOverride{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	settings := s.state.Settings
-	if s.state.Override.Revision != revision {
-		return RoutingOverride{}, policyError("conflict", "override revision changed")
-	}
-	if !settings.Enabled {
-		return RoutingOverride{}, policyError("disabled", "account policy routing is disabled")
-	}
-	if settings.ReadOnly || s.replica {
-		return RoutingOverride{}, policyError("read_only", "policy is read only")
-	}
-	if s.stateDir == "" {
-		return RoutingOverride{}, policyError("persistence", "override requires durable state")
-	}
-	snapshot, ok := s.state.Snapshots[id]
-	now := s.now()
-	if identity.Provider != "codex" || !ok || !sameOwnership(identity, snapshot.Identity) || identity.AccountID == "" {
-		return RoutingOverride{}, policyError("unknown_account", "known supported account identity required")
-	}
-	e := overrideEvaluation(snapshot, settings, now)
-	if !e.Eligible || !e.Known || !fresh(snapshot.ObservedAt, now, settings.FreshnessSeconds) || snapshot.LastError != "" {
-		return RoutingOverride{}, policyError("unavailable", "fresh eligible account evidence required")
-	}
-	before := clone(s.state)
-	s.state.Override = RoutingOverride{SchemaVersion: 1, ID: uuid.NewString(), Revision: revision + 1, CredentialID: id, Provider: identity.Provider, StartedAt: now, ExpiresAt: now.Add(time.Duration(hours) * time.Hour), State: "active"}
-	s.state.OverrideIdentity = identity
-	s.state.Settings.ForceAccount = ""
-	if err = s.persistLocked(before); err != nil {
-		return RoutingOverride{}, err
-	}
-	return clone(s.state.Override), nil
+	return s.replaceRoutingOverride("single", []RoutingShare{{CredentialID: id, Percent: 100}}, hours, revision)
 }
 func (s *Service) endOverrideLocked(reason string) {
 	o := &s.state.Override
@@ -112,7 +73,7 @@ func (s *Service) CancelOverride(revision uint64) (RoutingOverride, error) {
 	}
 	return clone(s.state.Override), nil
 }
-func (s *Service) overrideTerminationLocked(ids []Identity, temporary bool) string {
+func (s *Service) overrideTerminationLocked(ids []Identity, temporary map[string]bool) string {
 	o := s.state.Override
 	if o.State != "active" {
 		return ""
@@ -123,26 +84,32 @@ func (s *Service) overrideTerminationLocked(ids []Identity, temporary bool) stri
 	if !o.ExpiresAt.After(s.now()) {
 		return "expired"
 	}
-	found := false
-	for _, id := range ids {
-		if sameOwnership(id, s.state.OverrideIdentity) {
-			found = true
-			break
+	members := s.overrideMembersLocked()
+	if len(members) == 0 {
+		return "unavailable"
+	}
+	for _, member := range members {
+		found := false
+		for _, id := range ids {
+			if sameOwnership(id, member) {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		return "unavailable"
-	}
-	snapshot, ok := s.state.Snapshots[o.CredentialID]
-	if !ok || !sameOwnership(snapshot.Identity, s.state.OverrideIdentity) {
-		return "unavailable"
-	}
-	if !temporary && (snapshot.Status == "authentication_unavailable" || snapshot.Status == "disabled" || snapshot.Status == "authentication_blocked") {
-		return "unavailable"
-	}
-	for _, b := range snapshot.Buckets {
-		if applicable(b, "") && (b.UsedPercent >= 100 || (b.Allowed != nil && !*b.Allowed)) {
-			return "exhausted"
+		if !found {
+			return "unavailable"
+		}
+		snapshot, ok := s.state.Snapshots[member.CredentialID]
+		if !ok || !sameOwnership(snapshot.Identity, member) {
+			return "unavailable"
+		}
+		if !temporary[member.CredentialID] && (snapshot.Status == "authentication_unavailable" || snapshot.Status == "disabled" || snapshot.Status == "authentication_blocked") {
+			return "unavailable"
+		}
+		for _, b := range snapshot.Buckets {
+			if applicable(b, "") && (b.UsedPercent >= 100 || (b.Allowed != nil && !*b.Allowed)) {
+				return "exhausted"
+			}
 		}
 	}
 	return ""
@@ -171,7 +138,7 @@ func (s *Service) MaintainOverride() error {
 // by the selector; expiry never erases or migrates durable conversation owners.
 func (s *Service) PreferredAccount(provider string) string {
 	s.mu.RLock()
-	active := s.state.Override.State == "active" && s.state.Override.Provider == provider
+	active := s.state.Override.State == "active" && s.state.Override.Provider == provider && s.state.Override.Mode != "split"
 	s.mu.RUnlock()
 	if !active {
 		return ""
@@ -179,7 +146,7 @@ func (s *Service) PreferredAccount(provider string) string {
 	ids, temporary := s.overrideIdentities()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.state.Override.Provider != provider || s.state.Override.State != "active" || s.overrideTerminationLocked(ids, temporary) != "" {
+	if s.state.Override.Provider != provider || s.state.Override.Mode == "split" || s.state.Override.State != "active" || s.overrideTerminationLocked(ids, temporary) != "" {
 		return ""
 	}
 	return s.state.Override.CredentialID
@@ -194,7 +161,17 @@ func (s *Service) ConfirmOverrideExhaustion(identity Identity) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state.Override.State != "active" || !sameOwnership(s.state.OverrideIdentity, identity) {
+	if s.state.Override.State != "active" {
+		return nil
+	}
+	participant := false
+	for _, member := range s.overrideMembersLocked() {
+		if sameOwnership(member, identity) {
+			participant = true
+			break
+		}
+	}
+	if !participant {
 		return nil
 	}
 	before := clone(s.state)
@@ -202,28 +179,28 @@ func (s *Service) ConfirmOverrideExhaustion(identity Identity) error {
 	return s.persistLocked(before)
 }
 
-func (s *Service) overrideIdentities() ([]Identity, bool) {
+func (s *Service) overrideIdentities() ([]Identity, map[string]bool) {
 	ids := s.opts.Accounts()
+	temporary := map[string]bool{}
 	if s.opts.OverrideAccountState == nil {
-		return ids, false
+		return ids, temporary
 	}
 	s.mu.RLock()
-	selected := s.state.Override.CredentialID
+	members := clone(s.overrideMembersLocked())
 	s.mu.RUnlock()
-	if selected == "" {
-		return ids, false
-	}
-	identity, state := s.opts.OverrideAccountState(selected)
-	// The host's existence view includes temporarily ineligible credentials. It
-	// must not be inferred from the eligible routing pool during token refresh.
-	filtered := make([]Identity, 0, len(ids)+1)
-	for _, id := range ids {
-		if id.CredentialID != selected {
-			filtered = append(filtered, id)
+	for _, member := range members {
+		identity, state := s.opts.OverrideAccountState(member.CredentialID)
+		filtered := make([]Identity, 0, len(ids)+1)
+		for _, id := range ids {
+			if id.CredentialID != member.CredentialID {
+				filtered = append(filtered, id)
+			}
 		}
+		if state == "available" || state == "temporary" {
+			filtered = append(filtered, identity)
+		}
+		temporary[member.CredentialID] = state == "temporary"
+		ids = filtered
 	}
-	if state == "available" || state == "temporary" {
-		filtered = append(filtered, identity)
-	}
-	return filtered, state == "temporary"
+	return ids, temporary
 }

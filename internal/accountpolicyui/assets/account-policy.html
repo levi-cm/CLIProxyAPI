@@ -333,14 +333,27 @@
             <p class="muted">
               Applies across all callers. Account-bound conversations retain
               their owner. Cancelling, expiry or verified exhaustion restores
-              smart routing.
+              smart routing. Percentage splits count safe routing decisions,
+              rather than tokens; protected conversations keep their account.
             </p>
-            <div class="inline">
+            <div class="override-controls">
+              <label>Mode<select id="override-mode">
+                <option value="single">Single account</option>
+                <option value="split">Percentage split</option>
+              </select></label>
               <label
                 >Account<select id="override-account">
                   <option value="">Select account</option>
-                </select></label
-              ><label>Duration<select id="override-hours"></select></label
+                </select></label>
+              <div id="override-split-fields" hidden>
+                <label>Second account<select id="override-account-secondary">
+                  <option value="">Select second account</option>
+                </select></label>
+                <label>First account percentage<input id="override-percent" type="number" min="1" max="99" step="1" value="50" inputmode="numeric" />
+                  <span class="field-help">Second account: <output id="override-percent-other" for="override-percent">50%</output></span>
+                </label>
+              </div>
+              <label>Duration<select id="override-hours"></select></label
               ><button id="override-apply" type="button" disabled>
                 Apply temporary routing</button
               ><button

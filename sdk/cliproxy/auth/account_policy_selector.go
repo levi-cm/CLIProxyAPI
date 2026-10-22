@@ -33,6 +33,8 @@ type policyBinding struct {
 // EarliestDeadlineSelector composes deadline ranking with the existing session
 // resolver/cache. The optional clock should be shared with the observation service.
 type EarliestDeadlineSelector struct {
+	splitID          string
+	splitState       *smoothWeightedState
 	policy           AccountPolicySource
 	fallback         Selector
 	fallbacks        map[string]Selector
@@ -247,6 +249,11 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Auth) ([]*Auth, map[string]accountpolicy.Evaluation, bool) {
 	settings := s.policy.Settings()
 	preferred := s.preferredAccount(provider)
+	_, splitShares := s.routingSplit(provider)
+	splitMembers := make(map[string]bool, len(splitShares))
+	for _, share := range splitShares {
+		splitMembers[share.CredentialID] = true
+	}
 	s.mu.Lock()
 	resolve := s.modelResolver
 	s.mu.Unlock()
@@ -273,7 +280,7 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 			quotaModel = resolve(a, model)
 		}
 		accountSettings := settings
-		if a.ID == preferred {
+		if a.ID == preferred || splitMembers[a.ID] {
 			accountSettings.Accounts = make(map[string]accountpolicy.AccountControl, len(settings.Accounts))
 			for id, c := range settings.Accounts {
 				accountSettings.Accounts[id] = c
@@ -341,6 +348,10 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 	}
+	if selected := s.pickSplit(provider, eligible); selected != nil {
+		s.decision(selected, provider, model, "temporary_percentage_split", evaluations[selected.ID], false)
+		return selected, nil
+	}
 	if unknown {
 		a, err := s.effectiveFallback().Pick(ctx, provider, model, opts, eligible)
 		s.decision(a, provider, model, "missing_or_stale_evidence", accountpolicy.Evaluation{}, true)
@@ -401,6 +412,16 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 					s.decision(candidate, provider, model, "temporary_override_at_boundary", evaluations[candidate.ID], false)
 					return candidate, nil
 				}
+			}
+			eligible := make([]*Auth, 0, len(auths))
+			for _, candidate := range auths {
+				if evaluations[candidate.ID].Eligible {
+					eligible = append(eligible, candidate)
+				}
+			}
+			if selected := s.pickSplit(provider, eligible); selected != nil {
+				s.decision(selected, provider, model, "temporary_percentage_split_at_boundary", evaluations[selected.ID], false)
+				return selected, nil
 			}
 			var best *Auth
 			for _, candidate := range auths {
