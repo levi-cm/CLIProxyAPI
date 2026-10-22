@@ -62,3 +62,43 @@ Task 5: complete - shared inference and management APIs, principal checks, CORS,
 Task 6: complete - daily remaining allowance SVG rows, account/window/period controls, real timestamp and DST behavior, explicit coverage states and values table.
 Task 7: complete - shared override controls, countdown without requests, paginated requests, summaries, exports and archive health.
 Production deployment: blocked - no verified uninterrupted handoff, draining, sole state writer and rollback rehearsal.
+
+## Continuation verification and focused fixes
+
+The clean existing candidate a35905f0 was reused. A fresh read-only review found
+three Important gaps, reproduced with regression tests and fixed in this checkout:
+- Safe idle replayable follow-ups now keep or migrate to the active override
+  account before deadline ranking, within the existing ownership safety gate.
+- Historical request scans snapshot file positions, then release the archive
+  writer lock. Request, summary and export scans support client cancellation.
+- Committed history setting transitions checkpoint disabled coverage intervals
+  outside the policy lock. Transitions are serialized, survive restart, and are
+  visible in the dashboard coverage-gap count.
+
+The reviewer verified these fixes and reported no remaining Critical or Important
+findings in the targeted changes.
+
+Current verification:
+- `GOMAXPROCS=2 go test -p 2 ./...` passed; `/tmp/cliproxy-history-current-full.log`.
+- Race checks passed for accountpolicyledger, accountpolicy, auth, accountpolicyapi,
+  and internal/api; `/tmp/cliproxy-history-current-race.log`. That first run failed
+  three SDK auth-synchronization tests while a full build/test run was also active:
+  `TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch`,
+  `TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart`, and
+  `TestEndToEndAuthFilePatch_RestoresModelsInV1ModelsWithoutRestart`.
+  The three passed together under race in isolation, followed by the complete
+  `GOMAXPROCS=2 go test -race -p 1 ./sdk/cliproxy -count=1` package passing;
+  `/tmp/cliproxy-history-race-investigation.log` and
+  `/tmp/cliproxy-history-sdk-race-isolated.log`. No race detector warning occurred.
+- JavaScript: 36 passed; `/tmp/cliproxy-history-current-js.log`.
+- Desktop/mobile history and existing 100-account dashboard browser suites passed
+  against a loopback fixture preview; `/tmp/cliproxy-history-current-browser.log`
+  and `/tmp/cliproxy-history-current-dashboard-browser.log`.
+- Server compile passed; test-output removed. Go formatting and diff checks passed.
+- Production health returned 200 over loopback, LAN and Tailscale. Container start
+  time stayed 2026-10-05T19:45:21.269634547Z with restart count 0. Production HEAD
+  remains 17199e47 and its original uncommitted file list is unchanged.
+
+Production remains untouched; no restart or deployment was attempted. The branch
+and worktree remain the deliverable; production adoption is still blocked by the
+unverified handoff and rollback requirements.

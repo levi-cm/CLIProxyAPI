@@ -86,6 +86,18 @@ const emptyResponse = (path) =>
     : path.startsWith("/usage-history/summary")
       ? { groups: [] }
       : { enabled: true, healthy: true };
+test("history health exposes retained collection coverage gaps", async () => {
+  const { c, element } = fakeController(async (path) => {
+    if (path === "/routing-override") return { revision: 0, state: "inactive" };
+    if (path === "/usage-history/status")
+      return { enabled: true, healthy: true, uncertain_coverage: [{ from: "2026-10-22T10:00:00Z", to: "2026-10-22T11:00:00Z", reason: "collection_disabled" }] };
+    return emptyResponse(path);
+  });
+  await c.refresh();
+  assert.match(element("history-health").textContent, /1 coverage gap/);
+  c.reset();
+  delete global.document;
+});
 test("older override read cannot overwrite successful mutation", async () => {
   let count = 0,
     resolveOld;

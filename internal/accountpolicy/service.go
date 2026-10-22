@@ -39,17 +39,19 @@ type discoveryState struct {
 	Requested uint64
 }
 type Service struct {
-	mu        sync.RWMutex
-	state     storedState
-	opts      Options
-	locks     map[string]chan struct{}
-	discovery map[string]discoveryState
-	semaphore chan struct{}
-	stateDir  string
-	replica   bool
-	refreshMu sync.Mutex
-	requested map[string]uint64
-	wake      chan struct{}
+	settingsUpdateMu          sync.Mutex
+	historyCollectionObserver func(bool)
+	mu                        sync.RWMutex
+	state                     storedState
+	opts                      Options
+	locks                     map[string]chan struct{}
+	discovery                 map[string]discoveryState
+	semaphore                 chan struct{}
+	stateDir                  string
+	replica                   bool
+	refreshMu                 sync.Mutex
+	requested                 map[string]uint64
+	wake                      chan struct{}
 }
 
 func clone[T any](v T) T {
@@ -247,8 +249,17 @@ func (s *Service) persistLocked(before storedState) error {
 	return nil
 }
 func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
+	s.settingsUpdateMu.Lock()
+	defer s.settingsUpdateMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var notify func(bool)
+	var collectionEnabled bool
+	defer func() {
+		s.mu.Unlock()
+		if notify != nil {
+			notify(collectionEnabled)
+		}
+	}()
 	next, err := update(clone(s.state.Settings))
 	if err != nil {
 		return err
@@ -276,7 +287,14 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	if !next.Enabled {
 		s.endOverrideLocked("policy-disabled")
 	}
-	return s.persistLocked(before)
+	if err := s.persistLocked(before); err != nil {
+		return err
+	}
+	if before.Settings.UsageHistoryEnabled != next.UsageHistoryEnabled {
+		notify = s.historyCollectionObserver
+		collectionEnabled = next.UsageHistoryEnabled
+	}
+	return nil
 }
 func (s *Service) UpdateSettings(settings Settings) error {
 	return s.MergeSettings(func(Settings) (Settings, error) { return settings, nil })

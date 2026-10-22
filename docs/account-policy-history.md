@@ -83,7 +83,9 @@ Raw records are authoritative. Segment indexes contain bounds, sparse offsets, e
 
 Adoption imports surviving `usage.jsonl`, `usage.1.jsonl`, and `usage.2.jsonl`, preserving originals. Content checkpoints skip completed imports; UUID deduplication makes interrupted imports restartable. First enabled initialization also runs adoption when collection is enabled after startup. Surviving confirmed reset operations are imported from the operation journal. Legacy records keep their surviving counts and model alias, while missing execution/response model, presence, stream, generation and pricing context remain unknown. Earlier deleted history cannot be reconstructed.
 
-Storage failures never stop inference or trigger retention deletion. Status exposes unhealthy segments, write errors and uncertain periods. Coverage cannot be complete during failures, collection-disabled periods, abrupt process loss before dispatch, missing provider measurements, or before adoption. Keep status alongside exported data. Disk capacity is an operational responsibility because retention is indefinite.
+Storage failures never stop inference or trigger retention deletion. Status exposes unhealthy segments, write errors and uncertain periods. Disabling collection checkpoints an open `collection_disabled` interval; enabling it closes that interval, including across a restart. The dashboard displays the retained coverage-gap count even when storage is healthy again. Coverage cannot be complete during failures, collection-disabled periods, abrupt process loss before dispatch, missing provider measurements, or before adoption. Keep status alongside exported data. Disk capacity is an operational responsibility because retention is indefinite.
+
+Historical request scans capture immutable file positions under the archive lock, then read outside it. A sparse or unmatched filter cannot hold the writer lock while scanning years of records. Request, summary and export handlers propagate client cancellation through those scans.
 
 ## Delivery and rollback gate
 

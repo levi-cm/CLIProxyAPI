@@ -40,6 +40,13 @@ func (s *Service) startAccountPolicyHistory() {
 	s.accountPolicyMu.Lock()
 	s.accountPolicyHistory = a
 	s.accountPolicyMu.Unlock()
+	checkpointCollection := func(enabled bool) {
+		if err := a.SetCollectionEnabled(enabled); err != nil {
+			log.WithField("component", "account-policy-history").Error("history collection checkpoint failed; inference continues")
+		}
+	}
+	s.accountPolicy.SetHistoryCollectionObserver(checkpointCollection)
+	checkpointCollection(s.accountPolicy.Settings().UsageHistoryEnabled)
 	if err = a.ImportLegacy(settings.StateDir); err != nil {
 		log.WithField("component", "account-policy-history").Error("legacy history import incomplete; inference continues")
 	}

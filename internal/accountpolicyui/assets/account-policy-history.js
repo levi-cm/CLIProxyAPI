@@ -516,8 +516,9 @@
         options
           .request("/usage-history/status")
           .then((s) => {
+            const gaps = s.uncertain_coverage?.length || 0;
             $("history-health").textContent =
-              `Long-term logging ${s.enabled ? "enabled" : "disabled"} · ${s.healthy ? "storage healthy" : "storage unhealthy"} · ${s.write_errors || 0} write errors. ${s.coverage_note || ""}`;
+              `Long-term logging ${s.enabled ? "enabled" : "disabled"} · ${s.healthy ? "storage healthy" : "storage unhealthy"} · ${s.write_errors || 0} write errors · ${gaps} coverage gap${gaps === 1 ? "" : "s"}. ${s.coverage_note || ""}`;
           })
           .catch((e) => {
             $("history-health").textContent =

@@ -178,7 +178,7 @@ func (h *Handler) requests(c *gin.Context) {
 		failure(c, 400, "invalid_query", "Use UTC timestamps, valid filters and a limit of 1–500.")
 		return
 	}
-	p, err := a.Requests(q)
+	p, err := a.RequestsContext(c.Request.Context(), q)
 	if err != nil {
 		failure(c, 400, "history_query_failed", "Invalid cursor or unavailable history; check collection status.")
 		return
@@ -233,7 +233,7 @@ func (h *Handler) summary(c *gin.Context) {
 		part := q
 		part.From = from
 		part.To = end
-		totals, e := a.Summary(part, group)
+		totals, e := a.SummaryContext(c.Request.Context(), part, group)
 		if e != nil {
 			return
 		}
@@ -267,7 +267,7 @@ func (h *Handler) export(c *gin.Context) {
 	c.Header("Content-Disposition", `attachment; filename="usage-history.`+format+`"`)
 	if format == "ndjson" {
 		c.Header("Content-Type", "application/x-ndjson")
-		err = a.Export(q, func(r accountpolicyledger.Request) error {
+		err = a.ExportContext(c.Request.Context(), q, func(r accountpolicyledger.Request) error {
 			if e := c.Request.Context().Err(); e != nil {
 				return e
 			}
@@ -277,7 +277,7 @@ func (h *Handler) export(c *gin.Context) {
 		c.Header("Content-Type", "text/csv; charset=utf-8")
 		w := csv.NewWriter(c.Writer)
 		_ = w.Write([]string{"execution_uuid", "parent_execution_uuid", "trace_id", "timestamp_utc", "provider", "credential_id", "requested_model", "execution_model", "response_model", "outcome", "status_code", "duration_ms", "stream", "generate", "auth_category", "requested_service_tier", "response_service_tier", "input_tokens", "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "unclassified_tokens", "cached_input_percent", "accounting_quality", "measurements_json"})
-		err = a.Export(q, func(r accountpolicyledger.Request) error {
+		err = a.ExportContext(c.Request.Context(), q, func(r accountpolicyledger.Request) error {
 			if e := c.Request.Context().Err(); e != nil {
 				return e
 			}

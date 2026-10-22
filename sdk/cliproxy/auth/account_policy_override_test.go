@@ -57,3 +57,28 @@ func TestTemporaryPreferenceKeepsEstablishedContinuationAndActiveOwner(t *testin
 		})
 	}
 }
+
+func TestTemporaryPreferenceAtSafeContinuationBoundary(t *testing.T) {
+	for _, preferredInitially := range []bool{false, true} {
+		t.Run(map[bool]string{false: "moves_to_override", true: "retains_override"}[preferredInitially], func(t *testing.T) {
+			s, p, auths, _ := deadlineFixture(t)
+			source := &overrideSource{policyTestSource: p}
+			if preferredInitially {
+				source.preferred = "b"
+			}
+			s.policy = source
+			opts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"safe-thread"}}, OriginalRequest: []byte(`{"input":"self-contained conversation"}`), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "client"}}
+			initial, err := s.Pick(context.Background(), "codex", "model", opts, auths)
+			if err != nil || initial == nil {
+				t.Fatalf("initial selection: %v %v", initial, err)
+			}
+			source.preferred = "b"
+			for range 2 {
+				selected, err := s.Pick(context.Background(), "codex", "model", opts, auths)
+				if err != nil || selected == nil || selected.ID != "b" {
+					t.Fatalf("safe continuation ignored override: %v %v", selected, err)
+				}
+			}
+		})
+	}
+}

@@ -169,7 +169,52 @@ func (a *Archive) initialize() error {
 	}
 	a.status.Closed = false
 	a.status.ProcessStartedAt = time.Now().UTC()
+	a.noteCollectionEnabled(a.enabled != nil && a.enabled())
 	return a.saveJSON("collection-status.json", a.status)
+}
+
+// SetCollectionEnabled checkpoints changes independently of traffic, including
+// an interval with no completions before collection is enabled again.
+func (a *Archive) SetCollectionEnabled(enabled bool) error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errors.New("history closed")
+	}
+	if a.root == nil && !enabled {
+		if _, err := os.Stat(a.dir); os.IsNotExist(err) {
+			return nil
+		}
+	}
+	if err := a.initialize(); err != nil {
+		a.writeError()
+		return err
+	}
+	a.noteCollectionEnabled(enabled)
+	if err := a.saveJSON("collection-status.json", a.status); err != nil {
+		a.writeError()
+		return err
+	}
+	return nil
+}
+
+func (a *Archive) noteCollectionEnabled(enabled bool) {
+	now := time.Now().UTC()
+	for i := range a.status.UncertainCoverage {
+		gap := &a.status.UncertainCoverage[i]
+		if gap.Reason == "collection_disabled" && gap.To.IsZero() {
+			if enabled {
+				gap.To = now
+			}
+			return
+		}
+	}
+	if !enabled {
+		a.status.UncertainCoverage = append(a.status.UncertainCoverage, CoverageGap{From: now, Reason: "collection_disabled"})
+	}
 }
 
 func (a *Archive) open(name string, flags int) (*os.File, error) {

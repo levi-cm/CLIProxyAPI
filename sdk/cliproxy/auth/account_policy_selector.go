@@ -395,6 +395,13 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 		reason = "unsafe_or_unknown_continuation"
 		parent, _ := opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string)
 		if parent == "" && !unknown && policyRequestReplayable(ctx, opts) && idle != nil && idle(bound.ID) {
+			preferred := s.preferredAccount(provider)
+			for _, candidate := range auths {
+				if candidate.ID == preferred && evaluations[candidate.ID].Eligible {
+					s.decision(candidate, provider, model, "temporary_override_at_boundary", evaluations[candidate.ID], false)
+					return candidate, nil
+				}
+			}
 			var best *Auth
 			for _, candidate := range auths {
 				ce := evaluations[candidate.ID]

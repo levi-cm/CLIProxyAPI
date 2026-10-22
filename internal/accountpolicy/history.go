@@ -1,5 +1,13 @@
 package accountpolicy
 
+// SetHistoryCollectionObserver reports committed collection changes outside the
+// policy lock, so the independent archive can retain disabled coverage periods.
+func (s *Service) SetHistoryCollectionObserver(f func(bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.historyCollectionObserver = f
+}
+
 // SetObservationObserver connects an independent archive. The callback must not
 // return errors into the routing state machine and runs outside its main lock.
 func (s *Service) SetObservationObserver(f func(Snapshot, Snapshot, []Operation)) {

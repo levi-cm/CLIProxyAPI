@@ -2,6 +2,7 @@ package accountpolicyledger
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -43,6 +44,12 @@ func validQuery(q Query) error {
 
 // Requests anchors both ends of pagination to immutable append positions.
 func (a *Archive) Requests(q Query) (Page, error) {
+	return a.RequestsContext(context.Background(), q)
+}
+
+// RequestsContext scans immutable byte ranges outside the writer lock. Client
+// cancellation is checked even when a filter matches no historical records.
+func (a *Archive) RequestsContext(ctx context.Context, q Query) (Page, error) {
 	p := Page{SchemaVersion: 1, Records: []Request{}}
 	if err := validQuery(q); err != nil {
 		return p, err
@@ -50,91 +57,61 @@ func (a *Archive) Requests(q Query) (Page, error) {
 	if a == nil {
 		return p, errors.New("history unavailable")
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.root == nil {
-		if _, err := os.Stat(a.dir); os.IsNotExist(err) && (a.enabled == nil || !a.enabled()) {
-			return p, nil
-		}
-		if err := a.initialize(); err != nil {
-			return p, err
-		}
-	}
-	if err := a.prepare(); err != nil {
-		return p, err
-	}
-	names, err := a.names("requests")
-	if err != nil || len(names) == 0 {
-		return p, err
-	}
-	pos := cursor{Name: names[0], End: names[len(names)-1], Filter: queryFingerprint(q)}
-	info, err := a.root.Stat(pos.End)
+	root, segments, pos, err := a.requestPositions(q)
 	if err != nil {
 		return p, err
 	}
-	pos.EndOffset = info.Size()
-	if q.Cursor != "" {
-		data, e := base64.RawURLEncoding.DecodeString(q.Cursor)
-		if e != nil || json.Unmarshal(data, &pos) != nil || pos.Filter != queryFingerprint(q) || pos.Offset < 0 || pos.EndOffset < 0 || pos.Name > pos.End {
-			return p, errors.New("invalid cursor")
-		}
-		if !containsName(names, pos.Name) || !containsName(names, pos.End) {
-			return p, errors.New("invalid cursor")
-		}
-		endInfo, e := a.root.Stat(pos.End)
-		if e != nil || pos.EndOffset > endInfo.Size() {
-			return p, errors.New("invalid cursor")
-		}
+	if root == nil {
+		return p, ctx.Err()
+	}
+	defer root.Close()
+	if err := ctx.Err(); err != nil {
+		return p, err
 	}
 	limit := q.Limit
 	if limit == 0 {
 		limit = 100
 	}
-	for _, name := range names {
-		if name < pos.Name || name > pos.End {
+	for _, segment := range segments {
+		if err := ctx.Err(); err != nil {
+			return p, err
+		}
+		if !requestSegmentInRange(root, segment, q) {
 			continue
 		}
-		idx, e := a.index(name)
-		if e != nil {
-			return p, e
+		info, err := root.Lstat(segment.Name)
+		if err != nil || !info.Mode().IsRegular() {
+			return p, errors.New("unsafe history segment")
 		}
-		a.noteIndex(name, idx)
-		if (!q.From.IsZero() && idx.To.Before(q.From)) || (!q.To.IsZero() && !idx.From.Before(q.To)) {
-			continue
-		}
-		f, e := a.open(name, os.O_RDONLY)
-		if e != nil {
-			return p, e
+		f, err := root.Open(segment.Name)
+		if err != nil {
+			return p, err
 		}
 		offset := int64(0)
-		if name == pos.Name {
+		if segment.Name == pos.Name {
 			offset = pos.Offset
 		}
-		size := idx.Size
-		if name == pos.End {
-			size = pos.EndOffset
-		}
-		if offset > size {
+		if offset > segment.Size {
 			_ = f.Close()
 			return p, errors.New("invalid cursor offset")
 		}
-		if _, e = f.Seek(offset, io.SeekStart); e != nil {
-			_ = f.Close()
-			return p, e
-		}
-		r := bufio.NewReader(io.LimitReader(f, size-offset))
+		reader := bufio.NewReader(io.NewSectionReader(f, offset, segment.Size-offset))
 		for {
-			line, e := r.ReadBytes('\n')
-			if e == io.EOF {
+			if err := ctx.Err(); err != nil {
+				_ = f.Close()
+				return p, err
+			}
+			line, err := reader.ReadBytes('\n')
+			if err == io.EOF {
 				break
 			}
-			if e != nil {
+			if err != nil {
 				_ = f.Close()
-				return p, e
+				return p, err
 			}
 			offset += int64(len(line))
 			var item Request
-			if json.Unmarshal(line, &item) != nil || item.SchemaVersion != 1 {
+			if json.Unmarshal(line, &item) != nil || item.SchemaVersion != SchemaVersion {
 				continue
 			}
 			if !matches(q, item.RequestedAt, item.Provider, item.ExecutionModel, item.CredentialID) && !(q.Model != "" && matches(Query{From: q.From, To: q.To, Provider: q.Provider, CredentialID: q.CredentialID}, item.RequestedAt, item.Provider, item.ExecutionModel, item.CredentialID) && (item.RequestedModel == q.Model || item.ResponseModel == q.Model)) {
@@ -142,20 +119,126 @@ func (a *Archive) Requests(q Query) (Page, error) {
 			}
 			p.Records = append(p.Records, item)
 			if len(p.Records) == limit {
-				pos.Name = name
-				pos.Offset = offset
+				pos.Name, pos.Offset = segment.Name, offset
 				b, _ := json.Marshal(pos)
 				p.NextCursor = base64.RawURLEncoding.EncodeToString(b)
 				_ = f.Close()
 				return p, nil
 			}
 		}
-		if e = f.Close(); e != nil {
-			return p, e
+		if err := f.Close(); err != nil {
+			return p, err
 		}
 	}
 	return p, nil
 }
+
+func (a *Archive) requestPositions(q Query) (*os.Root, []segmentPosition, cursor, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var pos cursor
+	if a.root == nil {
+		if _, err := os.Stat(a.dir); os.IsNotExist(err) && (a.enabled == nil || !a.enabled()) {
+			return nil, nil, pos, nil
+		}
+	}
+	if err := a.prepare(); err != nil {
+		return nil, nil, pos, err
+	}
+	names, err := a.names("requests")
+	if err != nil || len(names) == 0 {
+		return nil, nil, pos, err
+	}
+	pos = cursor{Name: names[0], End: names[len(names)-1], Filter: queryFingerprint(q)}
+	info, err := a.root.Stat(pos.End)
+	if err != nil {
+		return nil, nil, pos, err
+	}
+	pos.EndOffset = info.Size()
+	if q.Cursor != "" {
+		data, err := base64.RawURLEncoding.DecodeString(q.Cursor)
+		if err != nil || json.Unmarshal(data, &pos) != nil || pos.Filter != queryFingerprint(q) || pos.Offset < 0 || pos.EndOffset < 0 || pos.Name > pos.End || !containsName(names, pos.Name) || !containsName(names, pos.End) {
+			return nil, nil, pos, errors.New("invalid cursor")
+		}
+		endInfo, err := a.root.Stat(pos.End)
+		if err != nil || pos.EndOffset > endInfo.Size() {
+			return nil, nil, pos, errors.New("invalid cursor")
+		}
+	}
+	segments := []segmentPosition{}
+	for _, name := range names {
+		if name < pos.Name || name > pos.End {
+			continue
+		}
+		info, err := a.root.Stat(name)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, nil, pos, errors.New("unsafe history segment")
+		}
+		size := info.Size()
+		if name == pos.End {
+			size = pos.EndOffset
+		}
+		segments = append(segments, segmentPosition{Name: name, Size: size})
+	}
+	root, err := os.OpenRoot(a.dir)
+	return root, segments, pos, err
+}
+
+// Bounds precede the potentially large UUID and aggregate maps in an index.
+// Read only that small prefix, outside the writer lock. Missing or stale indexes
+// conservatively fall back to the authoritative raw segment.
+func requestSegmentInRange(root *os.Root, segment segmentPosition, q Query) bool {
+	if q.From.IsZero() && q.To.IsZero() {
+		return true
+	}
+	info, err := root.Lstat(segment.Name + ".index.json")
+	if err != nil || !info.Mode().IsRegular() {
+		return true
+	}
+	f, err := root.Open(segment.Name + ".index.json")
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	d := json.NewDecoder(io.LimitReader(f, 4096))
+	if token, err := d.Token(); err != nil || token != json.Delim('{') {
+		return true
+	}
+	var from, to time.Time
+	var size int64
+	var haveSize, haveFrom, haveTo bool
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return true
+		}
+		switch key {
+		case "size":
+			err = d.Decode(&size)
+			haveSize = true
+		case "from":
+			err = d.Decode(&from)
+			haveFrom = true
+		case "to":
+			err = d.Decode(&to)
+			haveTo = true
+		default:
+			var ignored json.RawMessage
+			err = d.Decode(&ignored)
+		}
+		if err != nil {
+			return true
+		}
+		if haveSize && haveFrom && haveTo {
+			if size != segment.Size {
+				return true
+			}
+			return (q.From.IsZero() || !to.Before(q.From)) && (q.To.IsZero() || from.Before(q.To))
+		}
+	}
+	return true
+}
+
 func containsName(names []string, name string) bool {
 	i := sort.SearchStrings(names, name)
 	return i < len(names) && names[i] == name
@@ -202,6 +285,10 @@ func addTotal(m map[string]Totals, r Request, group string) {
 	m[key] = t
 }
 func (a *Archive) Summary(q Query, group string) ([]Totals, error) {
+	return a.SummaryContext(context.Background(), q, group)
+}
+
+func (a *Archive) SummaryContext(ctx context.Context, q Query, group string) ([]Totals, error) {
 	if group != "day" && group != "month" && group != "year" {
 		return nil, errors.New("group must be day, month or year")
 	}
@@ -211,7 +298,7 @@ func (a *Archive) Summary(q Query, group string) ([]Totals, error) {
 	q.Limit = 500
 	q.Cursor = ""
 	for {
-		p, err := a.Requests(q)
+		p, err := a.RequestsContext(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -291,10 +378,14 @@ func (a *Archive) Allowance(q Query, duration int64, visit func(Observation) err
 
 // Export streams stable archive pages. The visitor must not mutate the archive.
 func (a *Archive) Export(q Query, visit func(Request) error) error {
+	return a.ExportContext(context.Background(), q, visit)
+}
+
+func (a *Archive) ExportContext(ctx context.Context, q Query, visit func(Request) error) error {
 	q.Limit = 500
 	q.Cursor = ""
 	for {
-		p, err := a.Requests(q)
+		p, err := a.RequestsContext(ctx, q)
 		if err != nil {
 			return err
 		}

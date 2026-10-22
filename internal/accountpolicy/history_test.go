@@ -59,3 +59,24 @@ func TestConfirmedOperationNotifiesArchiveOutsideLock(t *testing.T) {
 		t.Fatalf("manual reset events %d", confirmed)
 	}
 }
+
+func TestHistoryCollectionTransitionsNotifyAfterPersistenceOutsideLock(t *testing.T) {
+	now := testTime()
+	p := &fakeProvider{snapshots: map[string]Snapshot{"b": testSnapshot("b", 7)}}
+	s, _ := fixtureService(t, p, &now, DefaultSettings())
+	var observed []bool
+	s.SetHistoryCollectionObserver(func(enabled bool) {
+		if s.Settings().UsageHistoryEnabled != enabled {
+			t.Fatal("uncommitted collection setting")
+		}
+		observed = append(observed, enabled)
+	})
+	for _, enabled := range []bool{true, true, false} {
+		if err := s.MergeSettings(func(current Settings) (Settings, error) { current.UsageHistoryEnabled = enabled; return current, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(observed) != 2 || !observed[0] || observed[1] {
+		t.Fatalf("collection transitions: %v", observed)
+	}
+}

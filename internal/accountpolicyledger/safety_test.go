@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,6 +38,84 @@ func TestArchiveHasSingleWriterAndSyncedPermissions(t *testing.T) {
 	info, _ := os.Stat(filepath.Join(dir, "history"))
 	if info.Mode().Perm() != 0700 {
 		t.Fatal("unsafe directory")
+	}
+}
+
+type pausedQueryContext struct {
+	context.Context
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *pausedQueryContext) Err() error {
+	c.once.Do(func() { close(c.entered); <-c.release })
+	return c.Context.Err()
+}
+
+func TestRequestScanDoesNotBlockArchiveWriter(t *testing.T) {
+	a, err := New(t.TempDir(), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.HandleUsage(context.Background(), usage.Record{RequestID: uuid.NewString(), Model: "recorded", RequestedAt: time.Now()})
+	ctx := &pausedQueryContext{Context: context.Background(), entered: make(chan struct{}), release: make(chan struct{})}
+	readDone := make(chan error, 1)
+	go func() { _, err := a.RequestsContext(ctx, Query{Model: "absent", Limit: 1}); readDone <- err }()
+	<-ctx.entered
+	writeDone := make(chan struct{})
+	go func() {
+		a.HandleUsage(context.Background(), usage.Record{RequestID: uuid.NewString(), RequestedAt: time.Now()})
+		close(writeDone)
+	}()
+	select {
+	case <-writeDone:
+	case <-time.After(2 * time.Second):
+		close(ctx.release)
+		<-readDone
+		t.Fatal("historical request scan blocked collection")
+	}
+	close(ctx.release)
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.RequestsContext(cancelled, Query{Model: "absent"}); err != context.Canceled {
+		t.Fatalf("cancelled query: %v", err)
+	}
+}
+
+func TestCollectionDisabledCoverageSurvivesRestart(t *testing.T) {
+	enabled := true
+	dir := t.TempDir()
+	a, err := New(dir, func() bool { return enabled })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleUsage(context.Background(), usage.Record{RequestID: uuid.NewString(), RequestedAt: time.Now()})
+	enabled = false
+	if err := a.SetCollectionEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	a.HandleUsage(context.Background(), usage.Record{RequestID: uuid.NewString(), RequestedAt: time.Now()})
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	enabled = true
+	a, err = New(dir, func() bool { return enabled })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	gaps := a.Status().UncertainCoverage
+	if len(gaps) != 1 || gaps[0].Reason != "collection_disabled" || gaps[0].From.IsZero() || gaps[0].To.Before(gaps[0].From) {
+		t.Fatalf("disabled coverage interval missing: %+v", gaps)
+	}
+	page, err := a.Requests(Query{})
+	if err != nil || len(page.Records) != 1 {
+		t.Fatalf("disabled records archived: %+v %v", page, err)
 	}
 }
 
