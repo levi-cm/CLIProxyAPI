@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyledger"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -16,6 +17,7 @@ import (
 )
 
 type serverOptionConfig struct {
+	accountPolicyHistory   func() *accountpolicyledger.Archive
 	extraMiddleware        []gin.HandlerFunc
 	engineConfigurator     func(*gin.Engine)
 	routerConfigurator     func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)

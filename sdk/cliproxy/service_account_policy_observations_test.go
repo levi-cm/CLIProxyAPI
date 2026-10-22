@@ -246,3 +246,40 @@ func TestAccountPolicyRoutingEnabledStillCollectsUsage(t *testing.T) {
 		t.Fatalf("routing-enabled policy stopped collecting usage: %+v", snapshot)
 	}
 }
+
+func TestPermanentHistoryWithoutRoutingOrObservations(t *testing.T) {
+	const childEnv = "CLIPROXY_PERMANENT_HISTORY_CHILD"
+	if os.Getenv(childEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestPermanentHistoryWithoutRoutingOrObservations$", "-test.v")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("history lifecycle: %v\n%s", err, out)
+		}
+		return
+	}
+	cfg := &config.Config{AccountPolicy: accountpolicy.DefaultSettings()}
+	cfg.AccountPolicy.StateDir = t.TempDir()
+	cfg.AccountPolicy.UsageHistoryEnabled = true
+	s, err := NewBuilder().WithConfig(cfg).WithConfigPath("fixture.yaml").WithAccountPolicyProvider(&policyFixtureProvider{}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.startAccountPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record := usage.Record{RequestID: "b31381aa-38a1-430c-8b1a-3de78de6965c", Provider: "codex", AuthID: "fixture", Model: "execution", Alias: "alias", RequestedAt: time.Now(), Stream: true, Detail: usage.Detail{InputTokens: 100, TotalTokens: 100}}
+	usage.PublishRecord(context.Background(), record)
+	s.stopAccountPolicy()
+	s.closeAccountPolicyUsage(context.Background())
+	files, err := filepath.Glob(filepath.Join(cfg.AccountPolicy.StateDir, "history", "requests-*.jsonl"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("history missing after drain: %v %v", files, err)
+	}
+	raw, err := os.ReadFile(files[0])
+	if err != nil || !strings.Contains(string(raw), `"execution_model":"execution"`) {
+		t.Fatalf("drained history missing: %v", err)
+	}
+	if s.accountPolicy.Settings().Enabled || s.accountPolicy.Settings().ObservationsEnabled {
+		t.Fatal("history enabled routing or provider observations")
+	}
+}

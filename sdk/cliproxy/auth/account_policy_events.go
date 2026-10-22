@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"strconv"
 	"strings"
 )
@@ -63,6 +64,20 @@ func policyQuotaExhausted(quota QuotaState) bool {
 }
 
 func (m *Manager) observePolicyResult(result Result, quotaTransition bool) {
+	if quotaTransition && !result.SkipQuotaObservation && result.Provider == "codex" {
+		if a, ok := m.GetByID(result.AuthID); ok && trustedOrdinaryExhaustion(a.Quota.Signals) {
+			selected, hasSelection := result.Options.Metadata[policyClientSelectionMetadataKey].(policyClientSelection)
+			if hasSelection && selected.authID == a.ID && selected.epoch == a.RegistrationEpoch && selected.identity == policyClientIdentity(a) {
+				m.mu.RLock()
+				callback := m.policyExhaustionCallback
+				m.mu.RUnlock()
+				if identity, err := PolicyAccountIdentity(a); err == nil && callback != nil {
+					callback(identity)
+				}
+			}
+		}
+	}
+
 	if result.SkipQuotaObservation || (!quotaTransition && statusCodeFromResult(result.Error) != 429) {
 		return
 	}
@@ -76,4 +91,25 @@ func (m *Manager) observePolicyResult(result Result, quotaTransition bool) {
 		lease.mu.Unlock()
 	}
 	m.requestPolicyRefresh(result.AuthID)
+}
+
+// Only the provider's ordinary five-hour or weekly windows establish trusted
+// exhaustion here. Generic throttling and other limits request discovery only.
+func trustedOrdinaryExhaustion(signals map[string]string) bool {
+	for _, window := range []string{"primary", "secondary"} {
+		prefix := "x-codex-" + window + "-"
+		minutes, err := strconv.Atoi(signals[prefix+"window-minutes"])
+		if err != nil || (minutes != 300 && minutes != 10080) {
+			continue
+		}
+		if used, err := strconv.ParseFloat(signals[prefix+"used-percent"], 64); err == nil && used >= 100 {
+			return true
+		}
+	}
+	return false
+}
+func (m *Manager) SetPolicyExhaustionCallback(callback func(accountpolicy.Identity)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policyExhaustionCallback = callback
 }

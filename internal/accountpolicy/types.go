@@ -7,6 +7,7 @@ import (
 )
 
 type Settings struct {
+	UsageHistoryEnabled bool                      `json:"usage_history_enabled" yaml:"usage-history-enabled"`
 	Enabled             bool                      `json:"enabled" yaml:"enabled"`
 	ObservationsEnabled bool                      `json:"observations_enabled" yaml:"observations-enabled"`
 	Mode                string                    `json:"mode" yaml:"mode"`
@@ -121,12 +122,14 @@ type Provider interface {
 	Consume(context.Context, Identity, string, string) (ConsumeResult, error)
 }
 type Options struct {
-	Settings     Settings
-	Provider     Provider
-	Accounts     func() []Identity
-	Recover      func(context.Context, Snapshot, Snapshot) error
-	Now          func() time.Time
-	HasDemand    func(string) bool
-	IsIdle       func(string) bool
-	AcquireReset func(context.Context, string) (func(), error)
+	OverrideAccountState func(string) (Identity, string)
+	Observe              func(Snapshot, Snapshot, []Operation)
+	Settings             Settings
+	Provider             Provider
+	Accounts             func() []Identity
+	Recover              func(context.Context, Snapshot, Snapshot) error
+	Now                  func() time.Time
+	HasDemand            func(string) bool
+	IsIdle               func(string) bool
+	AcquireReset         func(context.Context, string) (func(), error)
 }

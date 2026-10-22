@@ -104,7 +104,7 @@ func (f *fixture) handler() http.Handler {
 			_, _ = w.Write([]byte(`<h1>Sanitized fixture preview</h1><p>This preview never connects to a provider. Management key: fixture-key.</p><a href="/account-policy.html">Open policy controls</a>`))
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/account-policy.") || r.URL.Path == "/account-policy-dashboard.js" || r.URL.Path == "/account-policy-icon.svg" {
+		if strings.HasPrefix(r.URL.Path, "/account-policy.") || r.URL.Path == "/account-policy-dashboard.js" || r.URL.Path == "/account-policy-history.js" || r.URL.Path == "/account-policy-icon.svg" {
 			static.ServeHTTP(w, r)
 			return
 		}

@@ -9,12 +9,13 @@
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
 
-# Optional Codex deadline policy. Both switches default off, preserving upstream
-# routing and starting no background provider discovery or usage collection.
+# Optional Codex deadline policy and permanent measurement history. All three
+# collection/routing switches default off, preserving upstream behavior.
 # Store the journal on durable private storage; keep it during rollback/restarts.
 account-policy:
   enabled: false
-  observations-enabled: false # dashboard quota/inventory and private usage records; no routing/reset authority
+  observations-enabled: false # dashboard quota/inventory and recent statistics; no routing/reset authority
+  usage-history-enabled: false # retain all reported usage/quota measurements indefinitely, independent of routing
   mode: earliest_deadline
   automation: off # off, notify, auto_expiring, auto_all_saved; writes require explicit opt-in
   fallback: round-robin

@@ -108,3 +108,32 @@ func TestServerAccountPolicySettingsRespectLifecycleOwnership(t *testing.T) {
 		t.Fatal("policy response permits caching")
 	}
 }
+
+func TestHistoryManagementAliasesKeepManagementBoundary(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "operator-test")
+	settings := accountpolicy.DefaultSettings()
+	settings.StateDir = t.TempDir()
+	service, err := accountpolicy.NewService(accountpolicy.Options{Settings: settings, Provider: serverPolicyFixture{}, Accounts: func() []accountpolicy.Identity { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(&config.Config{}, nil, nil, "", WithRequestLoggerFactory(nil), WithAccountPolicy(service))
+	r := httptest.NewRequest("GET", "/v8/management/account-policy/routing-override", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.Header.Set("Authorization", "Bearer operator-test")
+	w := httptest.NewRecorder()
+	server.engine.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"schema_version":1`) {
+		t.Fatalf("management alias %d %s", w.Code, w.Body.String())
+	}
+	for _, test := range []struct{ method, path string }{{"GET", "routing-override"}, {"PUT", "routing-override"}, {"DELETE", "routing-override"}, {"GET", "usage-history/status"}, {"GET", "usage-history/requests"}, {"GET", "usage-history/summary"}, {"GET", "usage-history/export"}, {"GET", "allowance-history"}} {
+		r := httptest.NewRequest(test.method, "/v8/management/account-policy/"+test.path, strings.NewReader(`{}`))
+		r.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		server.engine.ServeHTTP(w, r)
+		if w.Code != 401 && w.Code != 403 {
+			t.Fatalf("management alias unauthenticated %s %s: %d", test.method, test.path, w.Code)
+		}
+	}
+
+}

@@ -15,16 +15,18 @@ import (
 )
 
 type storedState struct {
-	Version       int                       `json:"version"`
-	Revision      uint64                    `json:"revision"`
-	Settings      Settings                  `json:"settings"`
-	Snapshots     map[string]Snapshot       `json:"snapshots"`
-	Operations    []Operation               `json:"operations"`
-	Schedules     []Schedule                `json:"schedules"`
-	Decisions     []Decision                `json:"decisions"`
-	Recoveries    map[string]recoveryRecord `json:"recoveries,omitempty"`
-	RetryAt       map[string]time.Time      `json:"retry_at,omitempty"`
-	WriteFailures map[string]string         `json:"write_failures,omitempty"`
+	Override         RoutingOverride           `json:"routing_override"`
+	OverrideIdentity Identity                  `json:"routing_override_identity"`
+	Version          int                       `json:"version"`
+	Revision         uint64                    `json:"revision"`
+	Settings         Settings                  `json:"settings"`
+	Snapshots        map[string]Snapshot       `json:"snapshots"`
+	Operations       []Operation               `json:"operations"`
+	Schedules        []Schedule                `json:"schedules"`
+	Decisions        []Decision                `json:"decisions"`
+	Recoveries       map[string]recoveryRecord `json:"recoveries,omitempty"`
+	RetryAt          map[string]time.Time      `json:"retry_at,omitempty"`
+	WriteFailures    map[string]string         `json:"write_failures,omitempty"`
 }
 type recoveryRecord struct {
 	Before Snapshot `json:"before"`
@@ -103,6 +105,7 @@ func NewService(opts Options) (*Service, error) {
 			// Observation collection follows the startup configuration, including journals
 			// created before the independent observation setting existed.
 			s.state.Settings.ObservationsEnabled = opts.Settings.ObservationsEnabled
+			s.state.Settings.UsageHistoryEnabled = opts.Settings.UsageHistoryEnabled
 			// A replica configured read-only cannot acquire authority from persisted settings.
 			if opts.Settings.ReadOnly {
 				s.state.Settings.ReadOnly = true
@@ -265,8 +268,14 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	if s.replica && !next.ReadOnly {
 		return policyError("read_only", "another proxy owns automatic redemption")
 	}
+	if next.ForceAccount != "" && s.state.Override.State == "active" && s.state.Override.ExpiresAt.After(s.now()) {
+		return policyError("conflict", "temporary override is active")
+	}
 	before := clone(s.state)
 	s.state.Settings = clone(next)
+	if !next.Enabled {
+		s.endOverrideLocked("policy-disabled")
+	}
 	return s.persistLocked(before)
 }
 func (s *Service) UpdateSettings(settings Settings) error {
@@ -508,7 +517,10 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	tracking.Requested = requested
 	s.discovery[id.CredentialID] = tracking
 	errSave := s.persistLocked(before)
+	archivedOperations := clone(s.state.Operations)
 	s.mu.Unlock()
+	s.notifyObservation(old, next, archivedOperations)
+	_ = s.MaintainOverride()
 	if errSave != nil {
 		return next, errSave
 	}
@@ -645,6 +657,7 @@ func (s *Service) Run(ctx context.Context) {
 	busy := map[string]bool{}
 	defer workers.Wait()
 	dispatch := func() {
+		_ = s.MaintainOverride()
 		settings := s.Settings()
 		if !settings.Enabled && !settings.ObservationsEnabled {
 			return

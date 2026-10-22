@@ -24,6 +24,8 @@ func Handler() http.Handler {
 			filename, contentType = "account-policy.html", "text/html; charset=utf-8"
 		case "/account-policy.js":
 			filename, contentType = "account-policy.js", "text/javascript; charset=utf-8"
+		case "/account-policy-history.js":
+			filename, contentType = "account-policy-history.js", "text/javascript; charset=utf-8"
 		case "/account-policy-dashboard.js":
 			filename, contentType = "account-policy-dashboard.js", "text/javascript; charset=utf-8"
 		case "/account-policy.css":

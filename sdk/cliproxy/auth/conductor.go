@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"math"
 	"net/http"
 	"sync"
@@ -209,13 +210,14 @@ type Manager struct {
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
-	persistLocks            sync.Map
-	policyRuntimeMu         sync.Mutex
-	policyRuntime           map[string]PolicyRuntimeStatus
-	policyClientHistory     map[policyClientKey]policyClientSelection
-	policyPending           map[*policyRequestLease]policyRequestDemand
-	policyResetReservations map[string]chan struct{}
-	policyRefreshCallback   func(string)
+	persistLocks             sync.Map
+	policyRuntimeMu          sync.Mutex
+	policyRuntime            map[string]PolicyRuntimeStatus
+	policyClientHistory      map[policyClientKey]policyClientSelection
+	policyPending            map[*policyRequestLease]policyRequestDemand
+	policyResetReservations  map[string]chan struct{}
+	policyRefreshCallback    func(string)
+	policyExhaustionCallback func(accountpolicy.Identity)
 	// authMutationLocks coordinate credential mutations without blocking unrelated readers.
 	authMutationLocks sync.Map
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.

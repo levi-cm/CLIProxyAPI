@@ -125,3 +125,85 @@ func TestAccountPolicyClientReportUsesActualAccountAndNeverPolls(t *testing.T) {
 		t.Fatal("usage read polled the provider or redeemed a reset")
 	}
 }
+
+func TestGlobalAccountPolicyRoutesRequirePrincipalAndCORS(t *testing.T) {
+	s := NewServer(&config.Config{}, nil, nil, "", WithRequestLoggerFactory(nil))
+	for _, path := range []string{"accounts", "allowance-history", "routing-override", "usage-history/requests", "usage-history/summary", "usage-history/export", "usage-history/status"} {
+		for _, method := range []string{"GET", "PUT", "DELETE"} {
+			if method != "GET" && path != "routing-override" {
+				continue
+			}
+			w := httptest.NewRecorder()
+			s.engine.ServeHTTP(w, httptest.NewRequest(method, "/v1/account-policy/"+path, strings.NewReader(`{}`)))
+			if w.Code != 401 {
+				t.Fatalf("anonymous %s %s: %d", method, path, w.Code)
+			}
+		}
+	}
+	for _, method := range []string{"PUT", "DELETE"} {
+		r := httptest.NewRequest("OPTIONS", "/v1/account-policy/routing-override", nil)
+		r.Header.Set("Origin", "https://fixture.example")
+		r.Header.Set("Access-Control-Request-Method", method)
+		r.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, r)
+		if w.Code != 204 || !strings.Contains(w.Header().Get("Access-Control-Allow-Methods"), method) || !strings.Contains(strings.ToLower(w.Header().Get("Access-Control-Allow-Headers")), "authorization") {
+			t.Fatalf("cross-origin authorization preflight: %d %v", w.Code, w.Header())
+		}
+	}
+}
+
+func TestGlobalPolicyUsesInferenceKeysAndSharedRevisions(t *testing.T) {
+	provider := &clientQuotaFixture{}
+	settings := accountpolicy.DefaultSettings()
+	settings.Enabled = true
+	settings.StateDir = t.TempDir()
+	identity := accountpolicy.Identity{CredentialID: "fixture", AccountID: "PRIVATE-ACCOUNT", WorkspaceID: "PRIVATE-WORKSPACE", Provider: "codex"}
+	service, err := accountpolicy.NewService(accountpolicy.Options{Settings: settings, Provider: provider, Accounts: func() []accountpolicy.Identity { return []accountpolicy.Identity{identity} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Refresh(context.Background(), "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServerWithOptions(t, WithAccountPolicy(service), WithRequestLoggerFactory(nil))
+	for _, key := range []string{"", "wrong", "test-key"} {
+		r := httptest.NewRequest("GET", "/v1/account-policy/accounts", nil)
+		if key != "" {
+			r.Header.Set("Authorization", "Bearer "+key)
+		}
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, r)
+		expected := 401
+		if key == "test-key" {
+			expected = 200
+		}
+		if w.Code != expected {
+			t.Fatalf("inference authentication %d want %d: %s", w.Code, expected, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "PRIVATE-") {
+			t.Fatal("private account identity leaked")
+		}
+	}
+	for _, body := range []string{`{"credential_id":"fixture","duration_hours":1.5,"expected_revision":0}`, `{"credential_id":"fixture","duration_hours":1}`, `null`, `{"credential_id":"fixture","duration_hours":1,"expected_revision":0} {}`} {
+		r := httptest.NewRequest("PUT", "/v1/account-policy/routing-override", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer test-key")
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, r)
+		if w.Code != 400 {
+			t.Fatalf("accepted invalid body: %d %s", w.Code, w.Body.String())
+		}
+	}
+	for i, expected := range []int{200, 409} {
+		r := httptest.NewRequest("PUT", "/v1/account-policy/routing-override", strings.NewReader(`{"credential_id":"fixture","duration_hours":1,"expected_revision":0}`))
+		r.Header.Set("Authorization", "Bearer test-key")
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, r)
+		if w.Code != expected {
+			t.Fatalf("revision mutation %d: %d %s", i, w.Code, w.Body.String())
+		}
+	}
+	if provider.writes != 0 {
+		t.Fatal("routing mutation redeemed a credit")
+	}
+}

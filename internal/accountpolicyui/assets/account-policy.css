@@ -1343,3 +1343,104 @@ footer span {
     grid-template-columns: 1fr;
   }
 }
+
+/* Measured daily allowance, sharing existing typography and surfaces. */
+.allowance-day {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.allowance-day strong {
+  font-size: 0.85rem;
+}
+.allowance-day svg {
+  display: block;
+  min-width: 680px;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.allowance-day svg text {
+  fill: currentColor;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.history-grid {
+  stroke: currentColor;
+  opacity: 0.12;
+  stroke-width: 1;
+}
+.history-expected {
+  stroke: currentColor;
+  stroke-dasharray: 4 4;
+  opacity: 0.6;
+}
+.history-point:focus {
+  stroke: currentColor;
+  stroke-width: 4;
+  outline: none;
+}
+.event-natural_refill {
+  fill: var(--panel);
+  stroke: currentColor;
+  stroke-width: 2;
+}
+.event-allowance_change {
+  stroke: currentColor;
+  stroke-dasharray: 2 1;
+  stroke-width: 2;
+}
+.allowance-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  font-size: 0.85rem;
+}
+.history-table-scroll {
+  overflow-x: auto;
+  max-height: 32rem;
+  margin-block: 1rem;
+}
+.history-table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.history-table-scroll th,
+.history-table-scroll td {
+  padding: 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  min-width: 6rem;
+}
+#allowance-history-chart {
+  overflow-x: auto;
+}
+#override-status,
+#history-health {
+  overflow-wrap: anywhere;
+}
+.chart-controls {
+  flex-wrap: wrap;
+}
+.chart-controls label {
+  min-width: 0;
+}
+.history-table-scroll {
+  max-width: 100%;
+  min-width: 0;
+}
+.allowance-day,
+.history-table-scroll th,
+.history-table-scroll td {
+  border-color: var(--line);
+}
+.event-natural_refill {
+  fill: var(--surface);
+}
+
+#history-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}

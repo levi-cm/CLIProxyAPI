@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyledger"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyui"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
@@ -32,6 +33,7 @@ func (s *Server) registerAccountPolicyManagementRoutes() {
 	policy.Use(s.managementAvailabilityMiddleware(), s.mgmt.AccountPolicyMiddleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
+	s.policyIntegration.Register(policy, false)
 	policy.GET("/accounts", s.mgmt.GetAccountPolicyAccounts)
 	policy.GET("/capabilities", s.mgmt.GetAccountPolicyCapabilities)
 	policy.GET("/dashboard", s.mgmt.GetAccountPolicyDashboard)
@@ -47,7 +49,7 @@ func (s *Server) registerAccountPolicyManagementRoutes() {
 }
 
 func (s *Server) registerAccountPolicyPanelRoutes() {
-	for _, path := range []string{"/account-policy.html", "/account-policy.js", "/account-policy-dashboard.js", "/account-policy-icon.svg", "/account-policy.css"} {
+	for _, path := range []string{"/account-policy.html", "/account-policy.js", "/account-policy-dashboard.js", "/account-policy-history.js", "/account-policy-icon.svg", "/account-policy.css"} {
 		s.engine.GET(path, s.serveAccountPolicyPanel)
 	}
 }
@@ -59,4 +61,8 @@ func (s *Server) serveAccountPolicyPanel(c *gin.Context) {
 		return
 	}
 	accountpolicyui.Handler().ServeHTTP(c.Writer, c.Request)
+}
+
+func WithAccountPolicyHistory(source func() *accountpolicyledger.Archive) ServerOption {
+	return func(c *serverOptionConfig) { c.accountPolicyHistory = source }
 }

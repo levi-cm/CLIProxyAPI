@@ -65,7 +65,7 @@ func (s *Service) initializeAccountPolicy() error {
 	}
 	policy, err := accountpolicy.NewService(accountpolicy.Options{
 		Settings: settings, Provider: &policyRuntimeProvider{service: s, provider: provider},
-		Accounts: s.policyAccountIdentities, Recover: s.coreManager.RecoverPolicyQuota,
+		Accounts: s.policyAccountIdentities, OverrideAccountState: s.policyOverrideAccountState, Recover: s.coreManager.RecoverPolicyQuota,
 		IsIdle: s.coreManager.PolicyIsIdle, HasDemand: s.coreManager.PolicyHasDemand,
 		AcquireReset: s.coreManager.AcquirePolicyReset,
 	})
@@ -78,6 +78,12 @@ func (s *Service) initializeAccountPolicy() error {
 	}
 	s.accountPolicy = policy
 	s.coreManager.SetPolicyRefreshCallback(policy.RequestRefresh)
+	s.coreManager.SetPolicyExhaustionCallback(func(id accountpolicy.Identity) {
+		if err := policy.ConfirmOverrideExhaustion(id); err != nil {
+			log.WithField("component", "account-policy-override").Error("cannot persist override exhaustion")
+		}
+		policy.RequestRefresh(id.CredentialID)
+	})
 	s.accountPolicyDisabledFallback = s.coreManager.Selector()
 	if err := s.validateAccountPolicySettings(policy.Settings()); err != nil {
 		return err
@@ -136,6 +142,7 @@ func (s *Service) startAccountPolicy(ctx context.Context) error {
 	if s.accountPolicy == nil {
 		return nil
 	}
+	s.startAccountPolicyHistory()
 	settings := s.accountPolicy.Settings()
 	sink, err := accountpolicyusage.New(settings.StateDir, func() bool {
 		current := s.accountPolicy.Settings()
@@ -169,6 +176,7 @@ func (s *Service) accountPolicyUsageSink() *accountpolicyusage.Sink {
 }
 
 func (s *Service) closeAccountPolicyUsage(ctx context.Context) {
+	defer s.closeAccountPolicyHistory(ctx)
 	s.accountPolicyMu.Lock()
 	sink := s.accountPolicyUsage
 	s.accountPolicyUsage = nil
@@ -211,6 +219,7 @@ func (s *Service) stopAccountPolicy() {
 	}
 	if s.coreManager != nil {
 		s.coreManager.SetPolicyRefreshCallback(nil)
+		s.coreManager.SetPolicyExhaustionCallback(nil)
 	}
 }
 
@@ -340,4 +349,22 @@ func (s *Service) policyCredential(ctx context.Context, credentialID string) (ac
 		return credential, &accountpolicy.Error{Code: "authentication_failed", Message: "access token is unavailable"}
 	}
 	return accountpolicy.CodexCredential{AccessToken: token, AccountID: identity.AccountID, WorkspaceID: identity.WorkspaceID}, nil
+}
+
+func (s *Service) policyOverrideAccountState(id string) (accountpolicy.Identity, string) {
+	a, ok := s.coreManager.GetByID(id)
+	if !ok {
+		return accountpolicy.Identity{}, "removed"
+	}
+	identity, err := policyIdentity(a)
+	if err != nil {
+		return identity, "unavailable"
+	}
+	if a.Disabled || a.Status == coreauth.StatusDisabled || coreauth.HasUnauthorizedAuthFailure(a) {
+		return identity, "unavailable"
+	}
+	if policyAuthUnavailable(a) {
+		return identity, "temporary"
+	}
+	return identity, "available"
 }

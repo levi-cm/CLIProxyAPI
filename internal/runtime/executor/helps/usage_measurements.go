@@ -1,0 +1,63 @@
+package helps
+
+import "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+
+// mergeReportedUsage carries only fields missing from a later partial snapshot.
+// Explicitly reported zeros replace earlier values. Recompute the canonical
+// breakdown using the parser's original protocol semantics after merging.
+func mergeReportedUsage(old, update usage.Detail) usage.Detail {
+	m := update
+	if !update.Measurements.Input {
+		m.InputTokens = old.InputTokens
+	}
+	if !update.Measurements.Output {
+		m.OutputTokens = old.OutputTokens
+	}
+	if !update.Measurements.CacheRead {
+		m.CacheReadTokens = old.CacheReadTokens
+		m.CachedTokens = old.CachedTokens
+	}
+	if !update.Measurements.CacheWrite {
+		m.CacheCreationTokens = old.CacheCreationTokens
+	}
+	if !update.Measurements.Reasoning {
+		m.ReasoningTokens = old.ReasoningTokens
+	}
+	if !update.Measurements.CacheWrite5m {
+		m.CacheWrite5mTokens = old.CacheWrite5mTokens
+	}
+	if !update.Measurements.CacheWrite1h {
+		m.CacheWrite1hTokens = old.CacheWrite1hTokens
+	}
+	m.Measurements = mergePresence(old.Measurements, update.Measurements)
+	if m.MeasurementSemantics == "" {
+		m.MeasurementSemantics = old.MeasurementSemantics
+	}
+	if !update.Measurements.Total {
+		if old.Measurements.Total {
+			m.TotalTokens = old.TotalTokens
+		} else {
+			m.TotalTokens = 0
+		}
+	}
+	switch m.MeasurementSemantics {
+	case "subset":
+		m.TokenBreakdown = usage.NewSubsetTokenBreakdown(m.InputTokens, m.CacheReadTokens, m.CacheCreationTokens, m.OutputTokens, m.ReasoningTokens, m.TotalTokens)
+	case "independent":
+		nonReasoning := m.OutputTokens - m.ReasoningTokens
+		if nonReasoning < 0 {
+			nonReasoning = 0
+		}
+		m.TokenBreakdown = usage.NewIndependentTokenBreakdown(m.InputTokens, m.CacheReadTokens, m.CacheCreationTokens, nonReasoning, m.ReasoningTokens, m.TotalTokens)
+	case "separate_reasoning":
+		m.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(m.InputTokens, m.CacheReadTokens, m.CacheCreationTokens, m.OutputTokens, m.ReasoningTokens, m.TotalTokens)
+	default:
+		m.TokenBreakdown = usage.NewUnclassifiedTokenBreakdown(m.TotalTokens)
+	}
+	m.TotalTokens = m.TokenBreakdown.TotalTokens
+	return m
+}
+
+func hasReportedMeasurements(p usage.MeasurementPresence) bool {
+	return p.Input || p.Output || p.CacheRead || p.CacheWrite || p.Reasoning || p.Total || p.CacheWrite5m || p.CacheWrite1h
+}

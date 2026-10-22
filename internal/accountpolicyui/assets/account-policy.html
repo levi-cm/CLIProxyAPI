@@ -11,6 +11,7 @@
     <link rel="icon" href="/account-policy-icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/account-policy.css" />
     <script defer src="/account-policy-dashboard.js"></script>
+    <script defer src="/account-policy-history.js"></script>
     <script defer src="/account-policy.js"></script>
   </head>
   <body>
@@ -113,6 +114,47 @@
             <h2 id="allowances-title">Weekly allowance by account</h2>
             <div id="allowances" class="allowance-list"></div>
             <p id="allowance-scope" class="field-help"></p>
+          </section>
+          <section class="panel" aria-labelledby="allowance-history-title">
+            <div class="section-heading">
+              <h2 id="allowance-history-title">
+                Remaining allowance over time
+              </h2>
+              <div class="chart-controls">
+                <label
+                  >Account<select id="allowance-account">
+                    <option value="">Accounts on filtered page</option>
+                  </select></label
+                ><label
+                  >Window<select id="allowance-window">
+                    <option value="weekly">Weekly</option>
+                    <option value="5h">Five hours</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <div class="toolbar-actions">
+              <button id="allowance-previous" class="secondary">
+                Previous seven days</button
+              ><button id="allowance-today" class="quiet">
+                Latest seven days</button
+              ><button id="allowance-next" class="secondary">
+                Next seven days
+              </button>
+            </div>
+            <p id="allowance-history-state" class="field-help" role="status">
+              Waiting for quota observations.
+            </p>
+            <div id="allowance-legend" class="allowance-legend"></div>
+            <div
+              id="allowance-history-chart"
+              class="chart-container"
+              aria-busy="true"
+            ></div>
+            <details class="chart-data">
+              <summary>View allowance values</summary>
+              <div id="allowance-history-values"></div>
+            </details>
           </section>
           <div
             id="metrics"
@@ -286,6 +328,34 @@
             </div>
             <span id="policy-status" class="badge"></span>
           </div>
+          <div aria-labelledby="override-title">
+            <h3 id="override-title">Temporary account routing</h3>
+            <p class="muted">
+              Applies across all callers. Account-bound conversations retain
+              their owner. Cancelling, expiry or verified exhaustion restores
+              smart routing.
+            </p>
+            <div class="inline">
+              <label
+                >Account<select id="override-account">
+                  <option value="">Select account</option>
+                </select></label
+              ><label>Duration<select id="override-hours"></select></label
+              ><button id="override-apply" type="button" disabled>
+                Apply temporary routing</button
+              ><button
+                id="override-cancel"
+                type="button"
+                class="secondary"
+                disabled
+              >
+                Resume smart routing
+              </button>
+            </div>
+            <p id="override-status" role="status">
+              Waiting for shared routing state.
+            </p>
+          </div>
           <form id="settings-form">
             <div class="settings-grid primary-settings">
               <label class="setting-check"
@@ -380,13 +450,13 @@
                     resets expiring after the natural weekly refresh.</span
                   ></label
                 >
-                <label
-                  >Force account<select id="force">
-                    <option value="">Automatic choice</option></select
+                <label class="setting-check"
+                  ><span class="check"
+                    ><input id="usage-history-enabled" type="checkbox" /> Keep
+                    permanent usage and allowance history</span
                   ><span class="field-help"
-                    >Requests one account for eligible new work. Cannot bypass
-                    quota, model restrictions, cooldown, holds or account-bound
-                    continuations. Clear to restore automatic choice.</span
+                    >Retains reported measurements indefinitely, independently
+                    of smart routing and reset automation.</span
                   ></label
                 >
                 <label class="setting-check"
@@ -452,16 +522,18 @@
                 <dd>
                   Successful conversation owners are saved in the private policy
                   state volume. Resume and child inheritance require a matching
-                  caller, session, model and unchanged credential/account/workspace
-                  identity. A cache expiry or restart does not erase saved ownership.
+                  caller, session, model and unchanged
+                  credential/account/workspace identity. A cache expiry or
+                  restart does not erase saved ownership.
                 </dd>
                 <dt>Lost conversation ownership</dt>
                 <dd>
                   A 409 ownership error is not a quota measurement. Already-lost
-                  owners cannot be guessed from account usage or recent activity.
-                  Restore a verified ownership backup, or start a new conversation
-                  with a plain-text summary. Retrying or changing the routing mode
-                  does not safely recover encrypted conversation state.
+                  owners cannot be guessed from account usage or recent
+                  activity. Restore a verified ownership backup, or start a new
+                  conversation with a plain-text summary. Retrying or changing
+                  the routing mode does not safely recover encrypted
+                  conversation state.
                 </dd>
                 <dt>Account hold / Allowance reserve</dt>
                 <dd>
@@ -518,6 +590,53 @@
             </div>
             <button id="export" class="secondary">Export diagnostics</button>
           </div>
+          <section class="panel" aria-labelledby="history-usage-title">
+            <h3 id="history-usage-title">Permanent usage records</h3>
+            <p id="history-health" class="field-help" role="status">
+              Waiting for collection status.
+            </p>
+            <div id="history-filters" class="chart-controls">
+              <label>From (UTC)<input id="history-from" type="date" /></label
+              ><label>Through (UTC)<input id="history-to" type="date" /></label
+              ><label
+                >Provider<input
+                  id="history-provider"
+                  placeholder="All providers" /></label
+              ><label
+                >Model<input
+                  id="history-model"
+                  placeholder="Any model identifier" /></label
+              ><label
+                >Account<select id="history-account">
+                  <option value="">All accounts</option>
+                </select></label
+              >
+            </div>
+            <p class="field-help">
+              Each row is a reported provider attempt. Retries and additional
+              models have separate records. Cached input excludes cache writes;
+              unavailable measurements stay unavailable.
+            </p>
+            <div id="request-history"></div>
+            <div class="toolbar-actions">
+              <button id="history-previous" class="secondary" disabled>
+                Previous requests</button
+              ><button id="history-next" class="secondary" disabled>
+                Next requests</button
+              ><button id="history-export-csv" class="quiet">Export CSV</button
+              ><button id="history-export-ndjson" class="quiet">
+                Export NDJSON
+              </button>
+            </div>
+            <label
+              >Summary period<select id="history-group">
+                <option value="day">Daily</option>
+                <option value="month">Monthly</option>
+                <option value="year">Yearly</option>
+              </select></label
+            >
+            <div id="history-summary"></div>
+          </section>
           <section class="panel">
             <h3>Routing decisions</h3>
             <div id="decisions"></div>

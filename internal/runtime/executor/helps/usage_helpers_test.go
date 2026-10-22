@@ -435,7 +435,7 @@ func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
 	}
 }
 
-func TestParseGeminiStreamUsageSkipsZeroPlaceholder(t *testing.T) {
+func TestParseGeminiStreamUsagePreservesReportedZeroAndFinalCounts(t *testing.T) {
 	lines := [][]byte{
 		[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
 		[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
@@ -449,10 +449,13 @@ func TestParseGeminiStreamUsageSkipsZeroPlaceholder(t *testing.T) {
 		}
 	}
 
-	if len(accepted) != 1 {
-		t.Fatalf("accepted usage count = %d, want 1", len(accepted))
+	if len(accepted) != 2 {
+		t.Fatalf("accepted usage count = %d, want 2 reported measurements", len(accepted))
 	}
-	detail := accepted[0]
+	if !accepted[0].Measurements.Input || !accepted[0].Measurements.Total || accepted[0].TotalTokens != 0 {
+		t.Fatalf("reported zero was lost: %+v", accepted[0])
+	}
+	detail := accepted[1]
 	if detail.InputTokens != 17984 || detail.OutputTokens != 2668 || detail.ReasoningTokens != 1028 || detail.TotalTokens != 21680 {
 		t.Fatalf("accepted usage detail = %+v", detail)
 	}

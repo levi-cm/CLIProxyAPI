@@ -24,6 +24,9 @@ func (s *Server) registerAccountPolicyClientRoutes(service *accountpolicy.Servic
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "unauthorized", "message": "Authenticated inference access is required."}})
 		}
 	})
+	if s.policyIntegration != nil {
+		s.policyIntegration.Register(group, true)
+	}
 	group.GET("/usage", func(c *gin.Context) {
 		report, err := s.accountPolicyClientReport(service, c.GetString("userApiKey"), c.Query("session_id"))
 		if err != nil {

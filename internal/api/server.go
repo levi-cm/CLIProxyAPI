@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyapi"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
@@ -37,6 +38,7 @@ import (
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
+	policyIntegration *accountpolicyapi.Handler
 	// engine is the Gin web framework engine instance.
 	engine *gin.Engine
 
@@ -211,6 +213,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
+	s.policyIntegration = &accountpolicyapi.Handler{Service: optionState.accountPolicy, History: optionState.accountPolicyHistory}
 	s.mgmt.SetAccountPolicy(optionState.accountPolicy)
 	s.mgmt.SetAccountPolicySettingsValidator(optionState.accountPolicyValidator)
 	s.mgmt.SetAccountPolicyUsage(optionState.accountPolicyUsage)

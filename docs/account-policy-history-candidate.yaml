@@ -1,0 +1,4 @@
+# Candidate overlay only; merge into a complete isolated configuration.
+# Do not replace or hot-edit production configuration with this fragment.
+account-policy:
+  usage-history-enabled: true

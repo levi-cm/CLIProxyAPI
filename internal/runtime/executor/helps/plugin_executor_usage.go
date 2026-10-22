@@ -162,28 +162,38 @@ func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
 
 // MergeStreamUsageDetail merges existing stream usage with a newer update.
 func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
+	if update.MeasurementSemantics != "" {
+		return mergeReportedUsage(existing, update)
+	}
 	merged := update
-	if merged.InputTokens == 0 && existing.InputTokens > 0 {
+	if !update.Measurements.Input && merged.InputTokens == 0 && existing.InputTokens > 0 {
 		merged.InputTokens = existing.InputTokens
 	}
 	if merged.CachedTokens == 0 && existing.CachedTokens > 0 {
 		merged.CachedTokens = existing.CachedTokens
 	}
-	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
+	if !update.Measurements.CacheRead && merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
 		merged.CacheReadTokens = existing.CacheReadTokens
 	}
-	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
+	if !update.Measurements.CacheWrite && merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
 		merged.CacheCreationTokens = existing.CacheCreationTokens
 	}
-	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
+	if !update.Measurements.Output && merged.OutputTokens == 0 && existing.OutputTokens > 0 {
 		merged.OutputTokens = existing.OutputTokens
 	}
-	if merged.ReasoningTokens == 0 && existing.ReasoningTokens > 0 {
+	if !update.Measurements.Reasoning && merged.ReasoningTokens == 0 && existing.ReasoningTokens > 0 {
 		merged.ReasoningTokens = existing.ReasoningTokens
 	}
 	if merged.ResponseServiceTier == "" {
 		merged.ResponseServiceTier = existing.ResponseServiceTier
 	}
+	if !update.Measurements.CacheWrite5m {
+		merged.CacheWrite5mTokens = existing.CacheWrite5mTokens
+	}
+	if !update.Measurements.CacheWrite1h {
+		merged.CacheWrite1hTokens = existing.CacheWrite1hTokens
+	}
+	merged.Measurements = mergePresence(existing.Measurements, update.Measurements)
 	cached := merged.CacheReadTokens + merged.CacheCreationTokens
 	if cached == 0 {
 		cached = merged.CachedTokens
@@ -237,4 +247,8 @@ func ExtractStreamJSONPayload(line []byte) []byte {
 		return nil
 	}
 	return trimmed
+}
+
+func mergePresence(a, b usage.MeasurementPresence) usage.MeasurementPresence {
+	return usage.MeasurementPresence{Input: a.Input || b.Input, Output: a.Output || b.Output, CacheRead: a.CacheRead || b.CacheRead, CacheWrite: a.CacheWrite || b.CacheWrite, Reasoning: a.Reasoning || b.Reasoning, Total: a.Total || b.Total, CacheWrite5m: a.CacheWrite5m || b.CacheWrite5m, CacheWrite1h: a.CacheWrite1h || b.CacheWrite1h}
 }

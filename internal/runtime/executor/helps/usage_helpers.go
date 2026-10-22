@@ -26,6 +26,7 @@ import (
 )
 
 type UsageReporter struct {
+	responseStatus      atomic.Int64
 	requestID           string
 	traceID             string
 	provider            string
@@ -394,7 +395,11 @@ func (r *UsageReporter) trackHTTPClient(client *http.Client, packetOnly bool) *h
 }
 
 func (r *UsageReporter) ObserveResponse(resp *http.Response) {
-	if r == nil || resp == nil || resp.Body == nil {
+	if r == nil || resp == nil {
+		return
+	}
+	r.responseStatus.Store(int64(resp.StatusCode))
+	if resp.Body == nil {
 		return
 	}
 	r.StartResponseTTFT()
@@ -407,7 +412,11 @@ func (r *UsageReporter) ObserveResponse(resp *http.Response) {
 }
 
 func (r *UsageReporter) ObserveResponsePacketOnly(resp *http.Response) {
-	if r == nil || resp == nil || resp.Body == nil {
+	if r == nil || resp == nil {
+		return
+	}
+	r.responseStatus.Store(int64(resp.StatusCode))
+	if resp.Body == nil {
 		return
 	}
 	r.StartResponseTTFT()
@@ -526,6 +535,7 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	}
 	rec := r.buildRecordForModel(model, detail, false, usage.Failure{})
 	rec.RequestID = uuid.NewString()
+	rec.ParentExecutionID = r.requestID
 	return rec, true
 }
 
@@ -633,7 +643,15 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if model == r.model {
 		responseModel = r.ResponseModel()
 	}
+	executionModel := model
+	if model == r.model {
+		if upstream := r.UpstreamModel(); upstream != "" {
+			executionModel = upstream
+		}
+	}
 	return usage.Record{
+		ExecutionModel:      executionModel,
+		ResponseStatusCode:  int(r.responseStatus.Load()),
 		RequestID:           r.requestID,
 		TraceID:             r.traceID,
 		Provider:            r.provider,
@@ -853,8 +871,11 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	if b == nil || !ok {
 		return
 	}
+	if b.ok && detail.MeasurementSemantics != "" && hasReportedMeasurements(detail.Measurements) {
+		detail = mergeReportedUsage(b.detail, detail)
+	}
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+	if responseServiceTier == "" || hasReportedMeasurements(detail.Measurements) || hasNonZeroTokenUsage(detail) {
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
 		if b.detail.ResponseServiceTier == "" {
@@ -1029,9 +1050,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		outputNode = usageNode.Get("output_tokens")
 	}
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
-		OutputTokens: outputNode.Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+		MeasurementSemantics: "subset",
+		InputTokens:          inputNode.Int(),
+		OutputTokens:         outputNode.Int(),
+		TotalTokens:          usageNode.Get("total_tokens").Int(),
 	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
@@ -1058,6 +1080,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
+	detail.Measurements = usage.MeasurementPresence{Input: reported(inputNode), Output: reported(outputNode), CacheRead: reported(cached), CacheWrite: reported(cacheCreation), Reasoning: reported(reasoning), Total: reported(usageNode.Get("total_tokens"))}
 	if hasOpenAIStyleUsageBucketFields(usageNode) {
 		if inputNode.Exists() && outputNode.Exists() {
 			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
@@ -1164,13 +1187,17 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		nonReasoningOutput = 0
 	}
 	detail := usage.Detail{
-		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        rawOutputTokens,
-		ReasoningTokens:     reasoningTokens,
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
+		MeasurementSemantics: "independent",
+		InputTokens:          usageNode.Get("input_tokens").Int(),
+		OutputTokens:         rawOutputTokens,
+		ReasoningTokens:      reasoningTokens,
+		CachedTokens:         cacheReadTokens,
+		CacheReadTokens:      cacheReadTokens,
+		CacheCreationTokens:  cacheCreationTokens,
 	}
+	detail.Measurements = usage.MeasurementPresence{Input: reported(usageNode.Get("input_tokens")), Output: reported(usageNode.Get("output_tokens")), CacheRead: reported(usageNode.Get("cache_read_input_tokens")), CacheWrite: reported(usageNode.Get("cache_creation_input_tokens")), Reasoning: reported(reasoningNode), Total: reported(usageNode.Get("total_tokens")), CacheWrite5m: reported(usageNode.Get("cache_creation.ephemeral_5m_input_tokens")), CacheWrite1h: reported(usageNode.Get("cache_creation.ephemeral_1h_input_tokens"))}
+	detail.CacheWrite5mTokens = usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int()
+	detail.CacheWrite1hTokens = usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int()
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
@@ -1193,13 +1220,15 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	toolUseTokens := firstExistingUsageNode(node, "toolUsePromptTokenCount", "tool_use_prompt_token_count").Int()
 	inputTokens, okInput := safeUsageTokenSum(node.Get("promptTokenCount").Int(), toolUseTokens)
 	detail := usage.Detail{
-		InputTokens:     inputTokens,
-		OutputTokens:    node.Get("candidatesTokenCount").Int(),
-		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
-		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    cachedTokens,
-		CacheReadTokens: cachedTokens,
+		MeasurementSemantics: "separate_reasoning",
+		InputTokens:          inputTokens,
+		OutputTokens:         node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens:      node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:          node.Get("totalTokenCount").Int(),
+		CachedTokens:         cachedTokens,
+		CacheReadTokens:      cachedTokens,
 	}
+	detail.Measurements = usage.MeasurementPresence{Input: reported(node.Get("promptTokenCount")), Output: reported(node.Get("candidatesTokenCount")), CacheRead: reported(node.Get("cachedContentTokenCount")), Reasoning: reported(node.Get("thoughtsTokenCount")), Total: reported(node.Get("totalTokenCount"))}
 	if !okInput {
 		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
 		return detail
@@ -1232,14 +1261,16 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		toolUseTokens,
 	)
 	detail := usage.Detail{
-		InputTokens:         inputTokens,
-		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
-		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
-		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
-		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     cacheRead.Int(),
-		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
+		MeasurementSemantics: "separate_reasoning",
+		InputTokens:          inputTokens,
+		OutputTokens:         firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
+		ReasoningTokens:      firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
+		TotalTokens:          firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
+		CachedTokens:         firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
+		CacheReadTokens:      cacheRead.Int(),
+		CacheCreationTokens:  firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
 	}
+	detail.Measurements = usage.MeasurementPresence{Input: reported(firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens")), Output: reported(firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens")), CacheRead: reported(firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens", "cached_tokens", "cachedContentTokenCount", "total_cached_tokens")), CacheWrite: reported(firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens")), Reasoning: reported(firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens")), Total: reported(firstExistingUsageNode(node, "total_tokens", "totalTokenCount"))}
 	if !okInput {
 		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
 		return detail
@@ -1268,7 +1299,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func hasUsageDetail(detail usage.Detail) bool {
-	return hasNonZeroTokenUsage(detail)
+	return hasReportedMeasurements(detail.Measurements) || hasNonZeroTokenUsage(detail)
 }
 
 func ParseInteractionsUsage(data []byte) usage.Detail {
@@ -1343,7 +1374,7 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	detail := parseGeminiFamilyUsageDetail(node)
-	if !hasNonZeroTokenUsage(detail) {
+	if !hasReportedMeasurements(detail.Measurements) && !hasNonZeroTokenUsage(detail) {
 		return usage.Detail{}, false
 	}
 	return detail, true
@@ -1589,3 +1620,6 @@ func jsonPayload(line []byte) []byte {
 	}
 	return trimmed
 }
+
+// reported excludes explicit null and nonnumeric fields from measurements.
+func reported(node gjson.Result) bool { return node.Type == gjson.Number }

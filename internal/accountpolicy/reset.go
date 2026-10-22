@@ -17,18 +17,31 @@ func unresolved(state string) bool {
 }
 func (s *Service) saveOperation(op Operation) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	before := clone(s.state)
 	op.UpdatedAt = s.now()
+	found := false
 	for i, old := range s.state.Operations {
 		if old.ID == op.ID {
 			s.state.Operations[i] = clone(op)
-			return s.persistLocked(before)
+			found = true
+			break
 		}
 	}
-	s.state.Operations = append(s.state.Operations, clone(op))
-	return s.persistLocked(before)
+	if !found {
+		s.state.Operations = append(s.state.Operations, clone(op))
+	}
+	err := s.persistLocked(before)
+	s.mu.Unlock()
+	if err == nil && op.State == "confirmed" && op.After != nil {
+		old := Snapshot{}
+		if op.Before != nil {
+			old = *op.Before
+		}
+		s.notifyObservation(old, *op.After, []Operation{op})
+	}
+	return err
 }
+
 func changedAllowance(before, after Snapshot) bool {
 	for _, b := range before.Buckets {
 		for _, a := range after.Buckets {
@@ -374,6 +387,9 @@ func (s *Service) redeemSelected(ctx context.Context, id, creditID string, expec
 }
 
 func (s *Service) Tick(ctx context.Context) error {
+	if err := s.MaintainOverride(); err != nil {
+		return err
+	}
 	settings := s.Settings()
 	if !settings.Enabled && !settings.ObservationsEnabled {
 		return nil

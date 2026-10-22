@@ -246,6 +246,7 @@ func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model str
 
 func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Auth) ([]*Auth, map[string]accountpolicy.Evaluation, bool) {
 	settings := s.policy.Settings()
+	preferred := s.preferredAccount(provider)
 	s.mu.Lock()
 	resolve := s.modelResolver
 	s.mu.Unlock()
@@ -271,7 +272,17 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		if resolve != nil {
 			quotaModel = resolve(a, model)
 		}
-		evaluation := accountpolicy.Evaluate(snapshot, quotaModel, settings, now)
+		accountSettings := settings
+		if a.ID == preferred {
+			accountSettings.Accounts = make(map[string]accountpolicy.AccountControl, len(settings.Accounts))
+			for id, c := range settings.Accounts {
+				accountSettings.Accounts[id] = c
+			}
+			c := accountSettings.Accounts[a.ID]
+			c.ReservePercent = 0
+			accountSettings.Accounts[a.ID] = c
+		}
+		evaluation := accountpolicy.Evaluate(snapshot, quotaModel, accountSettings, now)
 		if !evaluation.Eligible {
 			continue
 		}
@@ -321,6 +332,14 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		return nil, &Error{Code: "account_policy_owner_unknown", Message: "account-specific continuation requires an established binding or explicit account owner", HTTPStatus: 409}
+	}
+	if preferred := s.preferredAccount(provider); preferred != "" {
+		for _, a := range eligible {
+			if a.ID == preferred {
+				s.decision(a, provider, model, "temporary_override", evaluations[a.ID], false)
+				return a, nil
+			}
+		}
 	}
 	if unknown {
 		a, err := s.effectiveFallback().Pick(ctx, provider, model, opts, eligible)
@@ -490,4 +509,11 @@ func policyRequestHasLocalState(opts cliproxyexecutor.Options) bool {
 		return false
 	}
 	return unsafe(root)
+}
+
+func (s *EarliestDeadlineSelector) preferredAccount(provider string) string {
+	if p, ok := s.policy.(interface{ PreferredAccount(string) string }); ok {
+		return p.PreferredAccount(provider)
+	}
+	return ""
 }

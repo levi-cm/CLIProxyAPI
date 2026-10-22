@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyledger"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
@@ -109,6 +110,9 @@ type Service struct {
 	accountPolicyRoutingInstalled atomic.Bool
 	accountPolicyPluginConfig     *config.Config
 	accountPolicyUsage            *accountpolicyusage.Sink
+	accountPolicyHistory          *accountpolicyledger.Archive
+	accountPolicyHistorySeedMu    sync.Mutex
+	accountPolicyHistorySeeded    bool
 
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore

@@ -23,21 +23,24 @@ const AutoServiceTier = "auto"
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
-	RequestID string
+	RequestID         string
+	ParentExecutionID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
 	TraceID  string
 	Provider string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType    string
-	Model           string
-	Alias           string
-	APIKey          string
-	SessionID       string
-	ParentSessionID string
-	AuthID          string
-	AuthIndex       string
+	ExecutorType       string
+	ExecutionModel     string
+	ResponseStatusCode int
+	Model              string
+	Alias              string
+	APIKey             string
+	SessionID          string
+	ParentSessionID    string
+	AuthID             string
+	AuthIndex          string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
 	AccessTokenSHA256 string
 	AuthType          string
@@ -77,15 +80,19 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	TokenBreakdown      TokenBreakdown
-	ResponseServiceTier string
+	MeasurementSemantics string
+	Measurements         MeasurementPresence
+	CacheWrite5mTokens   int64
+	CacheWrite1hTokens   int64
+	InputTokens          int64
+	OutputTokens         int64
+	ReasoningTokens      int64
+	CachedTokens         int64
+	CacheReadTokens      int64
+	CacheCreationTokens  int64
+	TotalTokens          int64
+	TokenBreakdown       TokenBreakdown
+	ResponseServiceTier  string
 }
 
 type requestedModelAliasContextKey struct{}

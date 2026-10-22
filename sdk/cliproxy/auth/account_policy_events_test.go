@@ -105,3 +105,15 @@ func TestPolicyRefreshCallbackRunsAfterRealBoundaryAndOutsideLocks(t *testing.T)
 		})
 	}
 }
+
+func TestTrustedOrdinaryExhaustionExcludesGenericAndOtherWindows(t *testing.T) {
+	if trustedOrdinaryExhaustion(map[string]string{"retry-after": "60"}) {
+		t.Fatal("generic throttling became exhaustion")
+	}
+	if trustedOrdinaryExhaustion(map[string]string{"x-codex-code-review-primary-used-percent": "100", "x-codex-code-review-primary-window-minutes": "300"}) {
+		t.Fatal("code review became ordinary exhaustion")
+	}
+	if !trustedOrdinaryExhaustion(map[string]string{"x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300"}) {
+		t.Fatal("validated short window not exhausted")
+	}
+}

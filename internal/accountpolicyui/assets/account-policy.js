@@ -159,6 +159,31 @@
   let lastSnapshotAt = 0;
   const timelineView = { mode: "weekly", offset: 0 };
   const accountDrafts = new Map();
+  const history = window.PolicyHistory.createController({
+    request,
+    accounts: () => state.accounts,
+    filtered: () => filteredAccounts().items,
+    alias: (a) => alias(a),
+    zone: () => $("zone").value,
+    instant,
+    countdown,
+    notice,
+    download: async (path, format) => {
+      const response = await fetch(API + path, {
+        headers: { Authorization: "Bearer " + key },
+        credentials: "omit",
+        cache: "no-store",
+      });
+      if (!response.ok)
+        throw Error("History export failed (" + response.status + ").");
+      const url = URL.createObjectURL(await response.blob()),
+        link = document.createElement("a");
+      link.href = url;
+      link.download = "usage-history." + format;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    },
+  });
   function replaceMarkup(id, html) {
     const element = $(id);
     if (element.innerHTML === html) return;
@@ -539,6 +564,7 @@
         lastSnapshotAt = Date.now();
         settingsForm();
         renderHistory();
+        history.refresh();
       }
       applyTelemetry(data);
     },
@@ -669,25 +695,13 @@
     const s = state.settings;
     $("enabled").checked = !!s.enabled;
     $("observations-enabled").checked = !!s.observations_enabled;
+    $("usage-history-enabled").checked = !!s.usage_history_enabled;
     $("automation").value = s.automation || "off";
     $("fallback").value = s.fallback || "round-robin";
     $("affinity").value = s.affinity || "strict";
     $("guard").value = s.expiry_guard_seconds ?? 600;
     $("saved-reserve").value = s.saved_credit_reserve ?? 1;
     $("read-only").checked = !!s.read_only;
-    $("force").innerHTML =
-      '<option value="">Automatic choice</option>' +
-      state.accounts
-        .map(
-          (a) =>
-            '<option value="' +
-            attr(a.identity.credential_id) +
-            '">' +
-            escape(alias(a)) +
-            "</option>",
-        )
-        .join("");
-    $("force").value = s.force_account || "";
     $("policy-status").textContent = s.enabled
       ? "Enabled · " + s.automation
       : s.observations_enabled
@@ -1110,6 +1124,7 @@
     }
   }
   function render() {
+    history.refresh();
     settingsForm();
     renderAccountList();
     renderOverview();
@@ -1184,6 +1199,7 @@
       '<p class="muted">No inference selection recorded yet.</p>';
   }
   function tick() {
+    history.tick();
     clearTimeout(timer);
     const now = Date.now();
     let next = 60000;
@@ -1297,6 +1313,7 @@
     poller.stop();
     key = "";
     accountDrafts.clear();
+    history.reset();
     state = {
       settings: {},
       accounts: [],
@@ -1384,14 +1401,17 @@
       accountPage = 1;
       renderAccountList();
       renderOverview();
+      history.allowances();
     });
   $("previous-page").addEventListener("click", () => {
     accountPage--;
+    history.allowances();
     renderAccountList();
     renderOverview();
   });
   $("next-page").addEventListener("click", () => {
     accountPage++;
+    history.allowances();
     renderAccountList();
     renderOverview();
   });
@@ -1442,7 +1462,7 @@
         affinity: $("affinity").value,
         expiry_guard_seconds: Number($("guard").value),
         saved_credit_reserve: Number($("saved-reserve").value),
-        force_account: $("force").value,
+        usage_history_enabled: $("usage-history-enabled").checked,
         read_only: $("read-only").checked,
       };
       if (
