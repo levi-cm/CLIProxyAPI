@@ -59,3 +59,5 @@ Monitor for 30 minutes and report all unavailable/failed/skipped checks.
 Detailed commands, decisions and outputs are in the isolated worktree under
 `.superpowers/sdd/upstream-v8.0.41/`. No deployment or completion is implied by
 this execution record; consult the recorded validation results and blockers.
+
+Validation results and deployment blocker: [validation report](upstream-v8.0.41-validation.md).
