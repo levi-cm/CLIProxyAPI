@@ -600,7 +600,7 @@ func TestClaudeExecutor_CountTokens_StripsPromptCacheOptions(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPayloadRule(t *testing.T) {
+func TestClaudeExecutor_CountTokensUpstream_PreservesConfiguredPromptCacheOptions(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -648,8 +648,8 @@ func TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPay
 	if len(upstreamResp.Payload) == 0 {
 		t.Fatal("expected non-empty countTokensUpstream payload")
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
-		t.Fatalf("prompt_cache_options should not be forwarded in count_tokens upstream even if injected by payload rule: %s", string(seenBody))
+	if gjson.GetBytes(seenBody, "prompt_cache_options.mode").String() != "explicit" {
+		t.Fatalf("cleanup removed configured prompt_cache_options: %s", seenBody)
 	}
 }
 
@@ -1013,6 +1013,45 @@ func TestClaudeExecutor_CountTokensUpstream_OAuthRelocatesAffectedSystemPrompts(
 			}
 			if got := gjson.GetBytes(seenBody, messagePath+".content.0.text").String(); got != "caller guidance" {
 				t.Fatalf("%s.content.0.text = %q, want caller guidance: %s", messagePath, got, seenBody)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_PreservesConfiguredPromptCacheOptionsAfterCleanup(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			captured := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				captured <- body
+				writeClaudeSSEMockResponse(w)
+			}))
+			defer server.Close()
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "claude-3-5-sonnet-20241022"}}, Params: map[string]any{"prompt_cache_options.mode": "configured"}}}}}
+			executor := NewClaudeExecutor(cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "fixture-key", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{Model: "claude-3-5-sonnet-20241022", Payload: []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello"}],"prompt_cache_options":{"mode":"explicit"}}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), Stream: stream}
+			if stream {
+				result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			} else if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
+				t.Fatal(err)
+			}
+			if body := <-captured; gjson.GetBytes(body, "prompt_cache_options.mode").String() != "configured" {
+				t.Fatalf("late cleanup removed override: %s", body)
 			}
 		})
 	}
