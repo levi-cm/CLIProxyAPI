@@ -22,9 +22,10 @@ import (
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
-	mu     sync.Mutex
-	active bool
-	frames chan []byte
+	mu         sync.Mutex
+	active     bool
+	responseID string
+	frames     chan []byte
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
@@ -37,6 +38,7 @@ func (s *responsesLocalInterrupt) begin() {
 	}
 	s.mu.Lock()
 	s.active = true
+	s.responseID = ""
 	s.mu.Unlock()
 }
 
@@ -46,6 +48,7 @@ func (s *responsesLocalInterrupt) end() {
 	}
 	s.mu.Lock()
 	s.active = false
+	s.responseID = ""
 	select {
 	case <-s.frames:
 	default:
@@ -59,7 +62,7 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.active {
+	if !s.active || s.responseID == "" || strings.TrimSpace(gjson.GetBytes(payload, "response_id").String()) != s.responseID {
 		return false
 	}
 	select {
@@ -67,6 +70,31 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	default:
 	}
 	return true
+}
+
+// Observe identity and terminal state before exposing the event downstream.
+// The reader can receive a control frame as soon as the client sees an event.
+func (s *responsesLocalInterrupt) observeResponse(payload []byte) {
+	if s == nil {
+		return
+	}
+	eventType := gjson.GetBytes(payload, "type").String()
+	id := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if eventType == "response.created" {
+		s.active = true
+		s.responseID = id
+		return
+	}
+	if (isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "response.denied" || eventType == "error") && (id == "" || id == s.responseID) {
+		s.active = false
+		s.responseID = ""
+		select {
+		case <-s.frames:
+		default:
+		}
+	}
 }
 
 func (s *responsesLocalInterrupt) framesChan() <-chan []byte {

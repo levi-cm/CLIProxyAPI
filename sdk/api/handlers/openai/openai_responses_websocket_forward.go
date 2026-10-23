@@ -164,6 +164,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if eventType == "response.subscription_usage" {
 					continue
 				}
+				opts.localInterrupt.observeResponse(payloads[i])
 				if eventType == "response.created" {
 					responseStarted = true
 					completed = false
