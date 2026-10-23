@@ -1,9 +1,12 @@
 # Keeping the account-policy fork mergeable
 
 The implementation base is `8ef43e4df3b216a42493105d31c2873b69191473`.
-The reviewed upstream integration is `a4acc9f7` (2026-10-05), including all twelve
-subsequent `main` commits. Experimental `dev` is not an update source.
-The feature is optional and ships disabled with automatic redemption off.
+The integration candidate targets pinned upstream `8289ec4c71ad914d0612c2776352b76ba3d355a6`
+(v8.0.41). Its validation and production status are recorded in
+[the execution record](upstream-v8.0.41-execution.md). Experimental `dev` is not an update source.
+Production automatic redemption is permanently required. Preserve `automation_required`,
+the mandatory 600-second expiry guard, supported reset credit type and identity checks.
+Use fixture-only state for tests; never suspend the authoritative writer for validation.
 Upstream `Selector`, executor, credential, HTTP, and usage plugin interfaces are
 preserved; extension capabilities are additive optional interfaces or callbacks.
 Custom policy code does not change executor payload-building or translators;
@@ -73,14 +76,15 @@ Dashboard collection is a separate optional gate: `ObservationsEnabled` maps to
 `account-policy.observations-enabled` in YAML and `observations_enabled` in v8
 settings. It permits discovery and the private SDK usage sink, not selector
 installation, redemption, schedule execution or cooldown recovery. Keep these
-authority checks separate when merging upstream changes. Both gates default off;
-the observations flag is taken from config on restart (including false), avoiding
+authority checks separate when merging upstream changes. Defaults for fresh fixture installations do not authorize disabling production
+automation. The observations flag is taken from config on restart (including false), avoiding
 legacy journals silently losing a new explicit opt-in. No Redis queue aggregation
 or executor telemetry hook is required.
 
 1. Choose an upstream release/tag or reviewed commit explicitly. Back up the
    deployed binary and private state directory without committing credentials.
-   Pause automatic writes for deployment; preserve pending operation UUIDs.
+   Keep mandatory automatic redemption enabled; preserve pending operation UUIDs.
+   Do not alter the serving writer while preparing or testing the update.
 2. Keep the existing working checkout and its uncommitted edits untouched. Create
    a new update worktree from the reviewed fork tip. Replace `UPSTREAM_VERSION`
    and `UPSTREAM_TAG` below with the selected release identifiers.
@@ -137,15 +141,18 @@ go run ./cmd/account-policy-preview -listen 127.0.0.1:18318
 
 6. Review and commit the merge in the update worktree. Integrate it into the fork
    via the normal reviewed PR/merge process; this procedure does not push or
-   overwrite a dirty checkout. Stage deployment with observation and automation
-   off, then enable routing and explicitly reviewed automatic redemption. Record
-   the new upstream base and any changed hook in this document.
+   overwrite a dirty checkout. Use isolated fixtures for staging, with no production
+   credentials or policy mounts. Production deployment requires a separately verified
+   handoff, draining, writer exclusion, compatible rollback and the authorized outage
+   budget. Keep mandatory automatic redemption enabled throughout. Record the new
+   upstream base and any changed hook in this document.
 
    For the existing-checkout variant, review the combined merge and publish only
-   its explicit source/test/documentation paths. Rebuild the backend (which embeds
-   the Web UI), deploy with the existing private mounts and operator permissions,
-   and recheck authenticated LAN/Tailscale access. Seed a genuine encrypted Codex
-   conversation, restart the container, then verify resume and fork ownership via
+   its explicit source/test/documentation paths. Build from a clean source context
+   that excludes private configuration, credentials and runtime data. Do not routinely
+   restart or replace the serving container. First rehearse the complete handoff and
+   rollback using temporary state, then seed a genuine encrypted Codex conversation
+   before any authorized cutover and verify resume and fork ownership afterwards via
    SOCKS. An unbound encrypted conversation must still fail with 409. The live
    smoke helper in `client-usage/verify-owner-continuation.mjs` uses a restricted
    loopback SOCKS relay; this does not verify a different device's tunnel. Retain
@@ -160,9 +167,11 @@ upstream ownership fail closed and must be reviewed/recreated explicitly.
 
 ## Rollback
 
-Set `account-policy.enabled: false` and `automation: off` in YAML, reload/restart,
-and restore the previous reviewed binary if necessary. YAML disabled/off remains
-the restart authorization ceiling over saved operator settings. Keep account
-credentials, the journal, schedules and pending UUIDs. Do not delete state to
-make an update pass: uncertain writes must reconcile before any new redemption.
-Validate the original routing behavior with the disabled regression tests.
+Retain the serving process unless a rehearsed handoff and rollback meet the
+authorized availability budget. Keep mandatory automatic redemption enabled,
+`automation_required` intact and one authoritative writer. Restore only a binary
+and configuration proven compatible with candidate-written state, using current
+credentials, bindings, journals, history, schedules and pending UUIDs. Never restore
+stale journals over newer activity or delete state to make an update pass: uncertain
+writes must reconcile before any new redemption. Disabled-policy regression tests
+use isolated fixture state only and never authorize disabling production automation.

@@ -587,7 +587,7 @@ func Allowlisted(r usage.Record) Request {
 	if r.Failed {
 		outcome = "failed"
 	}
-	item := Request{SchemaVersion: 1, RequestID: id.String(), ParentExecutionID: r.ParentExecutionID, TraceID: r.TraceID, Provider: r.Provider, CredentialID: r.AuthID, RequestedModel: r.Alias, ExecutionModel: r.Model, ResponseModel: r.ResponseModel, RequestedAt: r.RequestedAt.UTC(), DurationMS: float64(r.Latency) / float64(time.Millisecond), Stream: r.Stream, Outcome: outcome, StatusCode: r.Fail.StatusCode, Generate: usage.GenerateEnabled(r.Generate), AuthCategory: r.AuthType, RequestedServiceTier: r.ServiceTier, ResponseServiceTier: r.ResponseServiceTier, Tokens: d.TokenBreakdown, Measurements: d.Measurements}
+	item := Request{SchemaVersion: 1, RequestID: id.String(), ParentExecutionID: r.ParentExecutionID, TraceID: r.TraceID, Provider: r.Provider, CredentialID: r.AuthID, RequestedModel: r.Alias, ExecutionModel: r.Model, ResponseModel: r.ResponseModel, RequestedAt: r.RequestedAt.UTC(), DurationMS: float64(r.Latency) / float64(time.Millisecond), Stream: r.Stream, Outcome: outcome, StatusCode: r.Fail.StatusCode, Generate: usage.GenerateEnabled(r.Generate), AuthCategory: r.AuthType, RequestedServiceTier: r.ServiceTier, EffectiveServiceTier: r.EffectiveServiceTier, ResponseServiceTier: r.ResponseServiceTier, Tokens: d.TokenBreakdown, Measurements: d.Measurements}
 	item.MeasurementQuality = "unknown"
 	if d.Measurements.Input || d.Measurements.Output || d.Measurements.Total {
 		item.MeasurementQuality = "incomplete"

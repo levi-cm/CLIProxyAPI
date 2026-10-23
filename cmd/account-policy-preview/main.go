@@ -321,15 +321,32 @@ func validateListen(addr string) error {
 	return nil
 }
 
+func fixtureAtArgument(value string) (*fixture, error) {
+	if value == "" {
+		return newFixture(), nil
+	}
+	at, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fixture time: %w", err)
+	}
+	return newFixtureAt(at), nil
+}
+
 func main() {
 	addr := flag.String("listen", "127.0.0.1:8318", "explicit loopback or Tailscale fixture listener")
+	fixedTime := flag.String("now", "", "fixed RFC3339 fixture time; empty uses the current time")
 	flag.Parse()
 	if err := validateListen(*addr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Printf("SANITIZED FIXTURE ONLY — no provider credentials or live redemption.\nPreview: http://%s/account-policy.html\nManagement key: fixture-key\n", *addr)
-	server := &http.Server{Addr: *addr, Handler: newFixture().handler()}
+	fixture, errFixture := fixtureAtArgument(*fixedTime)
+	if errFixture != nil {
+		fmt.Fprintln(os.Stderr, errFixture)
+		os.Exit(1)
+	}
+	server := &http.Server{Addr: *addr, Handler: fixture.handler()}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
