@@ -33,7 +33,8 @@ account-policy:
   accounts: {}
 
 # Policy settings changed through management persist in the operation journal.
-# Restarting with enabled: false or automation: off always disables automatic writes.
+# Selecting either automatic mode permanently requires automatic reset redemption.
+# Startup configuration cannot disable a requirement retained in the policy journal.
 # observations-enabled is config-authoritative on restart, including false.
 # An active Home controller or scheduler plugin cannot share account ownership.
 

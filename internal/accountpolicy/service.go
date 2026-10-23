@@ -453,7 +453,11 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 	if errRead != nil {
 		tracking.Identity = id
 		tracking.Requested = requested
-		old.Identity = id
+		// Retained quota belongs to its last successfully observed owner. A failed
+		// discovery after reassignment must not relabel that account's evidence.
+		if old.Identity.CredentialID == "" {
+			old.Identity = id
+		}
 		old.LastError = "provider discovery failed"
 		old.WritesDisabled = old.WritesDisabled || next.WritesDisabled
 		tracking.Failures++

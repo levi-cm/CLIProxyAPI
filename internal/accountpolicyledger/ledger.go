@@ -35,6 +35,7 @@ type segmentIndex struct {
 // Archive serializes appenders independently of the router and policy locks.
 // Queries retain at most one segment index and a bounded page of raw records.
 type Archive struct {
+	lookupReady     bool
 	active          map[string]string
 	legacyDir       string
 	importComplete  bool
@@ -159,14 +160,25 @@ func (a *Archive) initialize() error {
 		if len(names) > 0 {
 			a.active[kind] = names[len(names)-1]
 		}
+		var expected lookupSignature
 		for _, name := range names {
 			idx, e := a.index(name)
 			if e != nil {
 				return e
 			}
 			a.noteIndex(name, idx)
+			for id := range idx.IDs {
+				expected.add(lookupDigest(id), name)
+			}
+		}
+		actual, lookupErr := a.lookupSignature(kind, "")
+		if lookupErr != nil || actual != expected {
+			if err := a.restoreLookup(kind, names); err != nil {
+				return err
+			}
 		}
 	}
+	a.lookupReady = true
 	a.status.Closed = false
 	a.status.ProcessStartedAt = time.Now().UTC()
 	a.noteCollectionEnabled(a.enabled != nil && a.enabled())
@@ -292,7 +304,7 @@ func (a *Archive) index(name string) (segmentIndex, error) {
 		var idx segmentIndex
 		e = json.NewDecoder(io.LimitReader(f, 64*1024*1024)).Decode(&idx)
 		_ = f.Close()
-		if e == nil && idx.Version == 3 && idx.Size == info.Size() {
+		if e == nil && idx.Version == 3 && idx.Size == info.Size() && idx.IDs != nil && idx.Daily != nil && idx.Offsets != nil {
 			for _, bad := range a.status.UnhealthySegments {
 				if bad == name {
 					idx.Healthy = false
@@ -351,8 +363,10 @@ func (a *Archive) rebuild(name string, size int64) (segmentIndex, error) {
 			}
 			idx.Records++
 			idx.IDs[id] = true
-			if e := a.markID(strings.SplitN(name, "-", 2)[0], id, name); e != nil {
-				return idx, e
+			if a.lookupReady {
+				if e := a.markID(strings.SplitN(name, "-", 2)[0], id, name); e != nil {
+					return idx, e
+				}
 			}
 			if idx.From.IsZero() || at.Before(idx.From) {
 				idx.From = at

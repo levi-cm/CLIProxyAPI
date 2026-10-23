@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 )
 
 const lookupBucketEntries = 256
@@ -70,6 +71,12 @@ func (a *Archive) lookupBucket(base string) (map[string]string, error) {
 	err = errors.Join(err, f.Close())
 	if err != nil || bucket == nil || len(bucket) > lookupBucketEntries {
 		return nil, errors.New("invalid lookup bucket")
+	}
+	for digest, segment := range bucket {
+		decoded, err := hex.DecodeString(digest)
+		if err != nil || len(decoded) != sha256.Size || path.Base(segment) != segment || !strings.HasSuffix(segment, ".jsonl") {
+			return nil, errors.New("invalid lookup entry")
+		}
 	}
 	return bucket, nil
 }
