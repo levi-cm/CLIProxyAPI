@@ -57,7 +57,7 @@ func TestObservationOnlyHonorsDiscoveryBackoff(t *testing.T) {
 	}
 }
 
-// Disabling routing must block every write path even with exhausted quota and expiring credits.
+// An observation-only installation that has never enabled automation cannot write.
 func TestObservationOnlyNeverConsumesOrRecovers(t *testing.T) {
 	now := testTime()
 	snapshot := testSnapshot("b", 7)
@@ -67,7 +67,6 @@ func TestObservationOnlyNeverConsumesOrRecovers(t *testing.T) {
 	snapshot.Buckets[1].UsedPercent = 100
 	provider := &fakeProvider{snapshots: map[string]Snapshot{"b": snapshot}}
 	settings := observationSettings(t)
-	settings.Automation = "auto_expiring"
 	recoveries := 0
 	service, err := NewService(Options{Settings: settings, Provider: provider, Now: func() time.Time { return now }, Accounts: func() []Identity { return []Identity{snapshot.Identity} }, HasDemand: func(string) bool { return true }, IsIdle: func(string) bool { return true }, Recover: func(context.Context, Snapshot, Snapshot) error { recoveries++; return nil }})
 	if err != nil {

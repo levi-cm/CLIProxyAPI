@@ -288,7 +288,7 @@ func normalizedPolicySettings(settings accountpolicy.Settings) accountpolicy.Set
 			settings.SavedCreditReserve = defaults.SavedCreditReserve
 		}
 	}
-	return settings
+	return accountpolicy.EnforceAutomationRequirement(settings)
 }
 
 func policyAuthUnavailable(auth *coreauth.Auth) bool {

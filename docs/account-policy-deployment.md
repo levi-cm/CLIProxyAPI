@@ -151,6 +151,10 @@ enable deadline routing, inspect dry-run advice with `notify`, and explicitly
 choose `auto_expiring` only after review. Run one writer instance; a second proxy
 must use read-only reset policy unless shared ownership has been implemented.
 Keep saved policy state and operation journals on the protected local disk.
+Once either automatic mode has been selected, automatic redemption becomes
+permanently required. The policy journal retains this requirement across startup
+configuration changes. The API rejects disabling attempts; keep automation
+running throughout maintenance and rollback.
 
 ## Isolated direct and proxy Codex access
 
@@ -391,16 +395,18 @@ from source validation or from the local host's self-connection alone.
 
 ## Rollback and evidence
 
-First set automation to `off`, leave discovery running, and inspect unresolved
-operations. Disable the optional policy to restore the configured existing
-selector. Stop new companion dispatch; keep the inbox and task worktrees. Preserve
+Keep automatic redemption and discovery enabled and inspect unresolved
+operations. Do not turn automation off, disable the policy, or remove its durable
+requirement to perform rollback. Stop new companion dispatch; keep the inbox and task worktrees. Preserve
 the auth directory, policy snapshots and pending-operation journal before replacing
 a binary. Never delete an `outcome_unknown` operation to force a fresh request ID.
 Retain the compatible candidate state until pending operations are reconciled.
 
-Restore the previous binary/config only after checking state compatibility and
-stopping the service cleanly; restart and check account identity, pending operations,
-cooldowns, listener addresses, tailnet access and HTTP/SSE/WebSocket behavior.
+Restore a compatible binary/config only through a verified zero-downtime handoff
+with connection draining, preserved ownership, one authoritative journal writer,
+and automation still enabled. If that handoff is unavailable, retain the serving
+process. Check account identity, pending operations, cooldowns, listener addresses,
+tailnet access and HTTP/SSE/WebSocket behavior.
 Revert source commits with `git revert` in a reviewed branch. Preserve the existing
 management panel and keep client direct profiles available. Archive the completed
 task rather than deleting its recovery evidence.

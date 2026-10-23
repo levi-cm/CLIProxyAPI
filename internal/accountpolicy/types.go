@@ -7,6 +7,7 @@ import (
 )
 
 type Settings struct {
+	AutomationRequired  bool                      `json:"automation_required" yaml:"automation-required"`
 	UsageHistoryEnabled bool                      `json:"usage_history_enabled" yaml:"usage-history-enabled"`
 	Enabled             bool                      `json:"enabled" yaml:"enabled"`
 	ObservationsEnabled bool                      `json:"observations_enabled" yaml:"observations-enabled"`

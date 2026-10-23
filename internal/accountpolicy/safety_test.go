@@ -196,7 +196,7 @@ func TestJournalBeforeWriteAndSanitizedFailures(t *testing.T) {
 	}
 }
 
-func TestDisabledTicksAndConfigRollbackDoNotWrite(t *testing.T) {
+func TestDisabledTicksUntilAutomaticRedemptionPermanentlyEnabled(t *testing.T) {
 	now := testTime()
 	b := testSnapshot("b", 7)
 	p := &fakeProvider{snapshots: map[string]Snapshot{"b": b}}
@@ -222,8 +222,8 @@ func TestDisabledTicksAndConfigRollbackDoNotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.Settings().Enabled || restarted.Settings().Automation != "off" {
-		t.Fatal("config rollback did not override persisted authority")
+	if !restarted.Settings().Enabled || restarted.Settings().Automation != "auto_expiring" || !restarted.Settings().AutomationRequired {
+		t.Fatal("stale startup configuration disabled permanent automation")
 	}
 }
 

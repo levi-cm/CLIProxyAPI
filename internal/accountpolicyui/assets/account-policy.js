@@ -219,6 +219,8 @@
       $(id + "-help").textContent =
         dashboard.help[id][$(id).value] ||
         "Select an option to see its behavior.";
+    if (state.settings.automation_required)
+      $("automation-help").textContent += " Permanently enabled; automatic reset redemption cannot be disabled.";
   }
   function filteredAccounts() {
     return dashboard.pageAccounts(state.accounts, {
@@ -691,8 +693,25 @@
     return true;
   }
   function settingsForm() {
-    if (settingsDirty) return;
     const s = state.settings;
+    const locked = !!s.automation_required;
+    $("automation-lock-notice").hidden = !locked;
+    $("enabled").disabled = locked;
+    $("read-only").disabled = locked;
+    $("guard").min = locked ? "600" : "0";
+    for (const option of $("automation").options)
+      option.disabled = locked && ["off", "notify"].includes(option.value);
+    if (locked) {
+      $("enabled").checked = true;
+      $("read-only").checked = !!s.read_only;
+      if (!["auto_expiring", "auto_all_saved"].includes($("automation").value))
+        $("automation").value = s.automation;
+      if (Number($("guard").value) < 600) $("guard").value = "600";
+      $("policy-status").textContent = "Enabled · " + s.automation + " · locked";
+      $("policy-status").className = "badge good";
+      updateSettingHelp();
+    }
+    if (settingsDirty) return;
     $("enabled").checked = !!s.enabled;
     $("observations-enabled").checked = !!s.observations_enabled;
     $("usage-history-enabled").checked = !!s.usage_history_enabled;
@@ -1465,6 +1484,12 @@
         usage_history_enabled: $("usage-history-enabled").checked,
         read_only: $("read-only").checked,
       };
+      if (state.settings.automation_required &&
+        (!patch.enabled || !["auto_expiring", "auto_all_saved"].includes(patch.automation) ||
+          patch.read_only !== !!state.settings.read_only || patch.expiry_guard_seconds < 600)) {
+        notice("Automatic reset redemption is permanently enabled and cannot be disabled.", true);
+        return;
+      }
       if (
         ["auto_expiring", "auto_all_saved"].includes(patch.automation) &&
         (!state.settings.enabled ||
@@ -1476,7 +1501,7 @@
             "Enable automatic provider redemption?",
             "Mode: " +
               patch.automation +
-              "\nEligible saved credits may be redeemed on their owning accounts. Purchased resets are excluded. Known provider expiry remains unchanged.",
+              "\nAutomatic reset redemption becomes permanently enabled and cannot be disabled. Eligible saved credits may be redeemed on their owning accounts. Purchased resets are excluded. Known provider expiry remains unchanged.",
             "Save automation",
           ))
         )

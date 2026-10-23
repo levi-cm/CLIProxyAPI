@@ -70,6 +70,8 @@ func policyError(c *gin.Context, err error) {
 	if errors.As(err, &e) {
 		status, message := http.StatusConflict, "Account policy operation cannot proceed."
 		switch e.Code {
+		case "automation_required":
+			message = "Automatic reset redemption is permanently enabled and cannot be disabled."
 		case "invalid_settings", "invalid_schedule":
 			status, message = http.StatusBadRequest, "Invalid account policy settings or schedule."
 		case "unknown_account", "unknown_credit", "unknown_schedule":

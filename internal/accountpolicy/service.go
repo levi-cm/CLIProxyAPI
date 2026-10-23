@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 )
 
 type storedState struct {
@@ -40,19 +41,20 @@ type discoveryState struct {
 	Requested uint64
 }
 type Service struct {
-	settingsUpdateMu          sync.Mutex
-	historyCollectionObserver func(bool)
-	mu                        sync.RWMutex
-	state                     storedState
-	opts                      Options
-	locks                     map[string]chan struct{}
-	discovery                 map[string]discoveryState
-	semaphore                 chan struct{}
-	stateDir                  string
-	replica                   bool
-	refreshMu                 sync.Mutex
-	requested                 map[string]uint64
-	wake                      chan struct{}
+	automationRequirementPersisted bool
+	settingsUpdateMu               sync.Mutex
+	historyCollectionObserver      func(bool)
+	mu                             sync.RWMutex
+	state                          storedState
+	opts                           Options
+	locks                          map[string]chan struct{}
+	discovery                      map[string]discoveryState
+	semaphore                      chan struct{}
+	stateDir                       string
+	replica                        bool
+	refreshMu                      sync.Mutex
+	requested                      map[string]uint64
+	wake                           chan struct{}
 }
 
 func clone[T any](v T) T {
@@ -63,6 +65,7 @@ func clone[T any](v T) T {
 }
 
 func NewService(opts Options) (*Service, error) {
+	opts.Settings = EnforceAutomationRequirement(opts.Settings)
 	if err := ValidateSettings(opts.Settings); err != nil {
 		return nil, err
 	}
@@ -101,6 +104,7 @@ func NewService(opts Options) (*Service, error) {
 			if json.Unmarshal(data, &s.state) != nil || s.state.Version != 1 || ValidateSettings(s.state.Settings) != nil || !validStoredRoutingOverride(s.state) {
 				return nil, policyError("persistence", "invalid policy journal")
 			}
+			s.automationRequirementPersisted = s.state.Settings.AutomationRequired
 			if s.state.Snapshots == nil {
 				s.state.Snapshots = map[string]Snapshot{}
 			}
@@ -113,11 +117,18 @@ func NewService(opts Options) (*Service, error) {
 			if opts.Settings.ReadOnly {
 				s.state.Settings.ReadOnly = true
 			}
-			if !opts.Settings.Enabled {
+			if s.state.Settings.AutomationRequired || automaticRedemption(s.state.Settings.Automation) || opts.Settings.AutomationRequired {
+				s.state.Settings.AutomationRequired = true
+				if !automaticRedemption(s.state.Settings.Automation) && automaticRedemption(opts.Settings.Automation) {
+					s.state.Settings.Automation = opts.Settings.Automation
+				}
+				s.state.Settings = EnforceAutomationRequirement(s.state.Settings)
+				s.state.Settings.ReadOnly = opts.Settings.ReadOnly
+			} else if !opts.Settings.Enabled {
 				s.state.Settings.Enabled = false
 				s.state.Settings.Automation = "off"
 			}
-			if opts.Settings.Automation == "off" || opts.Settings.Automation == "notify" {
+			if !s.state.Settings.AutomationRequired && (opts.Settings.Automation == "off" || opts.Settings.Automation == "notify") {
 				s.state.Settings.Automation = opts.Settings.Automation
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -247,6 +258,7 @@ func (s *Service) persistLocked(before storedState) error {
 	if err != nil {
 		return policyError("persistence", "cannot synchronize policy journal")
 	}
+	s.automationRequirementPersisted = s.state.Settings.AutomationRequired
 	return nil
 }
 func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
@@ -262,6 +274,10 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 		}
 	}()
 	next, err := update(clone(s.state.Settings))
+	if err != nil {
+		return err
+	}
+	next, err = s.checkAutomationRequirementLocked(next)
 	if err != nil {
 		return err
 	}
@@ -676,6 +692,17 @@ func (s *Service) Run(ctx context.Context) {
 	busy := map[string]bool{}
 	defer workers.Wait()
 	dispatch := func() {
+		// Startup must durably latch automatic redemption even before any account
+		// exists. Only the owner of the scheduler journal may perform this write.
+		if releaseOwner != nil {
+			s.mu.Lock()
+			if s.state.Settings.AutomationRequired && !s.automationRequirementPersisted {
+				if err := s.persistLocked(clone(s.state)); err != nil {
+					log.WithField("code", "automation_lock_persistence").Error("cannot persist permanent automatic reset requirement; retrying")
+				}
+			}
+			s.mu.Unlock()
+		}
 		_ = s.MaintainOverride()
 		settings := s.Settings()
 		if !settings.Enabled && !settings.ObservationsEnabled {

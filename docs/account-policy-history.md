@@ -13,6 +13,36 @@ account-policy:
 
 This is independent of `enabled`, `observations-enabled`, usage statistics, and reset automation. It records provider attempts even when smart routing and provider observation collection are disabled. Enabling history alone does not poll providers or redeem credits. Existing accepted provider observations are archived when history is enabled. The dashboard includes an independent switch. Startup configuration determines initial collection; management changes persist in the policy journal.
 
+## Permanent automatic reset protection
+
+Selecting `auto_expiring` or `auto_all_saved` permanently requires automatic
+redemption. The server exposes `settings.automation_required: true` and retains
+it in the policy journal. Already automatic journals are migrated on startup.
+The scheduler owner commits the requirement before dispatch, including when no
+accounts exist; construction and competing replicas do not write it.
+
+Settings mutations that switch to `off`/`notify`, disable the policy, clear the
+requirement, make the authoritative writer read-only, remove the supported reset
+credit type, or reduce the expiry guard below 600 seconds return HTTP 409 with
+`error.code: "automation_required"`. Rejected changes leave live and durable state
+unchanged. Other routing preferences and automatic-mode changes remain available.
+The standalone UI disables those controls and applies the lock even to stale form
+drafts. Enabling an automatic mode explains the permanent commitment.
+
+Stale startup configuration cannot turn an established requirement off. Invalid
+reloads leave the active policy unchanged; startup restores automatic redemption,
+the supported credit type and a minimum ten-minute expiry guard from saved state.
+Explicit replica configuration and scheduler ownership remain read-only safety
+boundaries. Account holds, provider authentication, verified reset eligibility,
+pending outcomes and active-request coordination continue to protect redemption.
+The requirement preserves operation of the scheduler; it cannot guarantee a
+provider accepts a reset while upstream access or storage is unavailable.
+
+This enforcement is part of the candidate binary and is **not active in the
+existing production binary**. Production is currently configured for
+`auto_expiring`; activating the new guard requires the verified zero-downtime
+handoff below. Never use an off toggle as an upgrade or rollback step.
+
 ## Authentication and scope
 
 External applications use the same inference API key as `/v1/account-policy/usage`:
