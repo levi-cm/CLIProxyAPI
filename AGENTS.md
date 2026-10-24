@@ -8,12 +8,13 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
-go build -o cli-proxy-api ./cmd/server # Build
-go run ./cmd/server # Run dev server
-go test ./... # Run all tests
-go test -v -run TestName ./path/to/pkg # Run single test
-go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+./scripts/go-limited.sh build -o cli-proxy-api ./cmd/server # Build
+./cli-proxy-api # Run the built dev server
+./scripts/go-limited.sh test ./... # Run all tests
+./scripts/go-limited.sh test -v -run TestName ./path/to/pkg # Run single test
+./scripts/go-limited.sh build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
 ```
+- Compilation must use `scripts/go-limited.sh`: half the available CPUs (rounded down, minimum one), `GOMAXPROCS` set to that budget, and one Go package compiled at a time. Linux compiler/linker/CGO processes also share that CPU affinity limit. This does not change production runtime CPU settings. Set `GO_BINARY` only when Go is not on `PATH`.
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
 ## Config

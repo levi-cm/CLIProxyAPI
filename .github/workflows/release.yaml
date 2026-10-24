@@ -173,7 +173,7 @@ jobs:
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
-          CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+          CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" ./scripts/go-limited.sh build \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/$binary_name" ./cmd/server/
 
@@ -302,7 +302,7 @@ jobs:
               tar -C /usr/local -xzf "/tmp/${go_archive}"
               export PATH="/usr/local/go/bin:${PATH}"
 
-              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false \
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" ./scripts/go-limited.sh build -buildvcs=false \
                 -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
                 -o "'"$archive_dir"'/cli-proxy-api" ./cmd/server/
 
@@ -426,7 +426,7 @@ jobs:
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
+          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" ./scripts/go-limited.sh build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/cli-proxy-api" ./cmd/server/
 
@@ -614,7 +614,7 @@ jobs:
           GOARCH="$TARGET_GOARCH" \
           CGO_LDFLAGS="-fuse-ld=lld" \
           CC="clang --target=${clang_target} --sysroot=${sysroot_dir}" \
-          go build -buildvcs=false \
+          ./scripts/go-limited.sh build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Build FreeBSD no-plugin binary
@@ -623,7 +623,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${TARGET}/bin"
-          CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" go build -buildvcs=false \
+          CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" ./scripts/go-limited.sh build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Package FreeBSD archive
