@@ -89,8 +89,8 @@ func TestDeadlineSelectorUnknownFallbackPreservesExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != "a" {
-		t.Fatalf("fallback got %q, want static A", got.ID)
+	if got.ID != "b" {
+		t.Fatalf("stale account erased earlier known deadline: %q", got.ID)
 	}
 	p.settings.Accounts["a"] = accountpolicy.AccountControl{Hold: true}
 	got, err = s.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths)
@@ -210,9 +210,12 @@ func TestDeadlineSelectorAppliesModelSpecificQuotaAfterAliasResolution(t *testin
 func TestDeadlineFallbackSettingsChangeTakesEffect(t *testing.T) {
 	s, p, auths, now := deadlineFixture(t)
 	p.settings.Fallback = "fill-first"
-	a := p.snapshots["a"]
-	a.ObservedAt = now.Add(-time.Hour)
-	p.snapshots["a"] = a
+	for _, id := range []string{"a", "b"} {
+		snapshot := p.snapshots[id]
+		snapshot.ObservedAt = now.Add(-time.Hour)
+		snapshot.Buckets = nil // Fallback applies only without any renewal evidence.
+		p.snapshots[id] = snapshot
+	}
 	for _, candidate := range auths {
 		candidate.Attributes = nil
 	}

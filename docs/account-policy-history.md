@@ -85,11 +85,13 @@ Durations are integers 1–24. Replacing starts a new duration. Mutations return
 
 The preference applies to eligible new work for that provider across all callers, ahead of deadline and allowance-reserve preferences. Holds, authentication, model support and actual quota/cooldown restrictions still apply. Unsupported models use ordinary eligible routing. Active streams are not interrupted. Existing account-bound and encrypted conversations keep their owner; replayable conversations use the existing proven idle-boundary rules. The override never redeems credits. Absolute expiry is checked during selection, and maintenance persists terminal expiry, removal, reassignment, policy disablement and exhaustion. A verified ordinary short or weekly window signal may terminate immediately; uncertain throttling only requests discovery. Terminated overrides never reactivate on refill.
 
-### Percentage split
+### Legacy split compatibility
 
-The same endpoint supports two-account percentage routing. Omitting `mode` retains
-the single-account contract. Set `mode` to `split` and supply exactly two distinct
-Codex accounts with integer percentages from 1 to 99 summing to 100:
+The endpoint still accepts the legacy two-account split format. Omitting `mode`
+retains the single-account contract. Legacy `mode: "split"` requires exactly two
+distinct Codex accounts with integer percentage fields from 1 to 99 summing to
+100. These fields validate the old wire format; execution uses concurrent
+pressure and ignores their allocation values:
 
 ```json
 {
@@ -103,33 +105,37 @@ Codex accounts with integer percentages from 1 to 99 summing to 100:
 }
 ```
 
-For 37/63 or 1/99, change both percentages accordingly; 99/1 is the opposite
-extreme. Do not include `credential_id` at the top level of a split request.
+Do not include `credential_id` at the top level of a split request.
 The response includes `mode: "split"` and the same `accounts` array, alongside
-the shared revision, expiry and terminal state. The account capabilities report
-`percentage_split`, `split_min_percent` and `split_max_percent`. Authentication
-and cancellation remain unchanged under both API prefixes.
+the shared revision, expiry and terminal state. Accepted legacy percentage
+bounds remain exposed for compatible clients. Authentication and cancellation
+remain unchanged under both API prefixes.
 
-Smooth weighted round robin distributes eligible routing decisions across models
-and callers. Ratios count selections, including retries, rather than tokens,
-quota consumption or every downstream conversation turn. With both accounts
-eligible, each complete 100-decision cycle follows the configured percentages.
-Strict, parent-bound, active and account-local/encrypted continuations keep their
-owner; safe idle self-contained requests may participate. Other configured
-accounts remain ordinary fallbacks when neither split participant supports a
-request. Temporarily unavailable participants do not accumulate catch-up credit.
-The accumulator resets on override replacement or process restart; the durable
-configuration and absolute expiry survive restart.
+The legacy percentage fields remain accepted and persisted for wire/state
+compatibility, but no longer set allocation targets. Manual spreading compares
+actual active/reserved attempts across the selected accounts, preferring the
+exact earlier deadline unless it has at least two more active attempts. All
+bound conversations retain their owner. There is no cumulative request target
+or catch-up debt. The account capabilities report `percentage_split: false`,
+`legacy_split_membership: true` and `pressure_spreading: true`.
 
 Verified ordinary quota exhaustion, permanent removal or identity reassignment
 of either participant ends the entire split and restores smart routing. A
 temporary authentication refresh alone does not end it. Cancelling and expiry
 also restore smart routing without interrupting in-flight requests.
 
-The standalone controls expose Single account / Percentage split, two account
-selectors and a first-account percentage input defaulting to 50. The complementary
-percentage is calculated automatically. Selecting a percentage does not change
-provider quota or configured credential weights.
+The standalone controls expose Single account / Spread concurrent work, two
+account selectors and a one-hour default duration (1–24 hours supported).
+`mode: "pressure"` accepts two credential IDs without percentages. Both forms
+share existing expiry, cancellation and ownership safeguards. Concurrent
+attempt counts do not measure allowance consumption, and manual spreading can
+leave earlier allowance unused.
+
+Automatic spreading separately requires distant close renewals, fresh evidence,
+sustained measured allowance burn, a conservative consumption forecast and live
+pressure. It never moves bound conversations or sets percentage targets. See
+[the candidate safeguards](renewal-priority-routing.md) for the exact formula,
+time boundaries, evidence reset rules and deferred production integration gate.
 
 ### History queries
 

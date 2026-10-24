@@ -195,8 +195,10 @@
     function renderOverride() {
       if (!override) return;
       const active = override.state === "active";
-      const selected = override.mode === "split"
-        ? (override.accounts || []).map((a) => `${accountName(a.credential_id)} ${a.percent}%`).join(" / ")
+      const selected = override.mode === "pressure"
+        ? (override.accounts || []).map((a) => accountName(a.credential_id)).join(" / ") + " · concurrent pressure"
+        : override.mode === "split"
+        ? (override.accounts || []).map((a) => accountName(a.credential_id)).join(" / ") + " · concurrent pressure (legacy override)"
         : accountName(override.credential_id);
       $("override-status").textContent = active
         ? `${selected} · expires ${options.instant(override.expires_at, options.zone())} · ${options.countdown(override.expires_at, Date.now())}`
@@ -227,18 +229,17 @@
           duration_hours: Number($("override-hours").value),
           expected_revision: revision,
         };
-        if ($("override-mode").value === "split") {
+        if ($("override-mode").value === "pressure") {
           const secondary = $("override-account-secondary").value;
-          const percent = Number($("override-percent").value);
-          if (!payload.credential_id || !secondary || secondary === payload.credential_id || !Number.isInteger(percent) || percent < 1 || percent > 99) {
-            options.notice("Select two different accounts and a whole first-account percentage from 1 to 99.", true);
+          if (!payload.credential_id || !secondary || secondary === payload.credential_id) {
+            options.notice("Select two different accounts for concurrent spreading.", true);
             return;
           }
           payload = {
-            mode: "split",
+            mode: "pressure",
             accounts: [
-              { credential_id: payload.credential_id, percent },
-              { credential_id: secondary, percent: 100 - percent },
+              { credential_id: payload.credential_id },
+              { credential_id: secondary },
             ],
             duration_hours: payload.duration_hours,
             expected_revision: revision,
@@ -556,15 +557,11 @@
     ).join("");
     $("override-apply").addEventListener("click", () => mutate(false));
     $("override-cancel").addEventListener("click", () => mutate(true));
-    function splitControls() {
-      $("override-split-fields").hidden = $("override-mode").value !== "split";
-      const percent = Number($("override-percent").value);
-      $("override-percent-other").textContent = Number.isInteger(percent) && percent >= 1 && percent <= 99 ? `${100 - percent}%` : "Unavailable";
+    function spreadingControls() {
+      $("override-split-fields").hidden = $("override-mode").value !== "pressure";
     }
-    if (!$("override-percent").value) $("override-percent").value = "50";
-    $("override-mode").addEventListener("change", splitControls);
-    $("override-percent").addEventListener("input", splitControls);
-    splitControls();
+    $("override-mode").addEventListener("change", spreadingControls);
+    spreadingControls();
     for (const id of ["allowance-account", "allowance-window"])
       $(id).addEventListener("change", allowances);
     for (const [id, step] of [

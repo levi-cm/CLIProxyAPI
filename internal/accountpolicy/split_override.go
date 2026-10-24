@@ -7,8 +7,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// RoutingShare assigns a whole percentage of safe routing decisions to an
-// account. Percentages describe requests, never token or allowance consumption.
+// RoutingShare identifies a manual spreading participant. Percent is retained
+// for the legacy split wire format; it no longer sets an allocation target.
 type RoutingShare struct {
 	CredentialID string `json:"credential_id"`
 	Percent      int    `json:"percent"`
@@ -20,10 +20,10 @@ func validSplit(shares []RoutingShare) bool {
 
 func validStoredRoutingOverride(state storedState) bool {
 	o := state.Override
-	if o.Mode != "split" {
+	if o.Mode != "split" && o.Mode != "pressure" {
 		return o.Mode == "" || o.Mode == "single"
 	}
-	if !validSplit(o.Accounts) || len(state.OverrideIdentities) != 2 || o.Provider != "codex" {
+	if !(o.Mode == "split" && validSplit(o.Accounts) || o.Mode == "pressure" && validPressure(o.Accounts)) || len(state.OverrideIdentities) != 2 || o.Provider != "codex" {
 		return false
 	}
 	for i, member := range state.OverrideIdentities {
@@ -36,7 +36,7 @@ func validStoredRoutingOverride(state storedState) bool {
 }
 
 func (s *Service) overrideMembersLocked() []Identity {
-	if s.state.Override.Mode == "split" {
+	if s.state.Override.Mode == "split" || s.state.Override.Mode == "pressure" {
 		if !validStoredRoutingOverride(s.state) {
 			return nil
 		}
@@ -94,7 +94,7 @@ func (s *Service) replaceRoutingOverride(mode string, shares []RoutingShare, hou
 	o := RoutingOverride{SchemaVersion: 1, Mode: mode, ID: uuid.NewString(), Revision: revision + 1, Provider: identities[0].Provider, StartedAt: now, ExpiresAt: now.Add(time.Duration(hours) * time.Hour), State: "active"}
 	s.state.OverrideIdentities = nil
 	s.state.OverrideIdentity = Identity{}
-	if mode == "split" {
+	if mode == "split" || mode == "pressure" {
 		o.Accounts = clone(shares)
 		s.state.OverrideIdentities = clone(identities)
 	} else {
@@ -109,8 +109,8 @@ func (s *Service) replaceRoutingOverride(mode string, shares []RoutingShare, hou
 	return clone(s.state.Override), nil
 }
 
-// RoutingSplit returns a validated immutable preference. Its credit accumulator
-// belongs to the selector, so reads never advance distribution or write state.
+// RoutingSplit returns the validated participants of a legacy manual override.
+// Reads do not reserve requests, change concurrent pressure, or write state.
 func (s *Service) RoutingSplit(provider string) (string, []RoutingShare) {
 	s.mu.RLock()
 	active := s.state.Override.State == "active" && s.state.Override.Mode == "split" && s.state.Override.Provider == provider
@@ -123,6 +123,38 @@ func (s *Service) RoutingSplit(provider string) (string, []RoutingShare) {
 	defer s.mu.RUnlock()
 	o := s.state.Override
 	if o.State != "active" || o.Mode != "split" || o.Provider != provider || s.overrideTerminationLocked(ids, temporary) != "" {
+		return "", nil
+	}
+	return o.ID, clone(o.Accounts)
+}
+
+// Pressure overrides share the existing identity, expiry and cancellation journal.
+// Percentages are intentionally rejected: concurrent attempts are not allowance.
+func validPressure(accounts []RoutingShare) bool {
+	return len(accounts) == 2 && strings.TrimSpace(accounts[0].CredentialID) != "" && strings.TrimSpace(accounts[1].CredentialID) != "" && accounts[0].CredentialID != accounts[1].CredentialID && accounts[0].Percent == 0 && accounts[1].Percent == 0
+}
+
+func (s *Service) ReplacePressureOverride(accounts []RoutingShare, hours int, revision uint64) (RoutingOverride, error) {
+	if !validPressure(accounts) {
+		return RoutingOverride{}, policyError("invalid_pressure", "exactly two distinct accounts without percentages are required")
+	}
+	return s.replaceRoutingOverride("pressure", accounts, hours, revision)
+}
+
+// RoutingPressure checks absolute expiry on every selection without maintenance
+// polling, provider I/O, or a second writer to the policy journal.
+func (s *Service) RoutingPressure(provider string) (string, []RoutingShare) {
+	s.mu.RLock()
+	active := s.state.Override.State == "active" && s.state.Override.Mode == "pressure" && s.state.Override.Provider == provider
+	s.mu.RUnlock()
+	if !active {
+		return "", nil
+	}
+	ids, temporary := s.overrideIdentities()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o := s.state.Override
+	if o.State != "active" || o.Mode != "pressure" || o.Provider != provider || s.overrideTerminationLocked(ids, temporary) != "" {
 		return "", nil
 	}
 	return o.ID, clone(o.Accounts)

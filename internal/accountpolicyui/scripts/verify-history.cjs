@@ -152,6 +152,7 @@ const { chromium } = require(
       );
       await page.locator('[data-view="routing"]').click();
       assert.equal(await page.locator("#override-hours option").count(), 24);
+      assert.equal(await page.locator("#override-hours").inputValue(), "1");
       await page.locator("#override-account").selectOption("account-b");
       await page.locator("#override-hours").selectOption("24");
       await page.locator("#override-apply").click();
@@ -173,31 +174,26 @@ const { chromium } = require(
           .querySelector("#override-status")
           .textContent.includes("cancelled"),
       );
-      await page.locator("#override-mode").selectOption("split");
+      await page.locator("#override-mode").selectOption("pressure");
       await page.locator("#override-account-secondary").selectOption("account-a");
-      for (const percent of [50, 1, 99]) {
-        await page.locator("#override-percent").fill(String(percent));
-        assert.equal(await page.locator("#override-percent-other").textContent(), `${100 - percent}%`);
-        await page.locator("#override-apply").click();
-        await page.waitForFunction((percent) => {
-          const text = document.querySelector("#override-status").textContent;
-          return text.includes(`Account B ${percent}%`) && text.includes(`Account A ${100 - percent}%`) && text.includes("expires");
-        }, percent);
-        await page.locator("#reload").click();
-        assert.equal(await page.locator("#override-percent").inputValue(), String(percent));
-        if (percent === 50) {
-          await page.screenshot({
-            path: `/tmp/cliproxy-percentage-${viewport.width}.png`,
-            fullPage: true,
-          });
-        }
-        const overflow = await page.evaluate(() => [...document.querySelectorAll("body *")]
-          .filter((element) => element.getBoundingClientRect().right > innerWidth + 2)
-          .map((element) => `${element.tagName}#${element.id}.${element.className}`));
-        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 2), false, overflow.join(", "));
-        await page.locator("#override-cancel").click();
-        await page.waitForFunction(() => document.querySelector("#override-status").textContent.includes("cancelled"));
-      }
+      await page.locator("#override-hours").selectOption("1");
+      await page.locator("#override-apply").click();
+      await page.waitForFunction(() => {
+        const text = document.querySelector("#override-status").textContent;
+        return text.includes("Account B / Account A") && text.includes("concurrent pressure") && text.includes("expires");
+      });
+      assert.equal(override.mode, "pressure");
+      assert.deepEqual(override.accounts, [{ credential_id: "account-b" }, { credential_id: "account-a" }]);
+      assert.equal(await page.locator("#override-percent").count(), 0);
+      await page.locator("#reload").click();
+      assert.equal(await page.locator("#override-mode").inputValue(), "pressure");
+      assert.equal(await page.locator("#override-account-secondary").inputValue(), "account-a");
+      assert.equal(await page.locator("#override-hours").inputValue(), "1");
+      assert.match(await page.locator("[aria-labelledby=override-title]").textContent(), /can leave earlier allowance unused/);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 2), false);
+      await page.screenshot({path: `/tmp/cliproxy-pressure-${viewport.width}.png`,fullPage:true});
+      await page.locator("#override-cancel").click();
+      await page.waitForFunction(() => document.querySelector("#override-status").textContent.includes("cancelled"));
       await page.locator('[data-view="history"]').click();
       await page
         .locator("#request-history")
@@ -224,9 +220,9 @@ const { chromium } = require(
       await page.close();
     }
     assert.deepEqual(errors, []);
-    assert.equal(mutations, 16);
+    assert.equal(mutations, 8);
     console.log(
-      "PASS: desktop/mobile, daily allowance rows, 24 durations, single/split apply/cancel, 50/50 and 1/99 and 99/1, preserved drafts, model identities, cache percentage, no overflow",
+      "PASS: desktop/mobile, daily allowance rows, 24 durations, single/pressure apply/cancel, one-hour default, no percentage controls, risk explanation, preserved drafts, model identities, cache percentage, no overflow",
     );
   } finally {
     await browser.close();

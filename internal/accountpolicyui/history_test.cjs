@@ -86,26 +86,25 @@ const emptyResponse = (path) =>
     : path.startsWith("/usage-history/summary")
       ? { groups: [] }
       : { enabled: true, healthy: true };
-test("percentage routing sends complementary shares and displays the active split", async () => {
+test("pressure routing sends account membership without percentages", async () => {
   let sent;
   const { c, element } = fakeController(async (path, method, body) => {
     if (path === "/routing-override" && method === "PUT") {
       sent = body;
-      return { revision: 1, state: "active", mode: "split", accounts: body.accounts, expires_at: "2026-10-23T00:00:00Z" };
+      return { revision: 1, state: "active", mode: "pressure", accounts: body.accounts, expires_at: "2026-10-25T00:00:00Z" };
     }
     if (path === "/routing-override") return { revision: 0, state: "inactive" };
     return emptyResponse(path);
   });
   await c.refresh();
-  element("override-mode").value = "split";
+  element("override-mode").value = "pressure";
   element("override-account").value = "a";
   element("override-account-secondary").value = "b";
-  element("override-percent").value = "37";
-  element("override-hours").value = "2";
+  element("override-hours").value = "1";
   await element("override-apply").listeners.click();
-  assert.deepEqual(sent, { mode: "split", accounts: [{ credential_id: "a", percent: 37 }, { credential_id: "b", percent: 63 }], duration_hours: 2, expected_revision: 0 });
-  assert.match(element("override-status").textContent, /a 37%/);
-  assert.match(element("override-status").textContent, /b 63%/);
+  assert.deepEqual(sent, { mode: "pressure", accounts: [{ credential_id: "a" }, { credential_id: "b" }], duration_hours: 1, expected_revision: 0 });
+  assert.match(element("override-status").textContent, /a.*b.*concurrent pressure/);
+  assert.doesNotMatch(element("override-status").textContent, /%/);
   c.reset();
   delete global.document;
 });
@@ -168,6 +167,22 @@ test("summary group changes reject delayed older response", async () => {
   await old;
   assert.match(element("history-summary").innerHTML, /LATEST/);
   assert.doesNotMatch(element("history-summary").innerHTML, /STALE/);
+  c.reset();
+  delete global.document;
+});
+
+test("legacy overrides show current pressure semantics and remain cancellable", async () => {
+  const { c, element } = fakeController(async (path, method) => {
+    if (path.startsWith("/routing-override") && method === "DELETE") return { revision: 2, state: "cancelled" };
+    if (path === "/routing-override") return { revision: 1, state: "active", mode: "split", accounts: [{ credential_id: "a", percent: 37 }, { credential_id: "b", percent: 63 }], expires_at: "2026-10-25T00:00:00Z" };
+    return emptyResponse(path);
+  });
+  await c.refresh();
+  assert.match(element("override-status").textContent, /a.*b.*concurrent pressure/);
+  assert.doesNotMatch(element("override-status").textContent, /%/);
+  assert.equal(element("override-cancel").disabled, false);
+  await element("override-cancel").listeners.click();
+  assert.match(element("override-status").textContent, /cancelled/);
   c.reset();
   delete global.document;
 });

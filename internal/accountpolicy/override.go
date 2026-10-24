@@ -138,7 +138,7 @@ func (s *Service) MaintainOverride() error {
 // by the selector; expiry never erases or migrates durable conversation owners.
 func (s *Service) PreferredAccount(provider string) string {
 	s.mu.RLock()
-	active := s.state.Override.State == "active" && s.state.Override.Provider == provider && s.state.Override.Mode != "split"
+	active := s.state.Override.State == "active" && s.state.Override.Provider == provider && s.state.Override.Mode != "split" && s.state.Override.Mode != "pressure"
 	s.mu.RUnlock()
 	if !active {
 		return ""
@@ -146,7 +146,7 @@ func (s *Service) PreferredAccount(provider string) string {
 	ids, temporary := s.overrideIdentities()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.state.Override.Provider != provider || s.state.Override.Mode == "split" || s.state.Override.State != "active" || s.overrideTerminationLocked(ids, temporary) != "" {
+	if s.state.Override.Provider != provider || (s.state.Override.Mode == "split" || s.state.Override.Mode == "pressure") || s.state.Override.State != "active" || s.overrideTerminationLocked(ids, temporary) != "" {
 		return ""
 	}
 	return s.state.Override.CredentialID

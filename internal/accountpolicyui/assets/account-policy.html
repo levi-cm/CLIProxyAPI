@@ -333,13 +333,17 @@
             <p class="muted">
               Applies across all callers. Account-bound conversations retain
               their owner. Cancelling, expiry or verified exhaustion restores
-              smart routing. Percentage splits count safe routing decisions,
-              rather than tokens; protected conversations keep their account.
+              earliest-deadline routing. Automatic spreading requires distant,
+              close renewals, fresh allowance history, a conservative consumption
+              forecast and concurrent pressure. The forecast is a heuristic.
+              Manual spreading follows active attempts, preferring the earlier renewal
+              on ties. Counts do not measure allowance consumption; spreading
+              can leave earlier allowance unused.
             </p>
             <div class="override-controls">
               <label>Mode<select id="override-mode">
                 <option value="single">Single account</option>
-                <option value="split">Percentage split</option>
+                <option value="pressure">Spread concurrent work</option>
               </select></label>
               <label
                 >Account<select id="override-account">
@@ -349,9 +353,7 @@
                 <label>Second account<select id="override-account-secondary">
                   <option value="">Select second account</option>
                 </select></label>
-                <label>First account percentage<input id="override-percent" type="number" min="1" max="99" step="1" value="50" inputmode="numeric" />
-                  <span class="field-help">Second account: <output id="override-percent-other" for="override-percent">50%</output></span>
-                </label>
+
               </div>
               <label>Duration<select id="override-hours"></select></label
               ><button id="override-apply" type="button" disabled>

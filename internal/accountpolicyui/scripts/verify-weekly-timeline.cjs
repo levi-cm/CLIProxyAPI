@@ -67,6 +67,20 @@ function pixel(png, x, y) {
       return data;
     };
     const before = await state();
+    // Keep the near/later-expiry scenario stable as calendar dates advance.
+    // Rewrite only this read-only fixture response; no provider state changes.
+    const fixtureNow = Date.parse(before.accounts[0].observed_at);
+    await page.route("**/v8/management/account-policy/accounts", async (route) => {
+      const response = await route.fetch();
+      const data = await response.json();
+      assert.equal(data.fixture_only, true);
+      const account = data.accounts.find((a) => a.identity.credential_id === "account-b");
+      const offsets = { "october-05": 1, "october-22": 18, "october-29": 25 };
+      for (const credit of account.credits) {
+        credit.expires_at = new Date(fixtureNow + offsets[credit.id] * 86400000).toISOString();
+      }
+      await route.fulfill({ response, json: data });
+    });
     await page.clock.setFixedTime(new Date(before.accounts[0].observed_at));
     await page.goto(base + "/account-policy.html");
     await page
@@ -97,10 +111,9 @@ function pixel(png, x, y) {
       await later.locator(".timeline-later").textContent(),
       /2 later expiries/,
     );
-    assert.doesNotMatch(
-      await page.locator("#timeline").textContent(),
-      /22\/10|29\/10/,
-    );
+    const expiryLabel = await later.locator(".timeline-marker.expiry").textContent();
+    assert.match(expiryLabel, /credit october-05/);
+    assert.doesNotMatch(expiryLabel, /october-22|october-29/);
     assert.equal(await page.locator(".timeline-marker.weekly").count(), 0);
     for (const width of [1440, 1024, 768, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 });

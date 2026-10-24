@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +32,7 @@ type policyBinding struct {
 // EarliestDeadlineSelector composes deadline ranking with the existing session
 // resolver/cache. The optional clock should be shared with the observation service.
 type EarliestDeadlineSelector struct {
-	splitID          string
-	splitState       *smoothWeightedState
+	automatic        automaticSpreadingState
 	policy           AccountPolicySource
 	fallback         Selector
 	fallbacks        map[string]Selector
@@ -250,6 +248,8 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 	settings := s.policy.Settings()
 	preferred := s.preferredAccount(provider)
 	_, splitShares := s.routingSplit(provider)
+	_, pressureMembers := s.routingPressure(provider)
+	splitShares = append(splitShares, pressureMembers...)
 	splitMembers := make(map[string]bool, len(splitShares))
 	for _, share := range splitShares {
 		splitMembers[share.CredentialID] = true
@@ -293,6 +293,12 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		if !evaluation.Eligible {
 			continue
 		}
+		if !evaluation.Known {
+			evaluation.Deadline = lastKnownWeeklyDeadline(snapshot, quotaModel, now)
+			if !evaluation.Deadline.IsZero() {
+				evaluation.Reason = "last_known_weekly_reset"
+			}
+		}
 		eligible = append(eligible, a)
 		evaluations[a.ID] = evaluation
 		unknown = unknown || !evaluation.Known
@@ -326,7 +332,7 @@ func (r *deadlineRankingSelector) AffinityNamespace(provider string, opts clipro
 
 func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	s := r.owner
-	eligible, evaluations, unknown := s.evaluate(provider, model, auths)
+	eligible, evaluations, _ := s.evaluate(provider, model, auths)
 	if len(eligible) == 0 {
 		return nil, &Error{Code: "account_policy_unavailable", Message: "no account satisfies account policy", HTTPStatus: 503}
 	}
@@ -348,29 +354,46 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 	}
-	if selected := s.pickSplit(provider, eligible); selected != nil {
-		s.decision(selected, provider, model, "temporary_percentage_split", evaluations[selected.ID], false)
+	if selected := s.pickSplit(provider, opts, eligible, evaluations); selected != nil {
+		s.decision(selected, provider, model, "temporary_concurrent_pressure", evaluations[selected.ID], false)
 		return selected, nil
 	}
-	if unknown {
+	if selected := s.pickPressure(provider, opts, eligible, evaluations); selected != nil {
+		s.decision(selected, provider, model, "temporary_concurrent_pressure", evaluations[selected.ID], false)
+		return selected, nil
+	}
+	if selected := s.pickAutomatic(provider, model, opts, eligible, evaluations); selected != nil {
+		e := evaluations[selected.ID]
+		reason := e.Reason
+		for _, a := range eligible {
+			if earlierPolicyAuth(a, selected, evaluations) {
+				reason = "automatic_concurrent_pressure_forecast"
+				break
+			}
+		}
+		s.decision(selected, provider, model, reason, e, false)
+		return selected, nil
+	}
+	ranked := make([]*Auth, 0, len(eligible))
+	for _, a := range eligible {
+		if !evaluations[a.ID].Deadline.IsZero() {
+			ranked = append(ranked, a)
+		}
+	}
+	if len(ranked) == 0 {
 		a, err := s.effectiveFallback().Pick(ctx, provider, model, opts, eligible)
 		s.decision(a, provider, model, "missing_or_stale_evidence", accountpolicy.Evaluation{}, true)
 		return a, err
 	}
-	sort.Slice(eligible, func(i, j int) bool {
-		left, right := evaluations[eligible[i].ID].Deadline, evaluations[eligible[j].ID].Deadline
-		if !left.Equal(right) {
-			return left.Before(right)
+	best := ranked[0]
+	for _, candidate := range ranked[1:] {
+		if earlierPolicyAuth(candidate, best, evaluations) {
+			best = candidate
 		}
-		if authPriority(eligible[i]) != authPriority(eligible[j]) {
-			return authPriority(eligible[i]) > authPriority(eligible[j])
-		}
-		return eligible[i].ID < eligible[j].ID
-	})
-	a := eligible[0]
-	e := evaluations[a.ID]
-	s.decision(a, provider, model, e.Reason, e, false)
-	return a, nil
+	}
+	e := evaluations[best.ID]
+	s.decision(best, provider, model, e.Reason, e, !e.Known)
+	return best, nil
 }
 
 func (r *deadlineRankingSelector) PickUnavailable(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, id string) error {
@@ -401,6 +424,12 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 		}
 		return r.Pick(ctx, provider, model, opts, auths)
 	}
+	splitID, _ := s.routingSplit(provider)
+	pressureID, _ := s.routingPressure(provider)
+	if splitID != "" || pressureID != "" {
+		s.decision(bound, provider, model, "retained_spreading_owner", e, false)
+		return bound, nil
+	}
 	reason := "strict_affinity"
 	if s.policy.Settings().Affinity == "deadline_at_boundary" {
 		reason = "unsafe_or_unknown_continuation"
@@ -413,20 +442,10 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 					return candidate, nil
 				}
 			}
-			eligible := make([]*Auth, 0, len(auths))
-			for _, candidate := range auths {
-				if evaluations[candidate.ID].Eligible {
-					eligible = append(eligible, candidate)
-				}
-			}
-			if selected := s.pickSplit(provider, eligible); selected != nil {
-				s.decision(selected, provider, model, "temporary_percentage_split_at_boundary", evaluations[selected.ID], false)
-				return selected, nil
-			}
 			var best *Auth
 			for _, candidate := range auths {
 				ce := evaluations[candidate.ID]
-				if best == nil || ce.Deadline.Before(evaluations[best.ID].Deadline) {
+				if ce.Eligible && !ce.Deadline.IsZero() && (best == nil || ce.Deadline.Before(evaluations[best.ID].Deadline)) {
 					best = candidate
 				}
 			}
