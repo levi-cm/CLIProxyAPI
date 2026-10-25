@@ -144,17 +144,19 @@ updates; remove it only if those updates are desired. `Restart=on-failure` keeps
 the proxy running after a crash. Its discovery/reset lifecycle runs in the proxy
 service and is independent of the owner's browser or laptop connection.
 
-Start with `account-policy.enabled: false` and `automation: off`. Opt into dashboard
-collection with `account-policy.observations-enabled: true` (config controls it on
-restart), verify account/workspace mapping and fresh evidence, then
-enable deadline routing, inspect dry-run advice with `notify`, and explicitly
-choose `auto_expiring` only after review. Run one writer instance; a second proxy
-must use read-only reset policy unless shared ownership has been implemented.
-Keep saved policy state and operation journals on the protected local disk.
-Once either automatic mode has been selected, automatic redemption becomes
-permanently required. The policy journal retains this requirement across startup
-configuration changes. The API rejects disabling attempts; keep automation
-running throughout maintenance and rollback.
+Production automatic redemption is permanently required. Preserve
+`account-policy.enabled: true`, `automation: auto_expiring`, `automation-required: true`,
+the minimum 600-second expiry guard, supported reset credit type and identity checks.
+Keep one authoritative writer and protected policy state, schedules and pending
+operation journals. Never disable routing or redemption, select `off`/`notify`,
+or make the authoritative writer read-only for maintenance, updates or rollback.
+
+Use isolated fixture credentials and temporary state for installation tests and
+observation-only or disabled-policy regression cases. A second test proxy must
+never mount production credentials or policy/history state. Production upgrades
+require a rehearsed admission/draining procedure, compatible rollback and proof
+that the authorized availability budget can be met; otherwise retain the serving
+process and report the blocker.
 
 ## Isolated direct and proxy Codex access
 

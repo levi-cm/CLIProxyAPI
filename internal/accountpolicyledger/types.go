@@ -27,6 +27,7 @@ type Request struct {
 	StatusCode           int                       `json:"status_code"`
 	Generate             bool                      `json:"generate"`
 	AuthCategory         string                    `json:"auth_category"`
+	EffectiveServiceTier string                    `json:"effective_service_tier,omitempty"`
 	RequestedServiceTier string                    `json:"requested_service_tier"`
 	ResponseServiceTier  string                    `json:"response_service_tier"`
 	Tokens               usage.TokenBreakdown      `json:"tokens"`

@@ -20,7 +20,7 @@ func TestManagerDynamicSelectorReceivesAllPriorities(t *testing.T) {
 	m := NewManager(nil, acrossPriorityTestSelector{}, nil)
 	high := &Auth{ID: "a", Provider: "codex", Attributes: map[string]string{"priority": "10"}}
 	low := &Auth{ID: "b", Provider: "codex", Attributes: map[string]string{"priority": "0"}}
-	_, candidates, err := m.availableAuthsForSelector(m.Selector(), []*Auth{high, low}, "codex", "", time.Now())
+	_, candidates, err := m.availableAuthsForSelector(m.Selector(), []*Auth{high, low}, "codex", "", time.Now(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
