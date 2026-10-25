@@ -7,8 +7,10 @@ Upstream parent: `8289ec4c71ad914d0612c2776352b76ba3d355a6`.
 Fork baseline and recovery ref: `2896a388b2d43006477a5e4cb3670cce73c544f5`,
 `recovery/pre-upstream-v8.0.41-20261023`.
 
-**Production deployment is blocked. Local main and the serving router remain at
-2896a388.** This is a source integration candidate, not a production acceptance.
+**Production deployment is blocked.** The original validation left local main
+and the serving router at `2896a388`. The user subsequently authorized
+[source-only worktree consolidation](local-worktree-consolidation-2026-10-25.md).
+Advancing local source does not deploy the router or certify production acceptance.
 
 ## Deployment blocker
 

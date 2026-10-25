@@ -123,8 +123,10 @@ mandatory reset automation and account ownership checks use existing machinery.
 
 ## Production gate
 
-No merge, restart, recreation, listener change, live config edit or second writer
-against production state is part of this task. Integration requires an approved
+The original routing task did not merge or deploy production changes. Later
+[source-only consolidation](local-worktree-consolidation-2026-10-25.md) was
+explicitly authorized. Restart, recreation, listener/config changes and a second
+production state writer remain excluded. Deployment requires an approved
 quiet window and a rehearsed zero-downtime handoff: keep loopback, LAN and
 Tailscale access; drain existing HTTP streams and WebSockets on the old process;
 retain conversation/account ownership and journals; maintain mandatory automatic
