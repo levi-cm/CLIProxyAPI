@@ -81,6 +81,10 @@ func (a *Archive) lookupBucket(base string) (map[string]string, error) {
 	return bucket, nil
 }
 func (a *Archive) saveLookup(name string, v any) error {
+	return a.writeLookup(name, v, true)
+}
+
+func (a *Archive) writeLookup(name string, v any, durable bool) error {
 	for _, n := range []string{name, name + ".tmp"} {
 		info, err := a.root.Lstat(n)
 		if err == nil && !info.Mode().IsRegular() {
@@ -95,12 +99,18 @@ func (a *Archive) saveLookup(name string, v any) error {
 		return err
 	}
 	err = json.NewEncoder(f).Encode(v)
-	err = errors.Join(err, f.Sync(), f.Close())
+	if durable {
+		err = errors.Join(err, f.Sync())
+	}
+	err = errors.Join(err, f.Close())
 	if err != nil {
 		return err
 	}
 	if err = a.root.Rename(name+".tmp", name); err != nil {
 		return err
+	}
+	if !durable {
+		return nil
 	}
 	d, err := a.root.Open(path.Dir(name))
 	if err != nil {
