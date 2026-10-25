@@ -77,9 +77,13 @@ All Go compilation used the half-CPU wrapper and Go 1.26.10.
   removed. Focused vet and diff checks: PASS.
 - JavaScript helpers: 38/38 PASS, `/tmp/cliproxy-consolidation-js.log`.
 - CPU limiter regressions: 6/6 PASS. Catalog helper regressions: 5/5 PASS.
-- Companion suite: 10 tests, PASS with one optional real private-edge smoke
-  skipped because CADDY_BIN is unavailable. No remote/private-edge deployment
-  acceptance is implied. Log: `/tmp/cliproxy-consolidation-companion.log`.
+- Companion suite: 10/10 PASS, including the previously skipped real Caddy
+  private-edge fixture smoke. A cached Caddy 2.11.7 binary was located and used
+  only for the temporary port 18417 fixture with an offline provider. HTTP/SSE,
+  management-source gates and WebSocket reconnect checks passed; the temporary
+  listener was stopped. Host-side self-connections do not certify a separate
+  remote device or production deployment. Final log:
+  `/tmp/cliproxy-consolidation-companion-complete.log`.
 - All five fixture-only browser suites: PASS (history/manual routing, dashboard,
   observations, weekly timeline and mandatory automation controls).
 - Eight light/dark accessibility snapshots: 100%, with zero reported failures.
