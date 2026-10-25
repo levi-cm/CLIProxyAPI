@@ -179,3 +179,32 @@ checks returned 200 on loopback, LAN and Tailscale. The production checkout's
 preexisting dirty and untracked files were unchanged. These health checks do
 not claim a deployment, connection-draining rehearsal, or continuous telemetry
 of every active stream; production integration remains deferred.
+
+## Independent verification follow-up (2026-10-25)
+
+Two additional verification agents independently checked routing safety and
+build/API/UI integration. They found and reproduced two defects, both fixed in
+the isolated candidate:
+
+- A refreshed hard block stopped automatic spreading, but fallback could select
+  from the superseded evaluations. Fallback now refreshes eligibility and
+  deadlines before ranking, and returns unavailable when no account remains.
+  Six deterministic regressions cover new ineligibility, authentication failure,
+  quota exhaustion, both accounts blocked, a moved renewal and an earlier credit.
+- `nproc` honored inherited OpenMP settings, which could inflate the CPU budget.
+  CPU discovery now ignores those settings while preserving the compiler's
+  environment. Explicit compiler package-parallelism overrides are rejected.
+  Six executable Python regressions cover those cases, actual CPU affinity,
+  rounding, test argument forwarding and rejection of server runtime commands.
+
+Both agents rechecked their original reproductions and reported no remaining
+blocker. Fresh focused routing, affinity, ownership, override, API and transport
+checks passed, along with affected race tests, server compilation, focused vet,
+38 JavaScript tests and the fixture-only desktop/mobile routing browser suite.
+All compilation used the half-CPU wrapper. Production remained untouched.
+
+The final uncached full Go suite also passed after both fixes:
+`GO_BINARY=/tmp/cliproxy-policy-toolchain/go/bin/go ./scripts/go-limited.sh test ./... -count=1`.
+Logs: `/tmp/cliproxy-review-final-full.log` and
+`/tmp/cliproxy-review-final-race.log`. The CPU limiter regressions run with
+`python3 scripts/test_go_limited.py` (6/6 passed).

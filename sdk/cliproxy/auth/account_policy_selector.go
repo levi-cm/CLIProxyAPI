@@ -374,6 +374,12 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 		s.decision(selected, provider, model, reason, e, false)
 		return selected, nil
 	}
+	// Automatic assessment may observe newer hard blocks or deadlines. Refresh
+	// fallback evidence instead of selecting from the superseded evaluation.
+	eligible, evaluations, _ = s.evaluate(provider, model, eligible)
+	if len(eligible) == 0 {
+		return nil, &Error{Code: "account_policy_unavailable", Message: "no account satisfies account policy", HTTPStatus: 503}
+	}
 	ranked := make([]*Auth, 0, len(eligible))
 	for _, a := range eligible {
 		if !evaluations[a.ID].Deadline.IsZero() {

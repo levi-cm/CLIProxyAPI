@@ -352,3 +352,52 @@ func TestAutomaticPressureKeepsBoundConversations(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticFallbackRefreshesHardExclusionsAndDeadlines(t *testing.T) {
+	for _, change := range []string{"ineligible", "authentication", "quota", "both_blocked", "later_renewal", "earlier_credit"} {
+		t.Run(change, func(t *testing.T) {
+			s, p, auths, m, now := warmAutomaticForecast(t, 1)
+			for range 4 {
+				_, l := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+				l.selectAuth("a")
+				defer l.release()
+			}
+			s.policy = &changingAutomaticSource{policyTestSource: p, reads: map[string]int{}, change: func(id string, snapshot accountpolicy.Snapshot) accountpolicy.Snapshot {
+				if id == "a" {
+					switch change {
+					case "ineligible":
+						snapshot.Eligible = false
+					case "authentication":
+						snapshot.Status = "authentication_unavailable"
+					case "quota":
+						snapshot.Buckets = append([]accountpolicy.Bucket(nil), snapshot.Buckets...)
+						snapshot.Buckets[0].UsedPercent = 100
+					case "later_renewal":
+						snapshot.Buckets = append([]accountpolicy.Bucket(nil), snapshot.Buckets...)
+						snapshot.Buckets[0].ResetAt = snapshot.Buckets[0].ResetAt.Add(3 * time.Hour)
+					}
+				}
+				if change == "both_blocked" {
+					snapshot.Eligible = false
+				}
+				if change == "earlier_credit" && id == "b" {
+					expiry := now.Add(time.Hour)
+					snapshot.Credits = []accountpolicy.Credit{{ID: "new-credit", Type: "codex_rate_limits", Status: "available", DetailsKnown: true, Scopes: []string{"ordinary"}, ExpiresAt: &expiry}}
+				}
+				return snapshot
+			}}
+			opts, l := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+			defer l.release()
+			got, err := s.Pick(context.Background(), "codex", "model", opts, auths)
+			if change == "both_blocked" {
+				if err == nil || got != nil {
+					t.Fatalf("selected blocked account: %v %v", got, err)
+				}
+				return
+			}
+			if err != nil || got == nil || got.ID != "b" {
+				t.Fatalf("fallback reused superseded %s evidence: %v %v", change, got, err)
+			}
+		})
+	}
+}

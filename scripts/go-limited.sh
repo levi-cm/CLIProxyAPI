@@ -7,8 +7,33 @@ case "${1:-}" in
   *) printf '%s\n' 'Usage: scripts/go-limited.sh build|test|vet [arguments...]' >&2; exit 2 ;;
 esac
 
+# Keep package serialization enforceable even with explicit Go command flags.
+# Arguments after -args belong to the test binary, not the compiler.
+build_expect_parallelism=false
+for build_argument do
+  if [ "$build_expect_parallelism" = true ]; then
+    if [ "$build_argument" != 1 ]; then
+      printf '%s\n' 'Package parallelism is fixed at 1.' >&2; exit 2
+    fi
+    build_expect_parallelism=false
+    continue
+  fi
+  case "$build_argument" in
+    -args|--) break ;;
+    -p) build_expect_parallelism=true ;;
+    -p=1) ;;
+    -p=*) printf '%s\n' 'Package parallelism is fixed at 1.' >&2; exit 2 ;;
+  esac
+done
+if [ "$build_expect_parallelism" = true ]; then
+  printf '%s\n' 'The -p flag requires 1.' >&2; exit 2
+fi
+
 if command -v nproc >/dev/null 2>&1; then
-  build_cpu_count=$(nproc)
+  build_cpu_count=$(
+    unset OMP_NUM_THREADS OMP_THREAD_LIMIT
+    nproc
+  )
 elif command -v getconf >/dev/null 2>&1; then
   build_cpu_count=$(getconf _NPROCESSORS_ONLN)
 elif command -v sysctl >/dev/null 2>&1; then
