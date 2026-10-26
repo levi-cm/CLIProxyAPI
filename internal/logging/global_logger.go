@@ -79,6 +79,13 @@ var quotedLogFields = map[string]struct{}{
 
 var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
 
+// Recovery diagnostics contain only classifications and hashed identities.
+// Keep their allowlist separate so arbitrary structured data stays private.
+var recoveryDiagnosticFieldOrder = []string{
+	"component", "trace_id", "classification", "session_hash", "binding_lookup", "continuation",
+	"account_hash", "model_hash", "attempt",
+}
+
 func formatLogFieldValue(key string, value any) string {
 	if _, quoted := quotedLogFields[key]; quoted {
 		if stringValue, ok := value.(string); ok {
@@ -118,6 +125,17 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		for _, k := range logFieldOrder {
 			if v, ok := entry.Data[k]; ok {
 				fields = append(fields, fmt.Sprintf("%s=%s", k, formatLogFieldValue(k, v)))
+			}
+		}
+		if component, _ := entry.Data["component"].(string); component == "account-policy-rejection" || component == "codex-capacity" {
+			for _, k := range recoveryDiagnosticFieldOrder {
+				if v, ok := entry.Data[k]; ok {
+					if value, isString := v.(string); isString {
+						fields = append(fields, k+"="+strconv.Quote(value))
+					} else {
+						fields = append(fields, fmt.Sprintf("%s=%v", k, v))
+					}
+				}
 			}
 		}
 		if pluginID, ok := entry.Data["plugin_id"]; ok && strings.TrimSpace(fmt.Sprint(pluginID)) != "" {

@@ -1,7 +1,7 @@
 # Codex ownership and capacity repair
 
 Base: serving revision `b8a7383063021044f950da735597a0fc38ff5aa3`.
-This candidate contains no upstream upgrade. Production configuration and state
+The initial repair contains no upstream upgrade. Production configuration and state
 are not inputs to its tests, and no candidate writer may open them.
 
 ## Ownership
@@ -62,21 +62,32 @@ The authenticated v8 account-policy dashboard includes `capacity_recovery` with
 aggregate `pending` and `pending_bytes`. Capacity logs contain hashed account and
 model keys and attempt numbers. No credential data is added to these diagnostics.
 
-## Deployment gate
+## Deployment and verification
 
-This candidate is not authorization for a restart. The current serving process
-owns its listeners directly and closes connections on stop. Before replacing
-production, separately demonstrate listener/connection handoff, draining,
-conversation-state preservation, exactly one authoritative writer and rollback.
-An idle period and passing tests do not establish zero downtime.
+The process owns its listeners directly; this host does not provide a demonstrated
+zero-downtime handoff. The user explicitly authorized up to 60 seconds of
+maintenance after draining on 2026-10-26. The initial repair was deployed using
+that authorization after zero active business requests and client connections
+were verified. Exactly one authoritative writer remained enforced. Offline,
+network-isolated fixture startup and rollback rehearsals used copied state.
 
-Once that gate is proven, apply the overlay to a protected config copy, retaining
-mandatory enabled `auto_expiring` automation, `automation_required`, expiry guard
-and supported reset credit type. Validate loopback, LAN and Tailscale health,
-authenticated models, the new-chat schema reproducer, genuine encrypted ownership,
-complete SSE and two WebSocket turns. Verify from the affected remote terminal
-as well as the host. These checks have not been run on the live candidate while
-the availability gate is unresolved.
+Revision `e8b4cab67b0f8dd6cd379a9be01ebe4205ff3dd2` replaced `b8a73830`
+with a measured 12.32-second interruption. The config bind-mount inode, 1,010
+conversation owners and five raw history segments were preserved. Mandatory
+`auto_expiring` refills, `automation_required`, expiry guard, supported credit
+type and writable history remained enabled.
+
+Live verification passed health, authenticated models and management on loopback,
+LAN and Tailscale; fresh tool-schema requests shaped for CLI 0.163.0/0.164.0;
+a genuine encrypted continuation created before deployment with the same owner;
+complete SSE; and two native WebSocket turns. Truly unowned encrypted input
+still returned 409. Host-side Tailscale tests passed. A controlled test from the
+affected remote terminal was unavailable because SSH authentication could not
+be established; this is not equivalent to remote-terminal acceptance.
+
+Live log verification found that the formatter dropped the new structured fields
+even though hook tests passed. The authentication follow-up adds a regression
+against actual formatted output and an explicit diagnostic-field allowlist.
 
 ## Implementation decisions
 
@@ -112,8 +123,10 @@ and approximately 4.0 MiB additional measured heap with a simulated additional
 and host observations, not a live traffic capacity guarantee.
 
 The final fresh review's seven important findings were fixed with reproducing
-regressions; no findings were deferred. Production stayed on the original image,
+regressions; no findings were deferred. During the initial source validation,
+production stayed on the original image,
 with unchanged container start time and restart count. Its health and management
-paths returned HTTP 200 on loopback, LAN and Tailscale. The candidate has not
-replaced production; affected remote-terminal acceptance remains gated on the
-separately demonstrated zero-downtime handoff.
+paths returned HTTP 200 on loopback, LAN and Tailscale. The initial repair was
+subsequently deployed under the explicitly authorized
+drained maintenance window described above. The complete original repair and
+the follow-up remain isolated from the production source checkout.

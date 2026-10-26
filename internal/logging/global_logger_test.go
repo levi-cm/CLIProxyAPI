@@ -42,6 +42,43 @@ func TestLogFormatterPrintsVersionField(t *testing.T) {
 	}
 }
 
+func TestLogFormatterPrintsSanitizedRecoveryDiagnostics(t *testing.T) {
+	for _, component := range []string{"account-policy-rejection", "codex-capacity", "unrelated"} {
+		t.Run(component, func(t *testing.T) {
+			entry := log.NewEntry(log.New())
+			entry.Message = "recovery diagnostic"
+			entry.Data = log.Fields{
+				"component": component, "trace_id": "trace-123", "classification": "account_policy_owner_unknown",
+				"session_hash": "hash-session", "model": "gpt-test", "binding_lookup": "missing",
+				"continuation": "reasoning.encrypted_content", "account_hash": "hash-account",
+				"model_hash": "hash-model", "attempt": 2,
+				"prompt": "protected-prompt", "encrypted_content": "protected-ciphertext",
+				"token": "protected-token", "session_id": "protected-session",
+			}
+			formatted, errFormat := (&LogFormatter{}).Format(entry)
+			if errFormat != nil {
+				t.Fatal(errFormat)
+			}
+			line := string(formatted)
+			for _, field := range []string{"component", "trace_id", "classification", "session_hash", "binding_lookup", "continuation", "account_hash", "model_hash", "attempt"} {
+				if got := strings.Contains(line, field+"="); got != (component != "unrelated") {
+					t.Errorf("field %s present = %v for %s", field, got, component)
+				}
+			}
+			for _, secret := range []string{"protected-prompt", "protected-ciphertext", "protected-token", "protected-session"} {
+				if strings.Contains(line, secret) {
+					t.Errorf("formatted diagnostic exposed %s", secret)
+				}
+			}
+			entry.Data["trace_id"] = "trace\nforged-entry"
+			formatted, errFormat = (&LogFormatter{}).Format(entry)
+			if errFormat != nil || strings.Count(string(formatted), "\n") != 1 {
+				t.Errorf("diagnostic must remain on one log line: %q, %v", formatted, errFormat)
+			}
+		})
+	}
+}
+
 func TestLogFormatterPrintsMediaForwardingFields(t *testing.T) {
 	entry := log.NewEntry(log.New())
 	entry.Time = time.Date(2026, 7, 25, 7, 36, 4, 0, time.Local)
