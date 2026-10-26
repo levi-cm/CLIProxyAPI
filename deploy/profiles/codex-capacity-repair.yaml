@@ -1,0 +1,16 @@
+# STAGED OVERLAY ONLY. Merge into an existing config after the zero-downtime
+# handoff gate is demonstrated. This is not a standalone server configuration.
+# Existing automation, ownership, history, bindings and credentials must survive.
+upstream:
+  codex:
+    stream-bootstrap-buffering: true
+    capacity-retry:
+      enabled: true
+      total-budget: 30m
+      max-attempts: 8
+      max-pending: 16
+      max-pending-per-account: 8
+      max-pending-bytes: 134217728
+      min-available-memory-bytes: 1073741824
+account-policy:
+  automatic-spreading-enabled: false

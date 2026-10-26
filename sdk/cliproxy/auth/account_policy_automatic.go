@@ -124,6 +124,9 @@ func (h policyBurnHistory) forecastCovers(now time.Time) bool {
 // Missing/stale/ambiguous evidence discards forecasts, preserving deadline order.
 func (s *EarliestDeadlineSelector) pickAutomatic(provider, model string, opts cliproxyexecutor.Options, eligible []*Auth, evaluations map[string]accountpolicy.Evaluation) *Auth {
 	reject := func() *Auth { s.automatic.clear(); return nil }
+	if enabled := s.policy.Settings().AutomaticSpreadingEnabled; enabled != nil && !*enabled {
+		return reject()
+	}
 	splitID, _ := s.routingSplit(provider)
 	pressureID, _ := s.routingPressure(provider)
 	if provider != "codex" || len(eligible) != 2 || s.preferredAccount(provider) != "" || splitID != "" || pressureID != "" {

@@ -47,18 +47,16 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	headers := parseCodexWebsocketErrorHeaders(payload)
-	isUsageLimit := isCodexUsageLimitError(out)
-	statusError := statusErr{
-		code:             status,
-		msg:              string(out),
-		credentialScoped: isUsageLimit && !modelLevelCooling,
-	}
-	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
-		statusError.retryAfter = retryAfter
-	} else if isCodexWebsocketConnectionLimitError(payload) {
+	statusError := newCodexHTTPStatusErr(status, out, headers, modelLevelCooling)
+	if isCodexWebsocketConnectionLimitError(payload) {
+		statusError.retryAt = time.Time{}
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
 	}
+	// An error frame can arrive after server-side work. Callers must establish
+	// the absence of output/tool effects before treating it as replayable.
+	statusError.capacityReplaySafe = false
+
 	return statusErrWithHeaders{
 		statusErr: statusError,
 		headers:   headers,

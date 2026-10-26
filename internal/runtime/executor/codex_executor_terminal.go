@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexcapacity"
 	"net/http"
 	"sort"
 	"strconv"
@@ -318,11 +319,11 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
-	if isCodexModelCapacityError(body) || isUsageLimit {
+	if isCodexModelCapacityError(body) && statusCode == http.StatusBadRequest || isUsageLimit {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
+	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, capacity: isCodexModelCapacityError(body)}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -375,29 +376,7 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 	}
 }
 
-func isCodexModelCapacityError(errorBody []byte) bool {
-	if len(errorBody) == 0 {
-		return false
-	}
-	candidates := []string{
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
-		string(errorBody),
-	}
-	for _, candidate := range candidates {
-		lower := strings.ToLower(strings.TrimSpace(candidate))
-		if lower == "" {
-			continue
-		}
-		if strings.Contains(lower, "model is at capacity") ||
-			strings.Contains(lower, "model_at_capacity") ||
-			strings.Contains(lower, "model_is_at_capacity") ||
-			(strings.Contains(lower, "model") && strings.Contains(lower, "at capacity")) {
-			return true
-		}
-	}
-	return false
-}
+func isCodexModelCapacityError(body []byte) bool { return codexcapacity.IsCapacity(body) }
 
 // isCodexUsageLimitError reports whether the error body represents a Codex
 // quota/plan-limit exhaustion (error.type == "usage_limit_reached"). This is the
@@ -436,7 +415,7 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 				return &retryAfter
 			}
 		}
-		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 && resetsInSeconds <= int64((1<<63-1)/time.Second) {
 			retryAfter := time.Duration(resetsInSeconds) * time.Second
 			return &retryAfter
 		}
@@ -607,6 +586,9 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
 func newCodexBootstrapOverloadErr(body []byte) statusErr {
+	if isCodexModelCapacityError(body) {
+		return newCodexStatusErr(http.StatusTooManyRequests, body)
+	}
 	return newCodexStatusErr(http.StatusServiceUnavailable, body)
 }
 
@@ -634,4 +616,62 @@ func isCodexOverloadBootstrapFailure(body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// newCodexHTTPStatusErr carries a standard retry deadline through every HTTP
+// rejection path. Parsing is shared with WebSocket error frames.
+func newCodexHTTPStatusErr(status int, body []byte, headers http.Header, cooling bool) statusErr {
+	err := newCodexStatusErrWithCooling(status, body, cooling)
+	if err.capacity {
+		err.code = status
+	}
+	if hint := helps.ParseRetryAfter(headers.Get("Retry-After"), time.Now()); hint != nil {
+		if err.retryAfter == nil || *hint > *err.retryAfter {
+			err.retryAfter = hint
+		}
+	}
+	if err.retryAfter != nil {
+		err.retryAt = time.Now().Add(*err.retryAfter)
+	}
+	err.capacityReplaySafe = err.capacity && status >= 400
+	return err
+}
+
+// withCodexCapacitySafety adds retry metadata only after the caller has tracked
+// the entire attempt for business output and possible server tool execution.
+func withCodexCapacitySafety(err error, headers http.Header, safe bool) error {
+	switch e := err.(type) {
+	case statusErr:
+		if e.capacity {
+			e = withCodexRetryHeaders(e, headers)
+			e.capacityReplaySafe = safe
+		}
+		return e
+	case statusErrWithHeaders:
+		if e.capacity {
+			e.statusErr = withCodexRetryHeaders(e.statusErr, headers)
+			e.capacityReplaySafe = safe
+		}
+		return e
+	default:
+		return err
+	}
+}
+func withCodexRetryHeaders(err statusErr, headers http.Header) statusErr {
+	if hint := helps.ParseRetryAfter(headers.Get("Retry-After"), time.Now()); hint != nil {
+		if err.retryAfter == nil || *hint > *err.retryAfter {
+			err.retryAfter = hint
+		}
+	}
+	if err.retryAfter != nil && err.retryAt.IsZero() {
+		err.retryAt = time.Now().Add(*err.retryAfter)
+	}
+	return err
+}
+
+func isCodexCapacityErrorValue(err error) bool {
+	if e, ok := err.(interface{ IsCapacity() bool }); ok {
+		return e.IsCapacity()
+	}
+	return false
 }

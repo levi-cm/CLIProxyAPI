@@ -75,6 +75,7 @@ type policyTransportObservation struct {
 }
 
 type policyTransportFixture struct {
+	configure    func(*config.Config)
 	mu           sync.Mutex
 	observations []policyTransportObservation
 	upgrades     int
@@ -95,6 +96,10 @@ func (f *policyTransportFixture) record(account, transport, path string, body []
 }
 
 func policyTransportEvents(account string, payload []byte) []string {
+	if gjson.GetBytes(payload, "metadata.fixture_capacity").Bool() {
+		return []string{`{"type":"error","status":429,"headers":{"Retry-After":"120"},"error":{"code":"turn_rate_limit_exceeded","message":"Codex is at capacity, please try again later","type":"rate_limit_error"}}`}
+	}
+
 	completed := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%s","object":"response","status":"completed","model":"gpt-5-codex","output":[{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture %s"}]}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}`, account, account)
 	if gjson.GetBytes(payload, `tools.#(name=="fixture_tool")`).Exists() {
 		completed = fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%s","object":"response","status":"completed","model":"gpt-5-codex","output":[{"id":"fc_fixture","type":"function_call","call_id":"fixture-call","name":"fixture_tool","arguments":"{}","status":"completed"}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}`, account)
@@ -189,6 +194,9 @@ func newPolicyTransportHarness(t *testing.T, fixture *policyTransportFixture) *p
 	t.Cleanup(upstream.Close)
 	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"test-key"}, DisableImageGeneration: config.DisableImageGenerationAll}, WebsocketAuth: true}
 	cfg.Codex.DisableCodexCloaking = true
+	if fixture.configure != nil {
+		fixture.configure(cfg)
+	}
 	cfg.Payload.Override = []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "gpt-5-codex"}}, Params: map[string]any{"instructions": "fixture final payload"}}}
 	cfg.Payload.Filter = []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gpt-5-codex"}}, Params: []string{"metadata.fixture_filter"}}}
 	server := newTestServerWithConfig(t, cfg)
@@ -696,5 +704,48 @@ func TestAccountPolicyForcedAccountCannotBypassRealIneligibility(t *testing.T) {
 				t.Fatal("forced unavailable account reached inference upstream")
 			}
 		})
+	}
+}
+
+func TestAccountPolicyFreshCodexCLIToolSchemas(t *testing.T) {
+	for _, version := range []string{"0.163.0", "0.164.0"} {
+		for _, property := range []string{"conversation_id", "previous_response_id", "encrypted_content", "turn_state"} {
+			t.Run(version+"/"+property, func(t *testing.T) {
+				h := newPolicyTransportHarness(t, nil)
+				payload := `{` + policyTransportInput + `,"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"` + property + `":{"type":"string"}}}}]}`
+				status, body := h.httpRequest(t, "/v1/responses", payload, http.Header{"Session-Id": {"fresh-cli-session"}, "User-Agent": {"codex_cli_rs/" + version}})
+				if status != 200 || !strings.Contains(body, "resp_b") {
+					t.Fatalf("fresh CLI schema rejected: status=%d body=%s", status, body)
+				}
+			})
+		}
+	}
+}
+
+func TestAccountPolicyPinnedWebsocketCapacityWire(t *testing.T) {
+	h := newPolicyTransportHarness(t, &policyTransportFixture{configure: func(cfg *config.Config) {
+		cfg.Codex.StreamBootstrapBuffering = true
+		cfg.Codex.CapacityRetry.Enabled = true
+		cfg.Codex.CapacityRetry.MaxAttempts = 1
+	}})
+	conn := h.dial(t, http.Header{"Session-Id": {"pinned-capacity-session"}, "User-Agent": {"codex_cli_rs/0.164.0"}})
+	first := policyTransportTurn(t, conn, `{"type":"response.create",`+policyTransportInput+`}`)
+	if !strings.Contains(first, "resp_b") {
+		t.Fatal(first)
+	}
+	h.source.update(h.a, func(s *accountpolicy.Snapshot) { s.Buckets[1].ResetAt = h.now.Add(30 * time.Minute) })
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp_b","input":[{"role":"user","content":"continue"}],"metadata":{"fixture_capacity":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("capacity suppressed or socket closed: %v", err)
+	}
+	if gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "status").Int() != 429 || gjson.GetBytes(body, "error.code").String() != "turn_rate_limit_exceeded" || gjson.GetBytes(body, "headers.Retry-After").String() != "120" {
+		t.Fatalf("capacity wire error lost: %s", body)
+	}
+	observations, _ := h.fixture.captured()
+	if len(observations) != 2 || observations[1].account != "b" {
+		t.Fatalf("capacity changed established account: %+v", observations)
 	}
 }

@@ -41,6 +41,13 @@ func TestAccountPolicyDashboardAllProvidersDisabledAndPrivacy(t *testing.T) {
 			t.Fatalf("dashboard leaked %s: %s", secret, w.Body.String())
 		}
 	}
+	var aggregate map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &aggregate); err != nil {
+		t.Fatal(err)
+	}
+	if aggregate["capacity_recovery"] == nil {
+		t.Fatal("missing transient capacity accounting")
+	}
 	var body struct {
 		Activity struct {
 			Available bool `json:"available"`

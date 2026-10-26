@@ -188,7 +188,8 @@ func policyBindingKey(provider, model string, opts cliproxyexecutor.Options) str
 	return policyAffinityNamespace(provider, opts) + "::" + session + "::" + canonicalModelKey(model)
 }
 
-func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *EarliestDeadlineSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (picked *Auth, pickErr error) {
+	defer func() { logPolicyRejection(ctx, model, opts, pickErr) }()
 	if s.policy == nil || !s.policy.Settings().Enabled {
 		s.mu.Lock()
 		fallback := s.disabledFallback
@@ -344,7 +345,7 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 				return a, nil
 			}
 		}
-		return nil, &Error{Code: "account_policy_owner_unknown", Message: "account-specific continuation requires an established binding or explicit account owner", HTTPStatus: 409}
+		return nil, &Error{Code: "account_policy_owner_unknown", Message: "account-specific continuation requires an established binding or explicit account owner; if the original owner cannot be recovered, start a new conversation with a plain-text handoff", HTTPStatus: 409}
 	}
 	if preferred := s.preferredAccount(provider); preferred != "" {
 		for _, a := range eligible {
@@ -517,51 +518,6 @@ func policyRequestReplayable(ctx context.Context, opts cliproxyexecutor.Options)
 		return len(messages) > 0
 	}
 	return false
-}
-
-// Transport/session identifiers alone do not imply stateful input: a new
-// websocket with full input still needs its first account assignment.
-func policyRequestHasLocalState(opts cliproxyexecutor.Options) bool {
-	for _, key := range []string{"turn_state", "previous_response_id", "encrypted_reasoning", "encrypted_content"} {
-		if v, ok := opts.Metadata[key]; ok && v != nil && v != "" {
-			return true
-		}
-	}
-	var root map[string]any
-	if json.Unmarshal(opts.OriginalRequest, &root) != nil {
-		return false
-	}
-	var unsafe func(any) bool
-	unsafe = func(value any) bool {
-		switch v := value.(type) {
-		case map[string]any:
-			for key, item := range v {
-				switch strings.ToLower(key) {
-				case "previous_response_id", "encrypted_content", "encrypted_reasoning", "turn_state", "conversation_id":
-					if item != nil && item != "" {
-						return true
-					}
-				}
-				if key == "type" && (item == "item_reference" || item == "compaction") {
-					return true
-				}
-				if key == "conversation" && item != nil {
-					return true
-				}
-				if unsafe(item) {
-					return true
-				}
-			}
-		case []any:
-			for _, item := range v {
-				if unsafe(item) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return unsafe(root)
 }
 
 func (s *EarliestDeadlineSelector) preferredAccount(provider string) string {

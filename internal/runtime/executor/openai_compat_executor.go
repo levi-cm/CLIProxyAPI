@@ -1151,10 +1151,13 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code             int
-	msg              string
-	retryAfter       *time.Duration
-	credentialScoped bool
+	capacity           bool
+	capacityReplaySafe bool
+	retryAt            time.Time
+	code               int
+	msg                string
+	retryAfter         *time.Duration
+	credentialScoped   bool
 }
 
 func (e statusErr) Error() string {
@@ -1165,6 +1168,9 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) IsCapacity() bool           { return e.capacity }
+func (e statusErr) CapacityRetrySafe() bool    { return e.capacityReplaySafe }
+func (e statusErr) RetryDeadline() time.Time   { return e.retryAt }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute

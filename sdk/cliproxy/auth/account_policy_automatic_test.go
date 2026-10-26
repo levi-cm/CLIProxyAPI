@@ -401,3 +401,20 @@ func TestAutomaticFallbackRefreshesHardExclusionsAndDeadlines(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticSpreadingExplicitlyDisabledKeepsEarliest(t *testing.T) {
+	s, p, auths, m, _ := warmAutomaticForecast(t, 1)
+	disabled := false
+	p.settings.AutomaticSpreadingEnabled = &disabled
+	for range 4 {
+		_, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+		lease.selectAuth("a")
+		defer lease.release()
+	}
+	opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	defer lease.release()
+	picked, err := s.Pick(context.Background(), "codex", "model", opts, auths)
+	if err != nil || picked.ID != "a" {
+		t.Fatalf("explicit earliest-first setting ignored: %v %v", picked, err)
+	}
+}

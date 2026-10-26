@@ -54,6 +54,7 @@ func (s *EarliestDeadlineSelector) restoreDurableBindings(ctx context.Context, p
 		return nil
 	}
 	store := s.durableStore()
+	opts.Metadata["account_policy_binding_lookup"] = "unavailable"
 	if store == nil {
 		return nil
 	}
@@ -71,6 +72,13 @@ func (s *EarliestDeadlineSelector) restoreDurableBindings(ctx context.Context, p
 		// records describe the actual selected provider, never that route label.
 		key := accountpolicybindings.NewKey(policyClientScope(opts), "codex", id, model)
 		owner, found, err := store.Lookup(key)
+		opts.Metadata["account_policy_binding_lookup"] = "miss"
+		if found {
+			opts.Metadata["account_policy_binding_lookup"] = "hit"
+		}
+		if err != nil {
+			opts.Metadata["account_policy_binding_lookup"] = "error"
+		}
 		if err != nil {
 			return &Error{Code: "account_policy_binding_state_unavailable", Message: "conversation ownership state is unavailable; no account can be inferred", HTTPStatus: http.StatusServiceUnavailable}
 		}

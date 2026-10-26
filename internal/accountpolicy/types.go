@@ -7,23 +7,25 @@ import (
 )
 
 type Settings struct {
-	AutomationRequired  bool                      `json:"automation_required" yaml:"automation-required"`
-	UsageHistoryEnabled bool                      `json:"usage_history_enabled" yaml:"usage-history-enabled"`
-	Enabled             bool                      `json:"enabled" yaml:"enabled"`
-	ObservationsEnabled bool                      `json:"observations_enabled" yaml:"observations-enabled"`
-	Mode                string                    `json:"mode" yaml:"mode"`
-	Automation          string                    `json:"automation" yaml:"automation"`
-	Fallback            string                    `json:"fallback" yaml:"fallback"`
-	Affinity            string                    `json:"affinity" yaml:"affinity"`
-	StateDir            string                    `json:"state_dir" yaml:"state-dir"`
-	TimeZone            string                    `json:"time_zone" yaml:"time-zone"`
-	ExpiryGuardSeconds  int                       `json:"expiry_guard_seconds" yaml:"expiry-guard-seconds"`
-	FreshnessSeconds    int                       `json:"freshness_seconds" yaml:"freshness-seconds"`
-	SavedCreditReserve  int                       `json:"saved_credit_reserve" yaml:"saved-credit-reserve"`
-	ReadOnly            bool                      `json:"read_only" yaml:"read-only"`
-	ForceAccount        string                    `json:"force_account" yaml:"force-account"`
-	CreditTypes         []string                  `json:"credit_types" yaml:"credit-types"`
-	Accounts            map[string]AccountControl `json:"accounts" yaml:"accounts"`
+	// Nil retains the historical conservative spreading gates. False enforces strict deadline order.
+	AutomaticSpreadingEnabled *bool                     `json:"automatic_spreading_enabled,omitempty" yaml:"automatic-spreading-enabled,omitempty"`
+	AutomationRequired        bool                      `json:"automation_required" yaml:"automation-required"`
+	UsageHistoryEnabled       bool                      `json:"usage_history_enabled" yaml:"usage-history-enabled"`
+	Enabled                   bool                      `json:"enabled" yaml:"enabled"`
+	ObservationsEnabled       bool                      `json:"observations_enabled" yaml:"observations-enabled"`
+	Mode                      string                    `json:"mode" yaml:"mode"`
+	Automation                string                    `json:"automation" yaml:"automation"`
+	Fallback                  string                    `json:"fallback" yaml:"fallback"`
+	Affinity                  string                    `json:"affinity" yaml:"affinity"`
+	StateDir                  string                    `json:"state_dir" yaml:"state-dir"`
+	TimeZone                  string                    `json:"time_zone" yaml:"time-zone"`
+	ExpiryGuardSeconds        int                       `json:"expiry_guard_seconds" yaml:"expiry-guard-seconds"`
+	FreshnessSeconds          int                       `json:"freshness_seconds" yaml:"freshness-seconds"`
+	SavedCreditReserve        int                       `json:"saved_credit_reserve" yaml:"saved-credit-reserve"`
+	ReadOnly                  bool                      `json:"read_only" yaml:"read-only"`
+	ForceAccount              string                    `json:"force_account" yaml:"force-account"`
+	CreditTypes               []string                  `json:"credit_types" yaml:"credit-types"`
+	Accounts                  map[string]AccountControl `json:"accounts" yaml:"accounts"`
 }
 type AccountControl struct {
 	Hold           bool    `json:"hold" yaml:"hold"`

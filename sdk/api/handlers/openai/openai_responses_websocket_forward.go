@@ -301,7 +301,7 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
-	if coreauth.IsTerminalAuthError(errMsg.Error) {
+	if coreauth.IsCapacityError(errMsg.Error) || coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
@@ -347,6 +347,9 @@ func writeResponsesWebsocketTerminalError(
 }
 
 func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg != nil && coreauth.IsCapacityError(errMsg.Error) {
+		return false
+	}
 	switch responsesWebsocketErrorStatus(errMsg) {
 	case http.StatusUnauthorized, http.StatusTooManyRequests:
 		return true
@@ -652,10 +655,20 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	var wireHeaders http.Header
+	if errMsg != nil {
+		wireHeaders = errMsg.Addon.Clone()
+		for key, values := range coreauth.SafeResponseHeaders(errMsg.Error) {
+			if wireHeaders == nil {
+				wireHeaders = make(http.Header)
+			}
+			wireHeaders[key] = append([]string(nil), values...)
+		}
+	}
+	if wireHeaders != nil {
 		headers := []byte(`{}`)
 		hasHeaders := false
-		for key, values := range errMsg.Addon {
+		for key, values := range wireHeaders {
 			if len(values) == 0 {
 				continue
 			}

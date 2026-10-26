@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -392,6 +393,12 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 		if hdr := he.Headers(); hdr != nil {
 			addon = hdr.Clone()
 		}
+	}
+	for key, values := range coreauth.SafeResponseHeaders(err) {
+		if addon == nil {
+			addon = make(http.Header)
+		}
+		addon[key] = append([]string(nil), values...)
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }

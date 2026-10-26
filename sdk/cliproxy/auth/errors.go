@@ -340,3 +340,19 @@ func WithCause(err *Error, cause error) error {
 		cause: cause,
 	}
 }
+
+// ErrorCodeCapacity identifies transient Codex admission pressure, never quota.
+const ErrorCodeCapacity = "transient_capacity"
+
+func isCapacityError(err error) bool {
+	var marker interface{ IsCapacity() bool }
+	if errors.As(err, &marker) && marker.IsCapacity() {
+		return true
+	}
+	var typed *Error
+	return errors.As(err, &typed) && typed.Code == ErrorCodeCapacity
+}
+
+// IsCapacityError identifies Codex admission pressure so outer transport handlers
+// cannot add bootstrap retries after the manager has made its replay decision.
+func IsCapacityError(err error) bool { return isCapacityError(err) }

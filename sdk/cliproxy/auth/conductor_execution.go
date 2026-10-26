@@ -120,6 +120,7 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = m.withCapacityRecovery(ctx)
 	ctx = withCodexClientRequestSnapshot(ctx, opts.Headers)
 	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
 	defer policyLease.release()
@@ -239,6 +240,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx = m.withCapacityRecovery(ctx)
 	ctx = withCodexClientRequestSnapshot(ctx, opts.Headers)
 	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
 	ctx = context.WithValue(ctx, policyRequestLeaseKey{}, policyLease)
@@ -613,7 +615,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := runCapacityRecovery(execCtx, m, auth, execReq, execOpts, func(attemptCtx context.Context, selected *Auth) (cliproxyexecutor.Response, error) {
+				auth = selected
+				executionSeq = m.nextExecutionSeq()
+				return executor.Execute(attemptCtx, selected, execReq, execOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -631,7 +637,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = runCapacityRecovery(execCtx, m, auth, execReq, execOpts, func(attemptCtx context.Context, selected *Auth) (cliproxyexecutor.Response, error) {
+						auth = selected
+						executionSeq = m.nextExecutionSeq()
+						return executor.Execute(attemptCtx, selected, execReq, execOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -666,6 +676,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				} else {
 					m.MarkResult(execCtx, result)
 				}
+				if isCapacityError(errExec) || isCapacityFinal(errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
@@ -676,7 +689,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					}
 					continue
 				}
-				if isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
+				if isCapacityError(errExec) || isCapacityFinal(errExec) || isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -1202,7 +1215,21 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+		capacityReq := execReq
+		if provider == "codex" && capacityRecoveryActive(execCtx) {
+			if len(models) > 1 {
+				models = models[:1]
+				pooled = false
+			}
+			if streamExecutionModel != "" {
+				capacityReq.Model = streamExecutionModel
+			} else if len(models) > 0 {
+				capacityReq.Model = models[0]
+			}
+		}
+		streamResult, errStream := runCapacityRecovery(execCtx, m, auth, capacityReq, execOpts, func(attemptCtx context.Context, selected *Auth) (*cliproxyexecutor.StreamResult, error) {
+			return m.executeStreamWithModelPool(attemptCtx, executor, selected, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+		})
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
@@ -1227,6 +1254,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
+			if isCapacityError(errStream) || isCapacityFinal(errStream) {
+				return nil, errStream
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
@@ -1241,7 +1271,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				continue
 			}
-			if isRequestInvalidError(errStream) {
+			if isCapacityError(errStream) || isCapacityFinal(errStream) || isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream

@@ -90,6 +90,7 @@ func buildV8Paths() []configPath {
 		{"codex.stream-bootstrap-timeout", "upstream.codex.stream-bootstrap-timeout"},
 		{"codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
 		{"codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+		{"codex.capacity-retry", "upstream.codex.capacity-retry"},
 		{"codex.response-steering", "upstream.codex.response-steering"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},

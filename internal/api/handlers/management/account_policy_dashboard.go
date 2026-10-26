@@ -104,8 +104,11 @@ func (h *Handler) GetAccountPolicyDashboard(c *gin.Context) {
 	manager, source := h.authManager, h.accountPolicyUsage
 	h.mu.Unlock()
 	accounts := []dashboardActivityAccount{}
+	var capacityStatus *coreauth.CapacityRecoveryStatus
 	activityAvailable := manager != nil
 	if manager != nil {
+		status := manager.CapacityRecoveryStatus()
+		capacityStatus = &status
 		registered := manager.List()
 		ids := make([]string, 0, len(registered))
 		for _, a := range registered {
@@ -135,5 +138,5 @@ func (h *Handler) GetAccountPolicyDashboard(c *gin.Context) {
 		sink = source()
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"sampled_at": now, "activity": gin.H{"available": activityAvailable, "accounts": accounts}, "usage": sink.Dashboard(now, window)})
+	c.JSON(http.StatusOK, gin.H{"sampled_at": now, "capacity_recovery": capacityStatus, "activity": gin.H{"available": activityAvailable, "accounts": accounts}, "usage": sink.Dashboard(now, window)})
 }

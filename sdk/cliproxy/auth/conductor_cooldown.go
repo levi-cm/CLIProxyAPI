@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexcapacity"
 	"io"
 	"net"
 	"net/http"
@@ -875,6 +876,15 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	if !result.Success && result.Provider == "codex" && result.Error != nil && codexcapacity.IsCapacity([]byte(result.Error.Message)) {
+		result.Error = cloneError(result.Error)
+		result.Error.Code = ErrorCodeCapacity
+	}
+	if !result.Success && result.Error != nil && result.Error.Code == ErrorCodeCapacity {
+		m.recordAvailabilityNeutralResult(ctx, result)
+		return
+	}
+
 	defer func() { m.recordPolicyClientResult(result) }()
 	policyQuotaWake := false
 	defer func() { m.observePolicyResult(result, policyQuotaWake) }()
@@ -1925,6 +1935,8 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case isCapacityError(err):
+		resultErr.Code = ErrorCodeCapacity
 	case isExplicitModelNotFoundError(err, ""):
 		if resultErr.Code == "" || resultErr.Code == requestScopedErrorCode {
 			resultErr.Code = "model_not_found"
