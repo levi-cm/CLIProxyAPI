@@ -126,6 +126,9 @@ func (s *EarliestDeadlineSelector) restoreDurableBindings(ctx context.Context, p
 				s.affinity.cache.CompareAndDelete(cacheKey, owner.CredentialID)
 				return nil // Preserve existing migration of self-contained work only.
 			}
+			if errTransport := s.ownerTransportCooldown(auth, model); errTransport != nil {
+				return errTransport
+			}
 			return &Error{Code: "unsafe_affinity_unavailable", Message: "saved conversation owner is unavailable; account-specific continuation cannot move", HTTPStatus: http.StatusConflict}
 		}
 		cached, exists := s.affinity.cache.Get(cacheKey)

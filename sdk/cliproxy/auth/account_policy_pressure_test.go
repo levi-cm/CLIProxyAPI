@@ -219,10 +219,14 @@ func TestManualPressureReservationProtectsStreamAndResetBoundary(t *testing.T) {
 	if err != nil || got.ID != "a" {
 		t.Fatalf("pick: %v %v", got, err)
 	}
-	if release, err := m.AcquirePolicyReset(context.Background(), "a"); err == nil {
-		release()
-		t.Fatal("reset raced reserved selection")
+	releaseActive, err := m.AcquirePolicyReset(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("active selection blocked reset: %v", err)
 	}
+	if m.PolicyRuntime("a").ActiveRequests != 1 {
+		t.Fatal("reset changed active selection lease")
+	}
+	releaseActive()
 	l.streaming = true
 	finishPolicyAttempt(opts)
 	if m.PolicyRuntime("a").ActiveRequests != 1 {

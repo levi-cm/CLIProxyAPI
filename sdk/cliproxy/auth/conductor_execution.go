@@ -177,7 +177,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, publicTransportError(lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -232,7 +232,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			}
 		}
 		lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
-		return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(lastErr)
+		return cliproxyexecutor.Response{}, publicTransportError(unwrapExecutionBoundaryError(lastErr))
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -331,9 +331,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), lastErr), nil
+			return streamErrorResult(bootstrapErr.Headers(), publicTransportError(lastErr)), nil
 		}
-		return nil, lastErr
+		return nil, publicTransportError(lastErr)
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -676,7 +676,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				} else {
 					m.MarkResult(execCtx, result)
 				}
-				if isCapacityError(errExec) || isCapacityFinal(errExec) {
+				if isHTTP2TransportFailure(errExec) || isCapacityError(errExec) || isCapacityFinal(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
@@ -689,7 +689,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					}
 					continue
 				}
-				if isCapacityError(errExec) || isCapacityFinal(errExec) || isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
+				if isHTTP2TransportFailure(errExec) || isCapacityError(errExec) || isCapacityFinal(errExec) || isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec

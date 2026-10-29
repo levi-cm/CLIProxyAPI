@@ -220,6 +220,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		if len(data) == 0 {
+			return resp, errRead
+		}
 	}
 	err = newCodexIncompleteStreamError()
 	return resp, err

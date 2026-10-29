@@ -280,13 +280,21 @@ func TestPolicyCredentialTransportPreservesGlobalProxy(t *testing.T) {
 	}
 }
 
-func TestPolicyResetReservationRejectsBusyAndBlocksNewSelection(t *testing.T) {
+func TestPolicyResetReservationAllowsActiveAndBlocksNewSelection(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
 	publishSelectedAuthMetadata(opts.Metadata, &Auth{ID: "a"})
-	if _, err := m.AcquirePolicyReset(context.Background(), "a"); err == nil {
-		t.Fatal("reset admitted active inference")
+	releaseActive, err := m.AcquirePolicyReset(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("active inference blocked reset: %v", err)
 	}
+	if m.PolicyRuntime("a").ActiveRequests != 1 {
+		t.Fatal("reset disturbed active stream lease")
+	}
+	if _, err = m.AcquirePolicyReset(context.Background(), "a"); err == nil {
+		t.Fatal("concurrent reset admitted")
+	}
+	releaseActive()
 	lease.release()
 	release, err := m.AcquirePolicyReset(context.Background(), "a")
 	if err != nil {

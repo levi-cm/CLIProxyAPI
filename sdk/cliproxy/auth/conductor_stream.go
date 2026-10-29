@@ -178,6 +178,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			}
 			if chunk.Err != nil {
+				chunk.Err = publicTransportError(chunk.Err)
 				if ctx == nil {
 					out <- chunk
 					return true

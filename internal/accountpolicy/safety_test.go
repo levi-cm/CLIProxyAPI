@@ -251,7 +251,7 @@ func TestCooldownRecoveryOnlyWithNewerConfirmedPermission(t *testing.T) {
 	}
 }
 
-func TestBusyLeasePreventsJournalPreparation(t *testing.T) {
+func TestConcurrentResetReservationPreventsJournalPreparation(t *testing.T) {
 	now := testTime()
 	b := testSnapshot("b", 7)
 	expiry := now.Add(time.Hour)
@@ -267,7 +267,7 @@ func TestBusyLeasePreventsJournalPreparation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = s.Redeem(context.Background(), "b", "first"); err == nil || len(s.Operations()) != 0 || len(p.requests) != 0 {
-		t.Fatal("active inference reset lease ignored")
+		t.Fatal("concurrent reset reservation ignored")
 	}
 }
 

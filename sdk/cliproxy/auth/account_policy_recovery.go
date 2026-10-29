@@ -114,6 +114,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		m.mu.Unlock()
 		return nil
 	}
+	recoverySeq := m.currentExecutionSeq()
 	// Upstream ownership is also checked against the current credential metadata,
 	// when the host exposes it. Missing metadata never supplies a different owner.
 	for key, want := range map[string]string{"account_id": before.Identity.AccountID, "workspace_id": before.Identity.WorkspaceID} {
@@ -147,6 +148,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		changed = true
 	}
 	if !changed {
+		m.recordPolicyQuotaRecoveryLocked(id, covered, global, recoverySeq)
 		m.mu.Unlock()
 		return nil
 	}
@@ -193,6 +195,7 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		}
 	}
 	m.auths[id] = auth
+	m.recordPolicyQuotaRecoveryLocked(id, covered, global, recoverySeq)
 	m.mu.Unlock()
 	releaseMutation()
 	supported, epoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
@@ -207,4 +210,35 @@ func (m *Manager) RecoverPolicyQuota(ctx context.Context, before, after accountp
 		m.scheduler.upsertAuth(snapshot)
 	}
 	return nil
+}
+
+// These watermarks are runtime-only: after restart no earlier dispatch survives.
+// Callers hold m.mu and publish only after authoritative recovery has succeeded.
+func (m *Manager) recordPolicyQuotaRecoveryLocked(id string, covered map[string]bool, global bool, seq uint64) {
+	if seq == 0 {
+		return
+	}
+	if m.policyQuotaRecovery == nil {
+		m.policyQuotaRecovery = make(map[string]map[string]uint64)
+	}
+	if m.policyQuotaRecovery[id] == nil {
+		m.policyQuotaRecovery[id] = make(map[string]uint64)
+	}
+	if global {
+		m.policyQuotaRecovery[id][""] = seq
+	}
+	for model := range covered {
+		m.policyQuotaRecovery[id][canonicalModelKey(model)] = seq
+	}
+}
+
+func (m *Manager) resultPredatesQuotaRecoveryLocked(id, model string, seq uint64, credentialScoped bool) bool {
+	if seq == 0 {
+		return false
+	}
+	boundaries := m.policyQuotaRecovery[id]
+	if boundary := boundaries[""]; boundary > 0 && seq <= boundary {
+		return true
+	}
+	return !credentialScoped && model != "" && boundaries[model] > 0 && seq <= boundaries[model]
 }

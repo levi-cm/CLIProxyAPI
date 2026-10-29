@@ -527,7 +527,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	bootstrapEligible := func(err error) bool {
-		if coreauth.IsCapacityError(err) {
+		if coreauth.IsReplayForbiddenError(err) {
 			return false
 		}
 		status := statusFromError(err)

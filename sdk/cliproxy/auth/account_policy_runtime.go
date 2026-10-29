@@ -240,8 +240,8 @@ func (m *Manager) PolicyHasDemand(id string) bool {
 }
 func (m *Manager) PolicyIsIdle(id string) bool { return m.PolicyRuntime(id).ActiveRequests == 0 }
 
-// AcquirePolicyReset atomically reserves an idle credential. New requests wait
-// at selection until the reset's read/write/reconciliation critical section ends.
+// AcquirePolicyReset serializes redemption without interrupting active inference.
+// New selections wait until the reset's read/write/reconciliation section ends.
 func (m *Manager) AcquirePolicyReset(ctx context.Context, id string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -254,8 +254,8 @@ func (m *Manager) AcquirePolicyReset(ctx context.Context, id string) (func(), er
 	}
 	m.policyRuntimeMu.Lock()
 	defer m.policyRuntimeMu.Unlock()
-	if m.policyRuntime[id].ActiveRequests > 0 || m.policyResetReservations[id] != nil {
-		return nil, &accountpolicy.Error{Code: "account_busy", Message: "account has active inference or reset"}
+	if m.policyResetReservations[id] != nil {
+		return nil, &accountpolicy.Error{Code: "account_busy", Message: "account already has a reset in progress"}
 	}
 	if m.policyResetReservations == nil {
 		m.policyResetReservations = make(map[string]chan struct{})

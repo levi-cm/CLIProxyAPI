@@ -503,6 +503,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			if emittedCount == 0 {
+				reporter.PublishFailure(ctx, errScan)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
+				return
+			}
 		}
 		if emittedCount == 0 {
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}

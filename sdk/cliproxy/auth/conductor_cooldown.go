@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"golang.org/x/net/http2"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -941,6 +942,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now = time.Now()
 		responseHeaders := internallogging.GetResponseHeaders(ctx)
 		modelState := existingModelState(auth, modelKey)
+		predatesQuotaRecovery := m.resultPredatesQuotaRecoveryLocked(auth.ID, modelKey, result.ExecutionSeq, result.CredentialScope)
+		staleQuotaFailure := predatesQuotaRecovery && !result.Success && statusCodeFromResult(result.Error) == http.StatusTooManyRequests && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -994,7 +997,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
-		} else {
+		} else if !staleQuotaFailure {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
@@ -1345,7 +1348,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.Generation++
 		auth.UpdatedAt = now
 
-		if !result.SkipQuotaObservation {
+		if !result.SkipQuotaObservation && !predatesQuotaRecovery {
 			policyQuotaBefore := policyQuotaExhausted(auth.Quota)
 			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			policyQuotaWake = !policyQuotaBefore && policyQuotaExhausted(auth.Quota)
@@ -2080,6 +2083,10 @@ func isTransientTransportError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
+	var streamErr http2.StreamError
+	if errors.As(err, &streamErr) {
+		return true
+	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr != nil && (dnsErr.IsTimeout || dnsErr.IsTemporary || dnsErr.Timeout()) {
 		return true
@@ -2155,7 +2162,8 @@ func isTransientTransportMessage(message string) bool {
 		strings.Contains(lower, "connection aborted"),
 		strings.Contains(lower, "use of closed network connection"),
 		strings.Contains(lower, "unexpected eof"),
-		isHTTP2ClosedConnectionMessage(lower):
+		isHTTP2ClosedConnectionMessage(lower),
+		isHTTP2StreamFailureMessage(lower):
 		return true
 	default:
 		return false
@@ -2840,4 +2848,37 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		return quotaBackoffMax, prevLevel
 	}
 	return cooldown, prevLevel + 1
+}
+
+// x/net and net/http emit this same stream-reset shape, including through url.Error.
+// Status-bearing provider errors are excluded by callers before inspecting text.
+func isHTTP2StreamFailureMessage(message string) bool {
+	_, tail, found := strings.Cut(strings.ToLower(message), "stream error: stream id ")
+	if !found {
+		return false
+	}
+	id, rest, found := strings.Cut(tail, "; ")
+	if !found || id == "" {
+		return false
+	}
+	for _, digit := range id {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	code, _, _ := strings.Cut(rest, ";")
+	switch code {
+	case "internal_error", "refused_stream", "cancel", "stream_closed", "protocol_error", "no_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHTTP2TransportFailure(err error) bool {
+	if err == nil || statusCodeFromError(err) != 0 {
+		return false
+	}
+	var streamErr http2.StreamError
+	return errors.As(err, &streamErr) || isHTTP2StreamFailureMessage(err.Error()) || isHTTP2ClosedConnectionMessage(strings.ToLower(err.Error()))
 }

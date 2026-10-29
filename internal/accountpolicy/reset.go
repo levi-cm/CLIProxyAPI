@@ -192,7 +192,7 @@ func (s *Service) redeemSelected(ctx context.Context, id, creditID string, expec
 	if s.opts.AcquireReset != nil {
 		release, errAcquire := s.opts.AcquireReset(ctx, id)
 		if errAcquire != nil {
-			return Operation{}, policyError("account_busy", "active inference prevents reset")
+			return Operation{}, policyError("account_busy", "reset reservation is unavailable")
 		}
 		defer release()
 	}
@@ -310,9 +310,8 @@ func (s *Service) redeemSelected(ctx context.Context, id, creditID string, expec
 			return op, err
 		}
 	}
-	if s.opts.IsIdle == nil || !s.opts.IsIdle(id) || snapshot.ActiveRequests > 0 {
-		return op, policyError("conflict", "account must be idle before reset submission")
-	}
+	// Inference may remain active: account/journal locks and the reset reservation
+	// serialize provider writes without cancelling streams or waiting past expiry.
 	op.State = "submitted"
 	if err = s.saveOperation(op); err != nil {
 		return op, err

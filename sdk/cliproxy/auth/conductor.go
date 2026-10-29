@@ -184,13 +184,16 @@ type Manager struct {
 	syncSchedulerMu           sync.Mutex
 	// executionSeq stamps upstream dispatches with a monotonic sequence used
 	// to reject cooldown clears from executions dispatched before the cooldown.
-	executionSeq       atomic.Uint64
-	structuralEpoch    atomic.Uint64
-	syncedVersion      atomic.Uint64
-	auths              map[string]*Auth
-	authEpochs         map[string]uint64
-	authChangeWatchers map[string]map[chan struct{}]struct{}
-	scheduler          *authScheduler
+	executionSeq    atomic.Uint64
+	structuralEpoch atomic.Uint64
+	syncedVersion   atomic.Uint64
+	auths           map[string]*Auth
+	// policyQuotaRecovery fences quota reports from dispatches before recovery.
+	// Protected by mu; an empty model key denotes credential-wide recovery.
+	policyQuotaRecovery map[string]map[string]uint64
+	authEpochs          map[string]uint64
+	authChangeWatchers  map[string]map[chan struct{}]struct{}
+	scheduler           *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
