@@ -345,6 +345,13 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// Steering carries business input but must not inherit response.create defaults.
 					steerReq := req
 					steerReq.Payload = payload
+					steerOpts := opts
+					steerOpts.OriginalRequest = payload
+					if errExpand := helps.ExpandRecognizedResponsesCompactionCapsules(&steerReq, &steerOpts); errExpand != nil {
+						fail(statusErr{code: http.StatusBadRequest, msg: errExpand.Error()})
+						return
+					}
+					payload = steerReq.Payload
 					if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
 						payload = thinking.StripConfigurationUpdates(payload)
 					}
