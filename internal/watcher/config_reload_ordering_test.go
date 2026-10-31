@@ -180,3 +180,40 @@ func TestReloadConfigIfChangedReloadsAfterWriteBetweenHashAndLoad_Issue6631(t *t
 		t.Fatalf("applied request-retry values = %v, want %v", applied, want)
 	}
 }
+
+func TestReloadConfigKeepsLastGoodStateWhenLoadSeesTruncatedWrite(t *testing.T) {
+	configPath, authDir := newIssue6631ConfigFile(t)
+	if errWrite := writeIssue6631Config(configPath, authDir, 7); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	originalLoad := loadConfigFileFunc
+	t.Cleanup(func() { loadConfigFileFunc = originalLoad })
+	loadConfigFileFunc = func(path string) (*config.Config, error) {
+		// The hash read saw a complete document, then an in-place save
+		// truncated the same inode before the loader's second read.
+		if errWrite := os.WriteFile(path, nil, 0o600); errWrite != nil {
+			return nil, errWrite
+		}
+		return originalLoad(path)
+	}
+	lastGood := &config.Config{RequestRetry: 3, RemoteManagement: config.RemoteManagement{SecretKey: "saved-management-key"}}
+	applied := 0
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		config:         lastGood,
+		reloadCallback: func(*config.Config) { applied++ },
+	}
+	w.ReloadConfigIfChanged()
+	if applied != 0 || w.config != lastGood {
+		t.Fatalf("truncated write replaced the last good configuration: applied=%d config=%+v", applied, w.config)
+	}
+	loadConfigFileFunc = originalLoad
+	if errWrite := writeIssue6631Config(configPath, authDir, 7); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w.ReloadConfigIfChanged()
+	if applied != 1 || w.config.RequestRetry != 7 {
+		t.Fatalf("completed write was not applied: applied=%d retry=%d", applied, w.config.RequestRetry)
+	}
+}

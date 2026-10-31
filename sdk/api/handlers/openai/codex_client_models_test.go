@@ -309,6 +309,7 @@ func (catalogUnsupportedExecutor) SupportsApplyPatch() bool { return false }
 
 func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
+	fixtureModels := make(map[string]bool)
 	registrations := []struct {
 		provider string
 		models   []*registry.ModelInfo
@@ -319,6 +320,9 @@ func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
 		{"catalog-disabled", []*registry.ModelInfo{{ID: "catalog-patch-disabled"}}},
 	}
 	for _, registration := range registrations {
+		for _, model := range registration.models {
+			fixtureModels[model.ID] = true
+		}
 		clientID := "sdk-patch-" + registration.provider
 		modelRegistry.RegisterClient(clientID, registration.provider, registration.models)
 		t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
@@ -350,6 +354,11 @@ func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
 		for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
 			response := handler.codexClientModelsResponse(version)
 			for _, entry := range response["models"].([]map[string]any) {
+				// Other tests can register native models in the shared registry.
+				// This fixture only defines routing expectations for its own models.
+				if !fixtureModels[entry["slug"].(string)] {
+					continue
+				}
 				want := any(nil)
 				if cfg == enabledCfg {
 					switch entry["slug"] {

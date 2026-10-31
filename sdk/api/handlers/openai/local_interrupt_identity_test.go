@@ -4,7 +4,7 @@ import "testing"
 
 func TestLocalInterruptRequiresAnIdentifiedActiveResponse(t *testing.T) {
 	local := newResponsesLocalInterrupt()
-	local.begin()
+	local.begin(false)
 	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown"}`)) {
 		t.Fatal("unidentified response accepted a local interrupt")
 	}
@@ -12,7 +12,7 @@ func TestLocalInterruptRequiresAnIdentifiedActiveResponse(t *testing.T) {
 
 func TestLocalInterruptTracksResponseIdentityAndCompletion(t *testing.T) {
 	local := newResponsesLocalInterrupt()
-	local.begin()
+	local.begin(false)
 	local.observeResponse([]byte(`{"type":"response.created","response":{"id":"first"}}`))
 	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"other"}`)) {
 		t.Fatal("wrong response interrupted active turn")
@@ -26,8 +26,9 @@ func TestLocalInterruptTracksResponseIdentityAndCompletion(t *testing.T) {
 	}
 	select {
 	case <-local.framesChan():
-		t.Fatal("terminal turn retained a pending interrupt")
+		// The claimed frame remains answerable after terminal delivery.
 	default:
+		t.Fatal("terminal delivery silently discarded a claimed interrupt")
 	}
 	local.observeResponse([]byte(`{"type":"response.created","response":{"id":"second"}}`))
 	local.observeResponse([]byte(`{"type":"response.completed","response":{"id":"first"}}`))

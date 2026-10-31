@@ -101,6 +101,12 @@ func (w *Watcher) reloadConfig() bool {
 		log.Errorf("failed to reload config: %v", errLoadConfig)
 		return false
 	}
+	// An in-place save can truncate the file between the hash check and
+	// the loader's read. Never publish defaults from that empty snapshot.
+	if newConfig.SourceHash == config.ComputeSourceHash(nil) {
+		log.Debug("ignoring config truncated during reload")
+		return false
+	}
 
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir

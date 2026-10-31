@@ -1,5 +1,7 @@
 # Upstream #7106 / #7112 backport
 
+This report records the original two-commit candidate and its validation at `614ff727`. Subsequent authorized hardening, fixes for the failures below, and final validation are documented in [Follow-up upstream hardening](upstream-followup-hardening.md).
+
 ## Scope and baseline
 
 This isolated candidate backports only:

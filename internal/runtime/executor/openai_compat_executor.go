@@ -620,7 +620,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			// Without a translator-confirmed terminal state, a clean Responses or Claude EOF
 			// without [DONE] remains a failed stream instead of completing it.
 			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
-				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
+				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]", streamTruncated: true}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				if !helps.RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, &streamUsage, streamErr) {
 					if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
@@ -1158,6 +1158,7 @@ type statusErr struct {
 	msg                string
 	retryAfter         *time.Duration
 	credentialScoped   bool
+	streamTruncated    bool
 }
 
 func (e statusErr) Error() string {
@@ -1172,6 +1173,10 @@ func (e statusErr) IsCapacity() bool           { return e.capacity }
 func (e statusErr) CapacityRetrySafe() bool    { return e.capacityReplaySafe }
 func (e statusErr) RetryDeadline() time.Time   { return e.retryAt }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+
+// IsStreamTruncated marks a locally synthesized failure for an accepted
+// upstream stream that ended without its terminal frame.
+func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
