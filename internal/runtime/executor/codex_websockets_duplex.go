@@ -745,7 +745,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					reporter.EnsurePublished(ctx)
 				}
 			}
-			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
+			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload), Incomplete: eventType == "response.incomplete"}) {
 				return
 			}
 			if establishing {
