@@ -5,6 +5,9 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Deployment
+- After verifying changes and receiving the user's explicit go-ahead, prepare and launch the automatic idle deployment using `ops/idle-deploy/README.md`. Keep the idle, active-request, state-preservation, and rollback safeguards enabled.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
