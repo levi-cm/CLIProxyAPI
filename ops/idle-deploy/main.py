@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 
 from common import ROOT,atomic,digest,inspect,probe,run
 from core import IdleWindow,Cutover,TERMINAL_OUTCOMES,DeploymentBlocked
@@ -107,6 +108,18 @@ def deployment_backend(path,evidence,idle):
     return Backend(path,evidence,idle)
 
 
+def failure_details(error):
+    details={'reason':'unexpected_controller_failure','error_class':type(error).__name__,'at':time.time(),'requires_restage':True}
+    if isinstance(error,DeploymentBlocked):
+        details.update(reason=error.reason,requires_restage=False)
+        details.update(error.details)
+    frames=traceback.extract_tb(error.__traceback__)
+    if frames:
+        frame=frames[-1]
+        details['source']={'file':Path(frame.filename).name,'line':frame.lineno,'function':frame.name}
+    return details
+
+
 def watch_status(idle,evidence,last_block=None,retire_idle_clients=False):
     status={'phase':'waiting_for_drain' if idle.seconds==0 else 'waiting_for_idle',
             'immediate':idle.seconds==0,
@@ -145,13 +158,17 @@ def watch(path,immediate=False):
                     transaction=json.loads(backend.journal.read_text()) if backend.journal.exists() else {}
                     if transaction.get('phase')=='committed':
                         backend.ungate();capture.close();publish(m,'deployment.json',transaction);codex_verify(path,m);return
-                    last_block={'reason':error.reason if isinstance(error,DeploymentBlocked) else 'preflight_failed','error_class':type(error).__name__,'at':time.time()}
-                    if isinstance(error,DeploymentBlocked):last_block.update(error.details)
+                    last_block=failure_details(error)
+                    publish(m,'failure.json',dict(last_block,transaction_phase=transaction.get('phase'),attempt=transaction.get('attempt')))
+                    print(json.dumps({'deployment_blocked':last_block}),flush=True)
+                    if transaction:backend.phase(transaction['phase'],last_failure=last_block)
                     status=watch_status(idle,evidence,last_block,m.get('retire_idle_clients',False));status['phase']='blocked'
                     publish(m,'status.json',status)
                     # If a transaction stopped the original, recovery ended the release.
                     if transaction.get('phase') in ('rolled_back','recovering') or (transaction.get('phase')=='original_retained' and not transaction.get('ungated_at')):
                         publish(m,'deployment.json',transaction);return
+                    if last_block.get('requires_restage'):
+                        status['phase']='restaging_required';publish(m,'status.json',status);return
                     if inspect(m['old_id'])['State']['Pid']!=m['old_pid']:raise RuntimeError('original process changed; restaging required')
                     time.sleep(2);continue
                 capture.close();transaction=json.loads(backend.journal.read_text());publish(m,'deployment.json',transaction)

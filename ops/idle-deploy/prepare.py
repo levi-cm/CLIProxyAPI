@@ -8,7 +8,7 @@ import time
 import uuid
 import socket
 from backend import Backend
-from core import Cutover
+from core import Cutover,IdleWindow
 
 from common import ROOT,LOCKS,atomic,digest,inspect,lock_available,owners,preserve_owners,probe,run,writers
 from backend import create_stopped
@@ -143,6 +143,13 @@ class FixtureBackend(Backend):
         if not self.m.get('fixture_repo') or self.repo==ROOT:raise RuntimeError('fixture worker cannot target production')
         if not inspect(self.m['old_id'])['State']['Running']:raise RuntimeError('fixture original not running')
         writers(self.state,True)
+        if getattr(self,'evidence',None) is not None:
+            run(['nsenter','-t',str(self.m['old_pid']),'-n','/usr/bin/python3',Path(__file__).parent/'main.py','probe','--commit',self.m['old_commit']],timeout=3)
+            after=time.monotonic();deadline=after+3
+            while self.evidence().get('timestamp',0)<after:
+                if time.monotonic()>deadline:raise RuntimeError('fixture capture did not observe the readiness probes')
+                time.sleep(.05)
+            if not self.idle.ready(self.evidence()):raise RuntimeError('readiness probes invalidated the fixture quiet window')
         self.candidate_budget=self.m['fixture_candidate_budget']
         self.redemption=(self.state/'redemption.lock').open('rb')
         import fcntl
@@ -168,22 +175,44 @@ def fixture_worker(path):
     with (path.parent/'worker.lock').open('a+') as worker:
         import fcntl
         fcntl.flock(worker,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if json.loads(path.read_text()).get('retire_idle_clients',False):
-            from maintenance import MaintenanceBackend
-            class FixtureMaintenanceBackend(MaintenanceBackend,FixtureBackend):
-                pass
-            idle=__import__('core').IdleWindow(immediate=True)
-            evidence=lambda:{'healthy':True,'timestamp':time.monotonic(),'last_business':0.,'pending':0}
-            b=FixtureMaintenanceBackend(path,evidence,idle)
-        else:
-            b=FixtureBackend(path)
-        # The forced case must be recovered by the independent watchdog after
-        # killing this process, rather than by an ordinary exception handler.
-        if b.m.get('force_watchdog'):
-            def never_ready():
-                while True:time.sleep(1)
-            b.candidate_ready=never_ready
-        Cutover(b).run()
+        from main import Capture
+        manifest=json.loads(path.read_text());capture=Capture(manifest['old_pid'])
+        try:
+            idle,evidence=fixture_observation(capture)
+            if manifest.get('retire_idle_clients',False):
+                from maintenance import MaintenanceBackend
+                class FixtureMaintenanceBackend(MaintenanceBackend,FixtureBackend):
+                    pass
+                b=FixtureMaintenanceBackend(path,evidence,idle)
+            else:
+                b=FixtureBackend(path,evidence,idle)
+            # A forced start must be recovered by the independent watchdog.
+            if b.m.get('force_watchdog'):
+                def never_ready():
+                    while True:time.sleep(1)
+                b.candidate_ready=never_ready
+            Cutover(b).run()
+        finally:capture.close()
+
+
+def fixture_observation(capture,now=time.monotonic):
+    """Seed only the known isolated fixture's initial quiet interval.
+
+    All subsequent traffic, health, framing, and loss evidence comes from the
+    actual packet observer. New business traffic is never mapped to the baseline.
+    """
+    deadline=now()+3
+    while True:
+        first=capture.read(.1)
+        if first.get('healthy') is True and first.get('pending')==0 and first.get('capture_drops')==0:break
+        if now()>deadline:raise RuntimeError('fixture capture did not become healthy')
+    baseline=first['last_business'];idle=IdleWindow(now=now);idle.started-=301
+    def evidence():
+        raw=capture.read()
+        result=dict(raw)
+        if result.get('last_business')==baseline:result['last_business']=idle.started
+        return result
+    return idle,evidence
 
 
 def full_cycles(directory,fixture,token,image,commit,old_image,old_commit,retire_idle_clients=False):

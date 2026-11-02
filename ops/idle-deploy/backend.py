@@ -100,16 +100,18 @@ class Backend:
         m=self.m;old=inspect(m['old_id']);candidate=inspect(m['candidate_id'])
         if not old['State']['Running'] or old['Name']!='/'+self.service or old['Image']!=m['old_image_id'] or old['State']['Pid']!=m['old_pid']:raise RuntimeError('serving container changed; restaging required')
         if candidate['State']['Running'] or candidate['Image']!=m['candidate_image_id']:raise RuntimeError('candidate identity/state changed')
-        if any(digest(self.repo/n)!=m[n+'_sha256'] for n in ('config.yaml','.env')):raise RuntimeError('configuration changed; restaging required')
-        if digest(self.dir/'rehearsal.json')!=m['rehearsal_sha256'] or time.time()-m['prepared_at']>86400:raise RuntimeError('rehearsal is stale or changed')
-        if any(digest(Path(__file__).parent/n)!=sha for n,sha in m['controller_files'].items()):raise RuntimeError('controller changed; restaging required')
+        if any(digest(self.repo/n)!=m[n+'_sha256'] for n in ('config.yaml','.env')):raise DeploymentBlocked('configuration_changed',requires_restage=True)
+        if digest(self.dir/'rehearsal.json')!=m['rehearsal_sha256']:raise DeploymentBlocked('rehearsal_changed',requires_restage=True)
+        age=time.time()-m['prepared_at']
+        if age>86400:raise DeploymentBlocked('rehearsal_expired',requires_restage=True,age_seconds=int(age))
+        if any(digest(Path(__file__).parent/n)!=sha for n,sha in m['controller_files'].items()):raise DeploymentBlocked('controller_changed',requires_restage=True)
         if not json.loads((self.dir/'rehearsal.json').read_text()).get('complete_cycles'):raise RuntimeError('complete cutover/watchdog rehearsal missing')
         self.candidate_budget=validate_timing(**m['timing'])
         active=activity()
         if active!=0:raise DeploymentBlocked('active_requests',active_requests=active)
         clients=connections(m['old_pid'],m['ports']) if require_no_connections else 0
         if clients:raise DeploymentBlocked('client_connections',client_connections=clients)
-        if self.idle is None or not self.idle.ready(self.evidence()):raise RuntimeError('required observed traffic safety gate not satisfied')
+        if self.idle is None or not self.idle.ready(self.evidence()):raise DeploymentBlocked('traffic_observation')
         probe(m['old_commit']);writers(self.state,True)
         self.redemption=(self.state/'redemption.lock').open('rb')
         try:fcntl.flock(self.redemption,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -146,7 +148,7 @@ class Backend:
     def gate(self):
         self.started=time.monotonic();self.phase('gating',started=self.started)
         self.drain_connection=DrainConnection(self.m['old_pid'])
-        if self.drain_connection.activity()!=0:raise RuntimeError('active requests appeared before admission closed')
+        if self.drain_connection.activity()!=0:raise DeploymentBlocked('active_requests_before_gate')
         self.gates.enable()
 
     def drained_and_quiet(self):
@@ -158,18 +160,18 @@ class Backend:
                 if connections(self.m['old_pid'],self.m['ports'],exclude=control.exclude)==0:
                     # Include the observer's next fresh heartbeat after admission closed.
                     time.sleep(1.1)
-                    if connections(self.m['old_pid'],self.m['ports'],exclude=control.exclude)!=0 or not self.idle.ready(self.evidence()):raise RuntimeError('new traffic appeared during final drain')
-                    if control.activity()!=0:raise RuntimeError('active requests remain during final drain')
+                    if connections(self.m['old_pid'],self.m['ports'],exclude=control.exclude)!=0 or not self.idle.ready(self.evidence()):raise DeploymentBlocked('traffic_during_drain')
+                    if control.activity()!=0:raise DeploymentBlocked('active_requests_during_drain')
                     break
                 time.sleep(.1)
-            else:raise RuntimeError('connections did not drain; original router retained')
+            else:raise DeploymentBlocked('client_connections_during_drain')
         finally:
             control.close();self.drain_connection=None
         # No clients remain and admission is closed, so no new lease can appear.
         # Close our read-only socket too before the original writer may stop.
         while time.monotonic()<deadline:
             if connections(self.m['old_pid'],self.m['ports'])==0:
-                if not self.idle.ready(self.evidence()):raise RuntimeError('traffic observation changed during final drain')
+                if not self.idle.ready(self.evidence()):raise DeploymentBlocked('traffic_during_drain')
                 return
             time.sleep(.05)
         raise RuntimeError('management socket did not drain; original router retained')

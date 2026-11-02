@@ -1,5 +1,8 @@
 # Idle deployment blocker fixes
 
+The later readiness-probe self-trigger and the strengthened capture-backed
+rehearsal are documented in [Automatic deployment self-probe failure](idle-deployment-self-probe-fix.md).
+
 The idle controller previously restarted its quiet timer when a completed health
 probe disconnected with TCP RST. Its preflight also required every TCP client to
 close naturally, so dormant clients could indefinitely prevent deployment despite

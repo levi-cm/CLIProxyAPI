@@ -9,7 +9,7 @@ import time
 
 from backend import Backend
 from common import ROOT,run,inspect
-from core import Cutover,IdleWindow
+from core import Cutover,IdleWindow,DeploymentBlocked
 from main import Capture,codex_verify,publish,release_path
 
 
@@ -23,10 +23,10 @@ class MaintenanceBackend(Backend):
     def drained_and_quiet(self):
         control=self.drain_connection
         if control is None:raise RuntimeError('pre-established management socket is unavailable')
-        if control.activity()!=0:raise RuntimeError('active requests appeared; original router retained')
-        if self.idle is None or not self.idle.ready(self.evidence()):raise RuntimeError('quiet observation changed before idle retirement')
+        if control.activity()!=0:raise DeploymentBlocked('active_requests_before_retirement')
+        if self.idle is None or not self.idle.ready(self.evidence()):raise DeploymentBlocked('traffic_before_retirement')
         self.gates.freeze_idle_clients(control.exclude)
-        if control.activity()!=0:raise RuntimeError('active requests appeared; original router retained')
+        if control.activity()!=0:raise DeploymentBlocked('active_requests_before_retirement')
         server,client=control.exclude
         ports=' or '.join(f'sport = :{port}' for port in self.m['ports'])
         expression=f'( ( {ports} ) and not ( src {server[0]} and sport = :{server[1]} and dst {client[0]} and dport = :{client[1]} ) )'

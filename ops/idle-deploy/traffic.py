@@ -67,7 +67,8 @@ class RequestParser:
         # Query strings do not change the endpoint, but absolute/encoded/odd
         # request targets are deliberately not interpreted as safe monitoring.
         path = target.split(b"?", 1)[0]
-        safe_path = path in (b"/healthz", b"/v1/models", b"/management.html")
+        safe_path = path in (b"/healthz", b"/v1/models", b"/management.html",
+                             b"/v1/account-policy/usage-history/status")
         safe_path = safe_path or path.startswith(b"/v8/management/")
         self.business = not (method in (b"GET", b"HEAD") and safe_path)
         if self.business:
