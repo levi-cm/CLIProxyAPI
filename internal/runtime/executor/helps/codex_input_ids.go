@@ -87,9 +87,10 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 					collisionMapped[collisionKey] = id
 					idStates[id] |= codexInputItemIDPreserved
 				} else {
+					rawNormalizedID := normalizeCodexInputItemIDPrefix(item, originalID)
 					var collisionID string
 					for attempt := 0; ; attempt++ {
-						collisionID = codexInputItemIDWithHashSuffix(id, attempt)
+						collisionID = codexInputItemIDWithHashSuffix(rawNormalizedID, attempt)
 						if idStates[collisionID]&codexInputItemIDOccupied != 0 {
 							continue
 						}
@@ -144,6 +145,14 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 }
 
 func normalizeCodexInputItemID(item gjson.Result, id string) string {
+	normalized := normalizeCodexInputItemIDPrefix(item, id)
+	if len([]rune(normalized)) > codexInputItemIDLimit {
+		return normalized
+	}
+	return sanitizeCodexInputItemIDChars(normalized)
+}
+
+func normalizeCodexInputItemIDPrefix(item gjson.Result, id string) string {
 	var prefix string
 	switch item.Get("type").String() {
 	case "message":
@@ -168,6 +177,22 @@ func normalizeCodexInputItemID(item gjson.Result, id string) string {
 		return id
 	}
 	return prefix + "_" + id
+}
+
+func sanitizeCodexInputItemIDChars(id string) string {
+	if id == "" || isPortableToolCallID(id) {
+		return id
+	}
+	var b strings.Builder
+	b.Grow(len(id))
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {
@@ -209,5 +234,5 @@ func codexInputItemIDWithHashSuffixRunes(id string, runes []rune, attempt int) s
 	if len(runes) < prefixLength {
 		prefixLength = len(runes)
 	}
-	return string(runes[:prefixLength]) + suffix
+	return sanitizeCodexInputItemIDChars(string(runes[:prefixLength])) + suffix
 }
