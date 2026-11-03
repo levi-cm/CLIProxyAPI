@@ -27,8 +27,12 @@ Claude Code: `ANTHROPIC_BASE_URL=http://HOST:8317/claude-code`. It then calls
   ownership/type, the upstream name of compatibility aliases (`MetadataModelID`), then the
   `claude-` name prefix (for Home and third-party providers). Cloaked Anthropic-format IDs
   (`claude-fable-5-dd-...`) are decoded first, and both the suffix-stripped and full suffixed IDs
-  are checked. `auto` is resolved first.
-- Home catalogs are filtered by provider section before formatting.
+  are checked. `auto` is resolved first. Configured alias pools (API-key, OpenAI-compatibility
+  and OAuth aliases mapping one alias to several upstreams) count as Anthropic if any upstream is
+  (`Manager.ConfiguredAliasUpstreamModels`), because the registry keeps only one entry's metadata.
+- Home catalogs are filtered by provider section before formatting. The flag-off exception
+  applies only to responses served in Anthropic format (plain `/v1/models`, not Codex
+  `client_version`, Grok or Gemini catalogs).
 
 ## Known limitations
 

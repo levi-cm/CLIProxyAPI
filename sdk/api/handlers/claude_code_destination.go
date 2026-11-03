@@ -103,6 +103,24 @@ func hasAnthropicModelName(model string) bool {
 	return strings.HasPrefix(name, "claude-") || name == "claude"
 }
 
+// isAnthropicModel extends IsAnthropicModel with configured alias pools, whose upstreams the
+// registry cannot fully represent.
+func (h *BaseAPIHandler) isAnthropicModel(model string) bool {
+	if IsAnthropicModel(model) {
+		return true
+	}
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(model))).ModelName)
+	for _, upstream := range h.AuthManager.ConfiguredAliasUpstreamModels(base) {
+		if IsAnthropicModel(upstream) {
+			return true
+		}
+	}
+	return false
+}
+
 func isAnthropicProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "claude", "anthropic":
@@ -121,7 +139,7 @@ func (h *BaseAPIHandler) rejectDefaultDestinationAnthropic(ctx context.Context, 
 	if c, ok := ctx.Value("gin").(*gin.Context); !ok || c == nil || IsClaudeCodeDestination(ctx) {
 		return nil
 	}
-	if !IsAnthropicModel(modelName) && !isAnthropicProvider(routeDecision.Provider) && !IsAnthropicModel(routeDecision.Model) && !isAnthropicProvider(execOptions.ForcedProvider) {
+	if !h.isAnthropicModel(modelName) && !isAnthropicProvider(routeDecision.Provider) && !h.isAnthropicModel(routeDecision.Model) && !isAnthropicProvider(execOptions.ForcedProvider) {
 		return nil
 	}
 	log.WithField("model", modelName).Info("rejected Anthropic model outside the Claude Code destination")
@@ -148,7 +166,7 @@ func (h *BaseAPIHandler) filterDefaultDestinationModelList(c *gin.Context, sourc
 		kept := make([]string, 0, len(list.Array()))
 		removed := false
 		for _, entry := range list.Array() {
-			if isAnthropicModelListEntry(entry) {
+			if h.isAnthropicModelListEntry(entry) {
 				removed = true
 				continue
 			}
@@ -167,12 +185,12 @@ func (h *BaseAPIHandler) filterDefaultDestinationModelList(c *gin.Context, sourc
 	return body
 }
 
-func isAnthropicModelListEntry(entry gjson.Result) bool {
+func (h *BaseAPIHandler) isAnthropicModelListEntry(entry gjson.Result) bool {
 	if strings.EqualFold(entry.Get("owned_by").String(), "anthropic") {
 		return true
 	}
 	for _, field := range []string{"id", "slug", "name"} {
-		if value := entry.Get(field).String(); value != "" && IsAnthropicModel(value) {
+		if value := entry.Get(field).String(); value != "" && h.isAnthropicModel(value) {
 			return true
 		}
 	}

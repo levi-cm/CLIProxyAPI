@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -238,29 +239,39 @@ func TestDefaultDestinationHomeCodexCatalogOmitsAnthropicModels(t *testing.T) {
 	server.cfg.Home.Enabled = true
 	engine := gin.New()
 	engine.GET("/v1/models", server.unifiedModelsHandler(nil, nil))
+	engine.GET("/v1beta/models", server.geminiModelsHandler(nil))
 	handler := wrapClaudeCodeDestinationHandler(engine)
 	client := newHomeCatalogClient(t, `{"claude":[{"id":"claude-home-test-5-5"},{"id":"home-neutral-alias"}],"codex":[{"id":"gpt-home-test-6-1"}]}`)
 	previousHome := home.Current()
 	home.SetCurrent(client)
 	t.Cleanup(func() { home.SetCurrent(previousHome) })
 
+	anthropic := map[string]string{"Anthropic-Version": "2023-06-01"}
 	for _, test := range []struct {
 		path       string
+		headers    map[string]string
 		wantClaude bool
 	}{
 		{path: "/v1/models?client_version=0.166.0"},
 		{path: "/v1/models"},
 		{path: "/claude-code/v1/models?client_version=0.166.0", wantClaude: true},
+		// The flag-off exception covers only responses actually served in Anthropic format.
+		{path: "/v1/models?client_version=cpa", headers: anthropic},
+		{path: "/v1beta/models", headers: anthropic},
+		{path: "/v1/models", headers: anthropic, wantClaude: true},
 	} {
 		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		for key, value := range test.headers {
+			request.Header.Set(key, value)
+		}
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
 		ids := listedModelIDs(recorder.Body.Bytes())
-		if recorder.Code != http.StatusOK || !containsModel(ids, "gpt-home-test-6-1") {
+		if recorder.Code != http.StatusOK || (!containsModel(ids, "gpt-home-test-6-1") && !containsModel(ids, claudemodels.EnsureClaudeModelIDPrefix("gpt-home-test-6-1"))) {
 			t.Fatalf("%s status = %d ids=%v body=%s", test.path, recorder.Code, ids, recorder.Body.String())
 		}
 		if got := containsModel(ids, "claude-home-test-5-5") || containsModel(ids, "home-neutral-alias"); got != test.wantClaude {
-			t.Fatalf("%s lists Claude = %t, want %t: %v", test.path, got, test.wantClaude, ids)
+			t.Fatalf("%s headers=%v lists Claude = %t, want %t: %v", test.path, test.headers, got, test.wantClaude, ids)
 		}
 	}
 }
@@ -355,4 +366,29 @@ func TestDefaultDestinationAllowsAnthropicModelsWhenNotRestricted(t *testing.T) 
 // asClaudeCodeDestination marks req as received through /claude-code, where every model is listed.
 func asClaudeCodeDestination(req *http.Request) *http.Request {
 	return req.WithContext(handlers.WithClaudeCodeDestination(req.Context()))
+}
+
+func TestDefaultDestinationRejectsAnthropicAliasPools(t *testing.T) {
+	server, _, _ := newDestinationTestServer(t, true)
+	// The registry keeps the first (GPT) entry's metadata; the pool also rotates to Claude.
+	cfg := *server.cfg
+	cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{{
+		Name: "dest-test-pool",
+		Models: []proxyconfig.OpenAICompatibilityModel{
+			{Name: destinationGPTModel, Alias: "dest-test-pool-alias"},
+			{Name: "claude-dest-pool-upstream", Alias: "dest-test-pool-alias"},
+		},
+	}}
+	server.handlers.AuthManager.SetConfig(&cfg)
+	poolID := t.Name() + "-pool"
+	registry.GetGlobalRegistry().RegisterClient(poolID, "dest-test-pool", []*registry.ModelInfo{{ID: "dest-test-pool-alias", MetadataModelID: destinationGPTModel, Object: "model", OwnedBy: "dest-test-pool"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(poolID) })
+
+	rr := serveDestination(t, server, http.MethodPost, "/v1/chat/completions", `{"model":"dest-test-pool-alias","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("alias pool status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	if ids := listedModelIDs(serveDestination(t, server, http.MethodGet, "/v1/models", "", nil).Body.Bytes()); containsModel(ids, "dest-test-pool-alias") || !containsModel(ids, destinationGPTModel) {
+		t.Fatalf("default list = %v, want pool alias hidden and GPT kept", ids)
+	}
 }

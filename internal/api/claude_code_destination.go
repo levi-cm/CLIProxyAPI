@@ -47,7 +47,7 @@ func (s *Server) filterDefaultDestinationHomeEntries(c *gin.Context, entries []h
 	}
 	cfg := s.getConfig()
 	restricted := cfg != nil && cfg.ClaudeCode.RestrictAnthropicModels
-	if !restricted && isAnthropicModelsRequest(c) && !grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
+	if !restricted && isHomeAnthropicFormatModelsRequest(c) {
 		return entries
 	}
 	kept := make([]homeModelEntry, 0, len(entries))
@@ -57,6 +57,18 @@ func (s *Server) filterDefaultDestinationHomeEntries(c *gin.Context, entries []h
 		}
 	}
 	return kept
+}
+
+// isHomeAnthropicFormatModelsRequest mirrors unifiedModelsHandler: only plain /v1/models requests
+// from Anthropic clients are answered in Anthropic format (not Codex, Grok or Gemini catalogs).
+func isHomeAnthropicFormatModelsRequest(c *gin.Context) bool {
+	if _, codexCatalog := c.Request.URL.Query()["client_version"]; codexCatalog {
+		return false
+	}
+	if strings.HasPrefix(c.Request.URL.Path, "/v1beta") || grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
+		return false
+	}
+	return isAnthropicModelsRequest(c)
 }
 
 func isAnthropicHomeEntry(entry homeModelEntry) bool {
