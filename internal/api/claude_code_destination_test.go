@@ -392,3 +392,58 @@ func TestDefaultDestinationRejectsAnthropicAliasPools(t *testing.T) {
 		t.Fatalf("default list = %v, want pool alias hidden and GPT kept", ids)
 	}
 }
+
+func TestDefaultDestinationRejectsNamespacedAndSuffixedAliasPools(t *testing.T) {
+	for _, tt := range []struct {
+		name, prefix, alias, request string
+		force                        bool
+	}{
+		{name: "prefix", prefix: "team", alias: "dest-review-pool", request: "team/dest-review-pool"},
+		{name: "forced prefix", prefix: "team", alias: "dest-review-pool", request: "team/dest-review-pool(high)", force: true},
+		{name: "full suffix", alias: "dest-review-pool(high)", request: "dest-review-pool(high)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _, _ := newDestinationTestServer(t, true)
+			cfg := *server.cfg
+			cfg.ForceModelPrefix = tt.force
+			cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{{Name: "dest-review-provider", Prefix: tt.prefix, APIKeyEntries: []proxyconfig.OpenAICompatibilityAPIKey{{APIKey: "fixture"}}, Models: []proxyconfig.OpenAICompatibilityModel{{Name: destinationGPTModel, Alias: tt.alias}, {Name: "claude-review-upstream", Alias: tt.alias}}}}
+			server.handlers.AuthManager.SetConfig(&cfg)
+			id := t.Name() + "-pool"
+			exec := &destinationExecutor{provider: "openai-compatible-dest-review-provider"}
+			server.handlers.AuthManager.RegisterExecutor(exec)
+			credential := &auth.Auth{ID: id, Provider: exec.provider, Prefix: tt.prefix, Status: auth.StatusActive, Attributes: map[string]string{"api_key": "fixture", "compat_name": "dest-review-provider", "auth_kind": "apikey"}}
+			if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			model := tt.alias
+			if tt.prefix != "" {
+				model = tt.prefix + "/" + model
+			}
+			registry.GetGlobalRegistry().RegisterClient(id, exec.provider, []*registry.ModelInfo{{ID: model, MetadataModelID: tt.alias, Object: "model", OwnedBy: "dest-review-provider"}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			server.handlers.AuthManager.RefreshSchedulerEntry(id)
+			rr := serveDestination(t, server, http.MethodPost, "/v1/chat/completions", `{"model":"`+tt.request+`","messages":[{"role":"user","content":"hi"}]}`, nil)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			ids := listedModelIDs(serveDestination(t, server, http.MethodGet, "/v1/models", "", nil).Body.Bytes())
+			if containsModel(ids, model) {
+				t.Fatalf("pool still listed: %v", ids)
+			}
+			if exec.calls() != 0 {
+				t.Fatal("default destination reached executor")
+			}
+			for i := 0; i < 2; i++ {
+				allowed := serveDestination(t, server, http.MethodPost, "/claude-code/v1/chat/completions", `{"model":"`+tt.request+`","messages":[{"role":"user","content":"hi"}]}`, nil)
+				if allowed.Code != http.StatusOK {
+					t.Fatalf("dedicated destination status=%d body=%s", allowed.Code, allowed.Body.String())
+				}
+			}
+			exec.mu.Lock()
+			defer exec.mu.Unlock()
+			if len(exec.models) != 2 || !strings.HasPrefix(exec.models[1], "claude-review-upstream") {
+				t.Fatalf("actual execution models=%v", exec.models)
+			}
+		})
+	}
+}

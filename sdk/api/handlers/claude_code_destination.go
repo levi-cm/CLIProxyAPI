@@ -112,8 +112,15 @@ func (h *BaseAPIHandler) isAnthropicModel(model string) bool {
 	if h == nil || h.AuthManager == nil {
 		return false
 	}
-	base := strings.TrimSpace(thinking.ParseSuffix(claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(model))).ModelName)
-	for _, upstream := range h.AuthManager.ConfiguredAliasUpstreamModels(base) {
+	full := strings.TrimPrefix(claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(model)), "models/")
+	parsed := thinking.ParseSuffix(full)
+	if parsed.ModelName == "auto" {
+		full = util.ResolveAutoModel(parsed.ModelName)
+		if parsed.HasSuffix {
+			full += "(" + parsed.RawSuffix + ")"
+		}
+	}
+	for _, upstream := range h.AuthManager.ConfiguredAliasUpstreamModels(full) {
 		if IsAnthropicModel(upstream) {
 			return true
 		}
@@ -181,6 +188,24 @@ func (h *BaseAPIHandler) filterDefaultDestinationModelList(c *gin.Context, sourc
 			continue
 		}
 		body = updated
+		// Anthropic catalogs carry cursors outside data; do not retain IDs we removed.
+		if key == "data" {
+			for _, cursor := range []struct {
+				key   string
+				index int
+			}{{"first_id", 0}, {"last_id", len(kept) - 1}} {
+				if !gjson.GetBytes(body, cursor.key).Exists() {
+					continue
+				}
+				id := ""
+				if len(kept) > 0 {
+					id = gjson.Get(kept[cursor.index], "id").String()
+				}
+				if updatedCursor, errSetCursor := sjson.SetBytes(body, cursor.key, id); errSetCursor == nil {
+					body = updatedCursor
+				}
+			}
+		}
 	}
 	return body
 }
