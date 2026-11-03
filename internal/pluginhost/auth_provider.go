@@ -424,6 +424,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		data.Attributes = attributes
 	}
 	preserveFileAuthPriority(&data, auth)
+	preserveAuthDisabledState(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -444,6 +445,15 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	next.CreatedAt = auth.CreatedAt
 	next.UpdatedAt = auth.UpdatedAt
 	return next, true, nil
+}
+
+func preserveAuthDisabledState(data *pluginapi.AuthData, auth *coreauth.Auth) {
+	if data == nil || auth == nil {
+		return
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		data.Disabled = true
+	}
 }
 
 func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
