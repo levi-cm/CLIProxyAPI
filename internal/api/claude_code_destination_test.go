@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -23,6 +24,10 @@ const (
 	// destinationAliasModel has no claude- prefix; it is Anthropic only by registry provider.
 	destinationAliasModel = "dest-test-opus-alias"
 	destinationGPTModel   = "gpt-dest-test-6-1"
+	// destinationSuffixModel is registered only under its full suffixed ID.
+	destinationSuffixModel = "dest-test-suffix-only(8192)"
+	// destinationCompatAlias is a neutral alias of a third-party provider whose upstream model is Claude.
+	destinationCompatAlias = "dest-test-compat-alias"
 )
 
 type destinationExecutor struct {
@@ -83,7 +88,7 @@ func newDestinationTestServer(t *testing.T, restrict bool) (*Server, *destinatio
 		id, provider string
 		models       []string
 	}{
-		{id: t.Name() + "-claude", provider: "claude", models: []string{destinationClaudeModel, destinationAliasModel}},
+		{id: t.Name() + "-claude", provider: "claude", models: []string{destinationClaudeModel, destinationAliasModel, destinationSuffixModel}},
 		{id: t.Name() + "-codex", provider: "codex", models: []string{destinationGPTModel}},
 	} {
 		credential := &auth.Auth{ID: entry.id, Provider: entry.provider, Status: auth.StatusActive, Attributes: map[string]string{"websockets": "true"}}
@@ -98,6 +103,9 @@ func newDestinationTestServer(t *testing.T, restrict bool) (*Server, *destinatio
 		id := entry.id
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 	}
+	compatID := t.Name() + "-compat"
+	registry.GetGlobalRegistry().RegisterClient(compatID, "dest-test-compat", []*registry.ModelInfo{{ID: destinationCompatAlias, MetadataModelID: "anthropic/claude-dest-upstream", Object: "model", OwnedBy: "dest-test-compat"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(compatID) })
 	return server, claudeExec, codexExec
 }
 
@@ -177,10 +185,10 @@ func TestClaudeCodeDestinationServesClaudeAndGPTModels(t *testing.T) {
 	if rr.Code != http.StatusOK || !containsModel(ids, destinationClaudeModel) || !containsModel(ids, destinationGPTModel) {
 		t.Fatalf("/claude-code/v1/models status=%d ids=%v", rr.Code, ids)
 	}
-	// The Anthropic-format list keeps its existing cloaking of non-Claude IDs; all three models must remain.
+	// The Anthropic-format list keeps its existing cloaking of non-Claude IDs; all five models must remain.
 	rr = serveDestination(t, server, http.MethodGet, "/claude-code/v1/models", "", map[string]string{"Anthropic-Version": "2023-06-01"})
 	ids = listedModelIDs(rr.Body.Bytes())
-	if rr.Code != http.StatusOK || !containsModel(ids, destinationClaudeModel) || len(ids) != 3 {
+	if rr.Code != http.StatusOK || !containsModel(ids, destinationClaudeModel) || len(ids) != 5 {
 		t.Fatalf("/claude-code/v1/models Anthropic format status=%d ids=%v", rr.Code, ids)
 	}
 
@@ -198,7 +206,7 @@ func TestDefaultDestinationModelListsOmitAnthropicModels(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s status = %d; body=%s", path, rr.Code, rr.Body.String())
 		}
-		if containsModel(ids, destinationClaudeModel) || containsModel(ids, destinationAliasModel) {
+		if containsModel(ids, destinationClaudeModel) || containsModel(ids, destinationAliasModel) || containsModel(ids, destinationSuffixModel) || containsModel(ids, destinationCompatAlias) {
 			t.Fatalf("%s lists Anthropic models: %v", path, ids)
 		}
 		if path == "/v1/models" && !containsModel(ids, destinationGPTModel) {
@@ -215,8 +223,13 @@ func TestDefaultDestinationModelListsOmitAnthropicModels(t *testing.T) {
 		t.Fatalf("flag off: Anthropic-format list = %v, want Claude models", ids)
 	}
 	setRestrictAnthropicModels(server, true)
-	if ids := listedModelIDs(serveDestination(t, server, http.MethodGet, "/v1/models", "", anthropic).Body.Bytes()); containsModel(ids, destinationClaudeModel) {
-		t.Fatalf("flag on: Anthropic-format list = %v, want no Claude models", ids)
+	ids := listedModelIDs(serveDestination(t, server, http.MethodGet, "/v1/models", "", anthropic).Body.Bytes())
+	if containsModel(ids, destinationClaudeModel) || containsModel(ids, claudemodels.EnsureClaudeModelIDPrefix(destinationAliasModel)) {
+		t.Fatalf("flag on: Anthropic-format list = %v, want no Anthropic models", ids)
+	}
+	// The cloaked GPT entry (claude-fable-5-dd-<reversed>) is not Anthropic and must stay listed.
+	if !containsModel(ids, claudemodels.EnsureClaudeModelIDPrefix(destinationGPTModel)) {
+		t.Fatalf("flag on: Anthropic-format list = %v, want cloaked GPT model", ids)
 	}
 }
 
@@ -226,7 +239,7 @@ func TestDefaultDestinationHomeCodexCatalogOmitsAnthropicModels(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/v1/models", server.unifiedModelsHandler(nil, nil))
 	handler := wrapClaudeCodeDestinationHandler(engine)
-	client := newHomeCatalogClient(t, `{"claude":[{"id":"claude-home-test-5-5"}],"codex":[{"id":"gpt-home-test-6-1"}]}`)
+	client := newHomeCatalogClient(t, `{"claude":[{"id":"claude-home-test-5-5"},{"id":"home-neutral-alias"}],"codex":[{"id":"gpt-home-test-6-1"}]}`)
 	previousHome := home.Current()
 	home.SetCurrent(client)
 	t.Cleanup(func() { home.SetCurrent(previousHome) })
@@ -246,7 +259,7 @@ func TestDefaultDestinationHomeCodexCatalogOmitsAnthropicModels(t *testing.T) {
 		if recorder.Code != http.StatusOK || !containsModel(ids, "gpt-home-test-6-1") {
 			t.Fatalf("%s status = %d ids=%v body=%s", test.path, recorder.Code, ids, recorder.Body.String())
 		}
-		if got := containsModel(ids, "claude-home-test-5-5"); got != test.wantClaude {
+		if got := containsModel(ids, "claude-home-test-5-5") || containsModel(ids, "home-neutral-alias"); got != test.wantClaude {
 			t.Fatalf("%s lists Claude = %t, want %t: %v", test.path, got, test.wantClaude, ids)
 		}
 	}
@@ -255,7 +268,7 @@ func TestDefaultDestinationHomeCodexCatalogOmitsAnthropicModels(t *testing.T) {
 func TestDefaultDestinationRejectsAnthropicModelsWhenRestricted(t *testing.T) {
 	server, claudeExec, codexExec := newDestinationTestServer(t, true)
 
-	for _, model := range []string{destinationClaudeModel, destinationAliasModel, destinationClaudeModel + "(high)"} {
+	for _, model := range []string{destinationClaudeModel, destinationAliasModel, destinationClaudeModel + "(high)", destinationSuffixModel, destinationCompatAlias, claudemodels.EnsureClaudeModelIDPrefix(destinationAliasModel)} {
 		for _, test := range []struct{ path, body string }{
 			{path: "/v1/messages", body: messagesBody(model)},
 			{path: "/v1/messages/count_tokens", body: messagesBody(model)},

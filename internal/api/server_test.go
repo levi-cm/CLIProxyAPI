@@ -3748,7 +3748,7 @@ func TestModelsWithClientVersionHomeSearchToolRouting(t *testing.T) {
 			home.SetCurrent(client)
 			t.Cleanup(func() { home.SetCurrent(previousHome) })
 
-			request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+			request := asClaudeCodeDestination(httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil))
 			request.Header.Set("Authorization", "Bearer test-key")
 			recorder := httptest.NewRecorder()
 			engine.ServeHTTP(recorder, request)

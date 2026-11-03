@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
@@ -34,4 +36,38 @@ func wrapClaudeCodeDestinationHandler(next http.Handler) http.Handler {
 		r.RequestURI = u.RequestURI()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// filterDefaultDestinationHomeEntries drops Home catalog entries from Anthropic provider
+// sections on the default destination, before the section information is lost in formatting.
+// Anthropic-format lists keep them until claude-code.restrict-anthropic-models is enabled.
+func (s *Server) filterDefaultDestinationHomeEntries(c *gin.Context, entries []homeModelEntry) []homeModelEntry {
+	if c == nil || c.Request == nil || handlers.IsClaudeCodeDestination(c.Request.Context()) {
+		return entries
+	}
+	cfg := s.getConfig()
+	restricted := cfg != nil && cfg.ClaudeCode.RestrictAnthropicModels
+	if !restricted && isAnthropicModelsRequest(c) && !grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
+		return entries
+	}
+	kept := make([]homeModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !isAnthropicHomeEntry(entry) {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+func isAnthropicHomeEntry(entry homeModelEntry) bool {
+	if strings.EqualFold(entry.ownedBy, "anthropic") || handlers.IsAnthropicModel(entry.id) {
+		return true
+	}
+	for _, provider := range entry.providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "claude", "anthropic":
+			return true
+		}
+	}
+	return false
 }

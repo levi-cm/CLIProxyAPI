@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -60,25 +61,42 @@ func restrictAnthropicModels(cfg *config.SDKConfig) bool {
 // ownership are authoritative; the claude- name prefix covers models served through other
 // providers or Home, where the local registry does not know the model.
 func IsAnthropicModel(model string) bool {
-	base := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
-	base = strings.TrimPrefix(base, "models/")
+	// Anthropic-format lists cloak other models as claude-fable-5-dd-<reversed>; judge the real ID.
+	full := strings.TrimPrefix(claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(model)), "models/")
+	base := strings.TrimSpace(thinking.ParseSuffix(full).ModelName)
 	if base == "" {
 		return false
 	}
 	if base == "auto" {
 		base = util.ResolveAutoModel(base)
 	}
-	for _, provider := range util.GetProviderName(base) {
+	// Routing falls back to the full suffixed ID when the base is not registered, so check both.
+	for _, id := range []string{base, full} {
+		if isAnthropicRegistryModel(id) {
+			return true
+		}
+	}
+	return hasAnthropicModelName(base)
+}
+
+func isAnthropicRegistryModel(id string) bool {
+	for _, provider := range util.GetProviderName(id) {
 		if isAnthropicProvider(provider) {
 			return true
 		}
 	}
-	if info := registry.GetGlobalRegistry().GetModelInfo(base, ""); info != nil {
-		if strings.EqualFold(info.OwnedBy, "anthropic") || isAnthropicProvider(info.Type) {
-			return true
-		}
+	info := registry.GetGlobalRegistry().GetModelInfo(id, "")
+	if info == nil {
+		return false
 	}
-	name := strings.ToLower(base)
+	return strings.EqualFold(info.OwnedBy, "anthropic") || isAnthropicProvider(info.Type) || hasAnthropicModelName(info.MetadataModelID)
+}
+
+func hasAnthropicModelName(model string) bool {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return false
+	}
 	if idx := strings.LastIndex(name, "/"); idx >= 0 {
 		name = name[idx+1:]
 	}

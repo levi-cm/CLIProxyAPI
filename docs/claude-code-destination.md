@@ -24,8 +24,21 @@ Claude Code: `ANTHROPIC_BASE_URL=http://HOST:8317/claude-code`. It then calls
     plugin-routed requests) rejects Anthropic models with HTTP 403
     `Anthropic models are only available via the Claude Code endpoint` when restricted.
 - Anthropic models are identified by registry provider (`claude`/`anthropic`), registry
-  ownership/type, then the `claude-` name prefix (for Home and third-party providers).
-  Thinking suffixes and `auto` are resolved first.
+  ownership/type, the upstream name of compatibility aliases (`MetadataModelID`), then the
+  `claude-` name prefix (for Home and third-party providers). Cloaked Anthropic-format IDs
+  (`claude-fable-5-dd-...`) are decoded first, and both the suffix-stripped and full suffixed IDs
+  are checked. `auto` is resolved first.
+- Home catalogs are filtered by provider section before formatting.
+
+## Known limitations
+
+- Home mode: the execution guard sees only the public model name. If CLIProxyAPIHome maps a
+  neutral alias (no `claude-` prefix) to a Claude upstream, that request is not rejected.
+  Home is disabled in production.
+- A trailing-slash redirect (e.g. `/claude-code/v1/models/`) points at the unprefixed path,
+  because Gin routes the stripped URL. Claude Code does not send trailing slashes.
+- The config watcher follows the file path. Edit `config.yaml` in place (it is a single-file
+  bind mount); editors that replace the file (`sed -i`) break the watch and the mount.
 
 ## Restriction flag
 

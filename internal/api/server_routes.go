@@ -1062,7 +1062,7 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 		return nil, false
 	}
 
-	return entries, true
+	return s.filterDefaultDestinationHomeEntries(c, entries), true
 }
 
 func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
