@@ -178,6 +178,10 @@ func newApplyPatchTestGateway(t *testing.T, exec cliproxyauth.ProviderExecutor, 
 		},
 	}, manager)
 	router := gin.New()
+	// Claude-backed routes are listed only on the Claude Code destination.
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(handlers.WithClaudeCodeDestination(c.Request.Context()))
+	})
 	router.POST("/v1/responses", openai.NewOpenAIResponsesAPIHandler(base).Responses)
 	router.GET("/v1/models", openai.NewOpenAIAPIHandler(base).OpenAIModels)
 	server := httptest.NewServer(router)

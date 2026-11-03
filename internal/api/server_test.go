@@ -2040,7 +2040,7 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 
 	// Plain request (no Anthropic-Version, non-claude-cli User-Agent) -> OpenAI format, unaffected.
 	t.Run("plain request stays on openai format", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req := asClaudeCodeDestination(httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 		req.Header.Set("Authorization", "Bearer test-key")
 		req.Header.Set("User-Agent", "Mozilla/5.0")
 
@@ -3365,7 +3365,7 @@ func TestModelsForCPAClientSerializesWebSearchCapabilities(t *testing.T) {
 	})
 
 	server := newTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+	req := asClaudeCodeDestination(httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil))
 	req.Header.Set("Authorization", "Bearer test-key")
 	recorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(recorder, req)

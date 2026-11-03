@@ -33,7 +33,7 @@ func TestModelsDispatchByGrokShellUserAgent(t *testing.T) {
 		"grok-pager/0.2.119 grok-shell/0.2.119 (macos; aarch64)",
 	} {
 		t.Run(userAgent, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "https://proxy.example.test/v1/models?client_version", nil)
+			req := asClaudeCodeDestination(httptest.NewRequest(http.MethodGet, "https://proxy.example.test/v1/models?client_version", nil))
 			req.Header.Set("Authorization", "Bearer test-key")
 			req.Header.Set("User-Agent", userAgent)
 			recorder := httptest.NewRecorder()
