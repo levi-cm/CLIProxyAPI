@@ -818,6 +818,7 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 	}
 	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
 	if statusCode == http.StatusTooManyRequests {
+		err.msg = string(helps.DescribeClaudeRateLimitError(headers, body))
 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
 			return claudeRateLimitError{statusErr: err, credentialScoped: true}
 		}
