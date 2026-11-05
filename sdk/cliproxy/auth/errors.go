@@ -364,3 +364,31 @@ func isCapacityError(err error) bool {
 // IsCapacityError identifies Codex admission pressure so outer transport handlers
 // cannot add bootstrap retries after the manager has made its replay decision.
 func IsCapacityError(err error) bool { return isCapacityError(err) }
+
+// HasTrustedRetryDeadline reports whether err carries a retry deadline derived
+// by the proxy itself, so a raw upstream Retry-After passthrough must not
+// override it on the wire.
+func HasTrustedRetryDeadline(err error) bool {
+	if err == nil {
+		return false
+	}
+	// An exhausted Home round owns the aggregate decision even when its
+	// RetryAfter is nil (immediate / no hint), so raw passthrough stays
+	// suppressed for the whole round.
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) && exhausted != nil {
+		return true
+	}
+	var unavailable *authUnavailableError
+	if errors.As(err, &unavailable) && unavailable != nil && unavailable.retryAfter > 0 {
+		return true
+	}
+	var cooldown *modelCooldownError
+	if errors.As(err, &cooldown) && cooldown != nil && cooldown.resetIn > 0 {
+		return true
+	}
+	// Every remaining safe-header carrier (capacity deadlines, Home busy,
+	// Home dispatch cooldown, plugin-provided safe headers) outranks a raw
+	// passthrough Retry-After as well.
+	return SafeResponseHeaders(err).Get("Retry-After") != ""
+}

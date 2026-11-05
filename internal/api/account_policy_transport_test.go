@@ -236,7 +236,14 @@ func newPolicyTransportHarness(t *testing.T, fixture *policyTransportFixture) *p
 	selector.SetIdleCheck(manager.PolicyIsIdle)
 	manager.SetSelector(selector)
 	t.Cleanup(selector.Stop)
-	downstream := httptest.NewUnstartedServer(server.engine)
+	// Hijacked websocket handlers outlive httptest.Server.Close. Track them so
+	// error-only request logs finish before the temporary auth directory is removed.
+	var inflight sync.WaitGroup
+	downstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inflight.Add(1)
+		defer inflight.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
 	if address := os.Getenv("ACCOUNT_POLICY_TEST_LISTEN"); address != "" {
 		host, _, errSplit := net.SplitHostPort(address)
 		if errSplit != nil {
@@ -255,6 +262,18 @@ func newPolicyTransportHarness(t *testing.T, fixture *policyTransportFixture) *p
 		downstream.Listener = listener
 	}
 	downstream.Start()
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			inflight.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Log("timed out waiting for in-flight downstream handlers")
+		}
+	})
 	t.Cleanup(downstream.Close)
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)

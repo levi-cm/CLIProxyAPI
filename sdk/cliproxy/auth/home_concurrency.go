@@ -328,6 +328,14 @@ func SafeResponseHeaders(err error) http.Header {
 	if errors.As(err, &unavailable) && unavailable != nil {
 		return unavailable.Headers()
 	}
+	// A terminal 429 carrying the upstream's own reset hint (quota body reset
+	// or Retry-After parsed by the executor) is forwarded as a bounded
+	// Retry-After instead of a raw header passthrough.
+	if statusCodeFromError(err) == http.StatusTooManyRequests {
+		if hint := retryAfterFromError(err); hint != nil && *hint > 0 {
+			return safeRetryAfterHeader(*hint)
+		}
+	}
 	return nil
 }
 

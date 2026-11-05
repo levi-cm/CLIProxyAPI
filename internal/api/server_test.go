@@ -622,6 +622,33 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	return newTestServerWithConfig(t, cfg, opts...)
 }
 
+// newTestHTTPServer serves handler and, at cleanup, waits for hijacked websocket
+// handlers that outlive httptest.Server.Close, so error-only request logs finish
+// before the test's temporary auth directory is removed.
+func newTestHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	var inflight sync.WaitGroup
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inflight.Add(1)
+		defer inflight.Done()
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		srv.Close()
+		done := make(chan struct{})
+		go func() {
+			inflight.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Log("timed out waiting for in-flight test server handlers")
+		}
+	})
+	return srv
+}
+
 func newTestServerWithConfig(t *testing.T, cfg *proxyconfig.Config, opts ...ServerOption) *Server {
 	t.Helper()
 
@@ -3921,7 +3948,7 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
+	httpServer := newTestHTTPServer(t, server.engine)
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"

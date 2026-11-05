@@ -305,7 +305,7 @@ func TestDefaultDestinationRejectsAnthropicModelsWhenRestricted(t *testing.T) {
 		t.Fatalf("GPT chat completions status = %d calls = %d; body=%s", rr.Code, codexExec.calls(), rr.Body.String())
 	}
 
-	httpServer := httptest.NewServer(server.Handler())
+	httpServer := newTestHTTPServer(t, server.Handler())
 	defer httpServer.Close()
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
 	for _, test := range []struct {
