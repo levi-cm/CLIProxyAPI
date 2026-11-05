@@ -16,6 +16,7 @@ import (
 	"time"
 
 	vertexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
@@ -843,13 +844,41 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var pendingFilterLine []byte
+		var pendingFilterMsg string
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
+		emitTranslatedLine := func(line []byte) bool {
+			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
+			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
+				return statusErr{code: http.StatusBadGateway, msg: msg}
+			})
+			for i := range lines {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+						terminalDelivered = true
+					}
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
+			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
+				flushed := pendingFilterLine
+				pendingFilterLine = nil
+				pendingFilterMsg = ""
+				if !emitTranslatedLine(flushed) {
+					return
+				}
+			}
 			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
 			}
@@ -868,24 +897,33 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 				}
 				return
 			}
-			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
-			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
-				return statusErr{code: http.StatusBadGateway, msg: msg}
-			})
-			for i := range lines {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
-						terminalDelivered = true
-					}
-				case <-ctx.Done():
-					return
-				}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				pendingFilterLine = bytes.Clone(line)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+			if !emitTranslatedLine(line) {
 				return
 			}
+		}
+		if pendingFilterMsg != "" && scanner.Err() == nil && !sawFinishReason {
+			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+			if !streamUsage.PublishFailure(ctx, reporter, filterErr) {
+				reporter.PublishFailure(ctx, filterErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: filterErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if len(pendingFilterLine) > 0 {
+			if !emitTranslatedLine(pendingFilterLine) {
+				return
+			}
+			pendingFilterLine = nil
+			pendingFilterMsg = ""
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
@@ -1064,13 +1102,41 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var pendingFilterLine []byte
+		var pendingFilterMsg string
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
+		emitTranslatedLine := func(line []byte) bool {
+			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
+			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
+				return statusErr{code: http.StatusBadGateway, msg: msg}
+			})
+			for i := range lines {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
+						terminalDelivered = true
+					}
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
+			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
+				flushed := pendingFilterLine
+				pendingFilterLine = nil
+				pendingFilterMsg = ""
+				if !emitTranslatedLine(flushed) {
+					return
+				}
+			}
 			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
 			}
@@ -1089,24 +1155,33 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 				}
 				return
 			}
-			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
-			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
-				return statusErr{code: http.StatusBadGateway, msg: msg}
-			})
-			for i := range lines {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
-						terminalDelivered = true
-					}
-				case <-ctx.Done():
-					return
-				}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				pendingFilterLine = bytes.Clone(line)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+			if !emitTranslatedLine(line) {
 				return
 			}
+		}
+		if pendingFilterMsg != "" && scanner.Err() == nil && !sawFinishReason {
+			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+			if !streamUsage.PublishFailure(ctx, reporter, filterErr) {
+				reporter.PublishFailure(ctx, filterErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: filterErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if len(pendingFilterLine) > 0 {
+			if !emitTranslatedLine(pendingFilterLine) {
+				return
+			}
+			pendingFilterLine = nil
+			pendingFilterMsg = ""
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return

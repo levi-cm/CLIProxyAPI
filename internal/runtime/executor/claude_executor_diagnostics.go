@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
@@ -135,8 +136,12 @@ func observeClaudeSSEEvent(rawEvent []byte, messageID *string, completed *bool, 
 		return
 	}
 	observeClaudeStreamJSONPayload(joined, true, messageID, completed)
-	if streamErr != nil && *streamErr == nil && gjson.ParseBytes(joined).Get("type").String() == "error" {
-		*streamErr = statusErr{code: 502, msg: string(joined)}
+	if streamErr != nil && *streamErr == nil {
+		if gjson.ParseBytes(joined).Get("type").String() == "error" {
+			*streamErr = statusErr{code: 502, msg: string(joined)}
+		} else if refusalMsg, blocked := clienterror.ClaudePolicyRefusalMessage(joined); blocked {
+			*streamErr = statusErr{code: 400, msg: refusalMsg}
+		}
 	}
 }
 

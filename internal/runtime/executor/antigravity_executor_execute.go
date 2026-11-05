@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -428,6 +429,18 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		}()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
+		var pendingFilterPayload []byte
+		var pendingFilterMsg string
+		emitPayload := func(p []byte) {
+			// Filter usage metadata for all models after block classification
+			// so only the terminal chunk retains usage statistics.
+			p = helps.JSONPayload(helps.FilterSSEUsageMetadata(append([]byte("data: "), p...)))
+			if len(p) == 0 {
+				return
+			}
+			reporter.ObserveResponseModel(p)
+			out <- cliproxyexecutor.StreamChunk{Payload: p}
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -435,26 +448,38 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				replayAccumulator.ObserveSSELine(line)
 			}
 
-			// Filter usage metadata for all models
-			// Only retain usage statistics in the terminal chunk
-			line = helps.FilterSSEUsageMetadata(line)
-
 			payload := helps.JSONPayload(line)
 			if payload == nil {
 				continue
 			}
-			reporter.ObserveResponseModel(payload)
-
-			out <- cliproxyexecutor.StreamChunk{Payload: payload}
+			if len(pendingFilterPayload) > 0 {
+				flushed := pendingFilterPayload
+				pendingFilterPayload = nil
+				pendingFilterMsg = ""
+				emitPayload(flushed)
+			}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(payload); blocked {
+				pendingFilterPayload = bytes.Clone(payload)
+				pendingFilterMsg = filterMsg
+				continue
+			}
+			emitPayload(payload)
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
-		} else {
-			if replayAccumulator != nil {
-				replayAccumulator.Commit(ctx)
-			}
+			return
+		}
+		if pendingFilterMsg != "" {
+			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+			reporter.PublishFailure(ctx, filterErr)
+			out <- cliproxyexecutor.StreamChunk{Err: filterErr}
+			return
+		}
+		if replayAccumulator != nil {
+			replayAccumulator.Commit(ctx)
 		}
 	}(httpResp)
 
