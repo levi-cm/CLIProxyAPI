@@ -97,7 +97,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				case "function":
 					functionToolNames[tool.Get("function.name").String()] = struct{}{}
 				case "custom":
-					customToolNames[tool.Get("name").String()] = struct{}{}
+					customToolNames[customToolDefinition(tool).Get("name").String()] = struct{}{}
 				}
 			}
 			// A normalized function envelope cannot disambiguate declarations that share a name.
@@ -456,8 +456,14 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			t := arr[i]
 			toolType := t.Get("type").String()
 			if toolType == "custom" {
-				item := []byte(t.Raw)
-				name := t.Get("name").String()
+				definition := customToolDefinition(t)
+				item := []byte(definition.Raw)
+				_ = itemDoc.Set("type", "custom")
+				if grammar := definition.Get("format.grammar"); definition.Get("format.type").String() == "grammar" && grammar.IsObject() {
+					item, _ = sjson.SetRawBytes(item, "format", []byte(grammar.Raw))
+					item, _ = sjson.SetBytes(item, "format.type", "grammar")
+				}
+				name := definition.Get("name").String()
 				if short, ok := originalToolNameMap[name]; ok {
 					name = short
 				} else {
@@ -519,7 +525,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
 			if tcType == "function" || tcType == "custom" {
-				name := tc.Get("name").String()
+				name := customToolDefinition(tc).Get("name").String()
 				if tcType == "function" {
 					name = tc.Get("function.name").String()
 					if _, custom := customToolNames[name]; custom {
@@ -714,6 +720,14 @@ func shortenNameIfNeeded(name string) string {
 	return sanitized[:limit]
 }
 
+// customToolDefinition accepts both Chat Completions and Responses declarations.
+func customToolDefinition(tool gjson.Result) gjson.Result {
+	if custom := tool.Get("custom"); custom.IsObject() {
+		return custom
+	}
+	return tool
+}
+
 // collectRequestToolNames extracts unique tool names across tools declarations,
 // tool_choice, and historical assistant tool_calls in a deterministic order.
 func collectRequestToolNames(rawJSON []byte) []string {
@@ -737,7 +751,7 @@ func collectRequestToolNames(rawJSON []byte) []string {
 			case "function":
 				addName(tool.Get("function.name").String())
 			case "custom":
-				addName(tool.Get("name").String())
+				addName(customToolDefinition(tool).Get("name").String())
 			}
 		}
 	}
@@ -753,7 +767,7 @@ func collectRequestToolNames(rawJSON []byte) []string {
 			}
 			addName(fnName)
 		case "custom":
-			addName(tc.Get("name").String())
+			addName(customToolDefinition(tc).Get("name").String())
 		}
 	}
 

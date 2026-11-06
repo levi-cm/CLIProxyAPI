@@ -59,11 +59,36 @@ func (m *codexChatToolMetadata) resolve(original []byte) {
 		}
 	}
 	m.customPatchWinners = map[string]bool{}
-	for name, winner := range util.CollectResponsesToolWinners(gjson.ParseBytes(original)) {
+	for name, winner := range collectChatToolWinners(original) {
 		if applypatch.IsCustomTool(winner.Tool) {
 			m.customPatchWinners[name] = true
 		}
 	}
+}
+
+// collectChatToolWinners normalizes nested Chat custom declarations for Responses metadata.
+func collectChatToolWinners(original []byte) map[string]util.ResponsesToolDescriptor {
+	root := util.ParseGJSONBytesNoCopy(original)
+	var normalized []byte
+	for i, tool := range root.Get("tools").Array() {
+		if tool.Get("type").String() != "custom" {
+			continue
+		}
+		definition := customToolDefinition(tool)
+		if definition.Raw == tool.Raw {
+			continue
+		}
+		if normalized == nil {
+			normalized = original
+		}
+		path := "tools." + strconv.Itoa(i)
+		normalized, _ = sjson.SetRawBytes(normalized, path, []byte(definition.Raw))
+		normalized, _ = sjson.SetBytes(normalized, path+".type", "custom")
+	}
+	if normalized != nil {
+		return util.CollectResponsesToolWinners(gjson.ParseBytes(normalized))
+	}
+	return util.CollectResponsesToolWinners(root)
 }
 
 // restoreToolName maps a shortened upstream tool name back to the
@@ -885,7 +910,7 @@ func isOriginalCustomPatch(original []byte, item gjson.Result) bool {
 			return false
 		}
 	}
-	winner, ok := util.CollectResponsesToolWinners(gjson.ParseBytes(original))[name]
+	winner, ok := collectChatToolWinners(original)[name]
 	return ok && applypatch.IsCustomTool(winner.Tool)
 }
 
