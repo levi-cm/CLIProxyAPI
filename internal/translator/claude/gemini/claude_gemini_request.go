@@ -241,25 +241,40 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Contents conversion to messages with proper role mapping
 	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		previousRole := ""
 		contents.ForEach(func(_, content gjson.Result) bool {
-			role := content.Get("role").String()
-			// Map Gemini roles to Claude Code roles
-			if role == "model" {
-				role = "assistant"
-			}
-
-			if role == "function" {
-				role = "user"
-			}
-
-			if role == "tool" {
+			parts := content.Get("parts")
+			role := translatorcommon.NormalizeGeminiTurnRole(content.Get("role").String(), parts, previousRole)
+			// Some Gemini clients label tool results as model turns; Claude requires user turns.
+			hasFunctionResponse := translatorcommon.GeminiPartsHaveFunctionResponse(parts)
+			if hasFunctionResponse && !translatorcommon.GeminiPartsHaveFunctionCall(parts) {
 				role = "user"
 			}
 
 			contentItems := make([][]byte, 0, 4)
 			// Counts what this turn sends; whitespace-only text is forwarded but never sendable.
 			sendable := 0
-			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+			flushContent := func() {
+				if role != "assistant" {
+					drops.EndTurn(sendable)
+				}
+				if len(contentItems) > 0 {
+					msg := []byte(`{"role":"","content":[]}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
+					msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+					messageAccumulator.Append(msg)
+				}
+				contentItems = contentItems[:0]
+				sendable = 0
+			}
+			// Split mixed function calls and results without losing their order or IDs.
+			switchRole := func(nextRole string) {
+				if role != nextRole {
+					flushContent()
+					role = nextRole
+				}
+			}
+			if parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
 					if translatorcommon.IsGeminiThoughtPart(part) {
 						return true
@@ -277,7 +292,8 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Function call (from model/assistant) conversion to tool use
-					if fc := part.Get("functionCall"); fc.Exists() && role == "assistant" {
+					if fc := translatorcommon.GeminiPartFunctionCall(part); fc.Exists() && (role == "assistant" || hasFunctionResponse) {
+						switchRole("assistant")
 						toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 
 						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
@@ -301,7 +317,8 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Function response (from user) conversion to tool result
-					if fr := part.Get("functionResponse"); fr.Exists() {
+					if fr := translatorcommon.GeminiPartFunctionResponse(part); fr.Exists() {
+						switchRole("user")
 						toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 
 						// Attach the oldest queued tool_id to pair the response
@@ -359,22 +376,15 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					return true
 				})
 			}
-			if role != "assistant" {
-				drops.EndTurn(sendable)
-			}
-
-			// Only add message if it has content.
-			if len(contentItems) > 0 {
-				msg := []byte(`{"role":"","content":[]}`)
-				msg, _ = sjson.SetBytes(msg, "role", role)
-				msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
-				messageAccumulator.Append(msg)
-			}
+			flushContent()
+			previousRole = role
 
 			return true
 		})
 	}
-	out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
+	messages := messageAccumulator.Messages()
+	orderGeminiClaudeToolResults(messages)
+	out = translatorcommon.SetRawArrayItems(out, "messages", messages)
 
 	// Tools mapping: Gemini functionDeclarations -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
@@ -425,6 +435,32 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "gemini", modelName), drops.Err()
+}
+
+// orderGeminiClaudeToolResults keeps tool results before other user content,
+// including when adjacent Gemini user turns were merged into one Claude turn.
+func orderGeminiClaudeToolResults(messages [][]byte) {
+	for i, message := range messages {
+		root := util.ParseGJSONBytesNoCopy(message)
+		if root.Get("role").String() != "user" {
+			continue
+		}
+		var results, other [][]byte
+		hasOther, needsReorder := false, false
+		root.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "tool_result" {
+				results = append(results, []byte(part.Raw))
+				needsReorder = needsReorder || hasOther
+			} else {
+				other = append(other, []byte(part.Raw))
+				hasOther = true
+			}
+			return true
+		})
+		if needsReorder {
+			messages[i], _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(append(results, other...)))
+		}
+	}
 }
 
 func normalizeClaudeToolSchema(parameters gjson.Result) []byte {

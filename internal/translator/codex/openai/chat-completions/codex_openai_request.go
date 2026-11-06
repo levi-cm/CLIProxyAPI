@@ -458,7 +458,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			if toolType == "custom" {
 				definition := customToolDefinition(t)
 				item := []byte(definition.Raw)
-				_ = itemDoc.Set("type", "custom")
+				item, _ = sjson.SetBytes(item, "type", "custom")
 				if grammar := definition.Get("format.grammar"); definition.Get("format.type").String() == "grammar" && grammar.IsObject() {
 					item, _ = sjson.SetRawBytes(item, "format", []byte(grammar.Raw))
 					item, _ = sjson.SetBytes(item, "format.type", "grammar")
