@@ -88,6 +88,7 @@ All Go commands use `scripts/go-limited.sh` with the project toolchain
 | Python: `companion` | Passed, 10 tests (1 skipped) |
 | Python: `ops/idle-deploy` controller | Passed, 88 tests |
 | Server build (`cmd/server`) | Passed; verification binary removed (`build.log`) |
+| Immutable image | `cli-proxyapi-fork:selective-7256-7271-79501cba`, `sha256:9ed6580849d73bbc8fec413c3bf8877d8bdd0d9f797c721b85c82eaaade57255`, built from `79501cba` with matching `COMMIT` build argument and revision label (`docker-build.log`) |
 | `gofmt`, `git diff --check`, conflict markers, moego references | Clean |
 
 Focused regressions exercised during integration: websocket 429 failover and
@@ -100,8 +101,55 @@ wire and fallback fixtures.
 
 ## Independent verification
 
-RESULT_VERIFICATION
+An independent read-only review agent compared every requested upstream
+commit hunk by hunk against the candidate (normalizing the JSON-library
+translation), checked payload-rule ordering at every compaction insertion
+point, confirmed no changes under the account-policy, lease, binding,
+journal, configuration or deployment-controller paths, re-ran 15 affected
+packages (all passing) and `go vet`, and verified the recorded logs.
+Verdict: approved, no blocking findings. Non-blocking notes:
+
+- The new terminal-429 `Retry-After` is derived from the executor's parsed
+  reset hint and is not capped, matching upstream's trusted annotation; a
+  usage-limit reset far in the future surfaces as a large value.
+- Websocket error-frame header precedence keeps the fork's rule (safe headers
+  override passthrough headers on collision); the only key that can collide
+  today is a cooldown `Content-Type`, so there is no practical divergence.
+- Expect more `error-*` request-log files for terminal upstream websocket
+  failures, as in upstream.
 
 ## Deployment
 
-RESULT_DEPLOYMENT
+The existing idle-deploy controller (`ops/idle-deploy`, byte-identical to the
+checkout that performed the previous release) was used from this worktree.
+No new deployment process was introduced.
+
+- Candidate: `cli-proxyapi-fork:selective-7256-7271-79501cba`
+  (`sha256:9ed6580849d73bbc8fec413c3bf8877d8bdd0d9f797c721b85c82eaaade57255`),
+  source commit `79501cba`; serving revision at preparation `bc4ad493`.
+- Prepared release `204dec2c7f` (manifest under
+  `/DATA/AppData/CLIProxyAPI/.tmp/idle-deploy/204dec2c7f/`). Isolated
+  rehearsals on copied state: candidate start 12.6 s, rollback start 3.5 s,
+  3,135 owners preserved on both paths, mandatory refills and history health
+  confirmed, complete fixture interruption 5.0 s for the success cycle and
+  10.6 s for the forced watchdog rollback (5.4 s recovery), all inside the
+  40-second budget. A genuine pre-deployment encrypted continuation proof was
+  recorded.
+- Dormant-client retirement is pinned, as in the two previous approved
+  releases; the five-minute quiet window, zero authoritative active requests,
+  frozen admission, writer exclusion, mandatory automatic resets and the
+  independent rollback watchdog remain required.
+- Watcher `cliproxy-idle-deploy-204dec2c7f` was armed on 2026-11-06 at
+  14:12 CET without `--now`. Initial status: `waiting_for_idle`, capture
+  healthy, no pending parser state, no capture drops. Production was still on
+  its original container and image at that check.
+
+Public status and results are published under
+`/DATA/AppData/CLIProxyAPI/output/verification/idle-deploy/204dec2c7f/`
+(`status.json`, then `deployment.json`, `live-verification.json`,
+`verification-status.json` and `codex-verdict.json` after the cutover).
+`operator-approval.json` records the authorization for this release. The
+controller verifies interfaces, a genuine encrypted continuation on its
+original owner, SSE, native websocket turns, history and mandatory refills
+after reopening admission, then runs the independent Codex verifier. A failed
+readiness check before admission reopens rolls back automatically.
