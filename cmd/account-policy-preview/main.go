@@ -74,6 +74,13 @@ func newFixtureAt(now time.Time) *fixture {
 	f.accounts = append(f.accounts, unknown)
 	f.operations = append(f.operations, accountpolicy.Operation{ID: "expired-history", RequestID: "fixture-expired-request", CredentialID: "inventory-c", AccountID: "upstream-c", WorkspaceID: "workspace-c", CreditID: "expired-credit", State: "expired", CreatedAt: now.Add(-24 * time.Hour), UpdatedAt: now.Add(-24 * time.Hour)})
 	f.decisions = append(f.decisions, accountpolicy.Decision{CredentialID: "account-a", Provider: "codex", Model: "gpt-5.4", Reason: "Fixture: policy disabled; existing round-robin strategy", At: now, Fallback: true})
+	// Sanitized provider credit balances; account A shows partial spending.
+	for i, balance := range []float64{62454.4227, 62500} {
+		value := balance
+		has := true
+		f.accounts[i].CreditBalance = &value
+		f.accounts[i].HasCredits = &has
+	}
 	f.now = now
 	f.settings.ObservationsEnabled = true // Explicit fixture telemetry, without routing or reset authority.
 	f.clock = func() time.Time { return now }
@@ -205,7 +212,7 @@ func (f *fixture) handler() http.Handler {
 			write(w, 200, value)
 		case path == "/accounts" && r.Method == "GET":
 			f.snapshotRequests++
-			write(w, 200, map[string]any{"settings": f.settings, "accounts": f.accounts, "fixture_only": true})
+			write(w, 200, map[string]any{"settings": f.settings, "accounts": f.accounts, "credit_status": f.creditStatus(), "fixture_only": true})
 		case path == "/decisions" && r.Method == "GET":
 			write(w, 200, map[string]any{"decisions": f.decisions})
 		case path == "/resets" && r.Method == "GET":
@@ -293,6 +300,40 @@ func (f *fixture) handler() http.Handler {
 	})
 }
 
+// exhaustForCreditDemo marks account A's weekly allowance as used up so the
+// preview can show credit spending.
+func (f *fixture) exhaustForCreditDemo() {
+	blocked := false
+	a := &f.accounts[0]
+	a.Status, a.Eligible = "quota_blocked", false
+	for i := range a.Buckets {
+		a.Buckets[i].UsedPercent = 100
+		a.Buckets[i].Allowed = &blocked
+	}
+	f.settings.CreditSpending.Enabled = true
+}
+
+func (f *fixture) creditStatus() map[string]any {
+	out := map[string]any{}
+	now := f.clock().UTC()
+	for _, a := range f.accounts {
+		if a.CreditBalance == nil {
+			continue
+		}
+		status := accountpolicy.CreditState(a, "", f.settings, now)
+		var burn any
+		if status.State == accountpolicy.CreditStateCredits {
+			burn = 300.0
+		}
+		out[a.Identity.CredentialID] = map[string]any{
+			"state": status.State, "balance": status.Balance, "unlimited": status.Unlimited, "floor": status.Floor,
+			"margin": status.Margin, "spendable": status.Spendable, "reserved": status.Reserved, "unlocked": status.Unlocked,
+			"unlocked_until": status.UnlockedUntil, "observed_at": status.ObservedAt, "fresh": status.Fresh, "burn_per_hour": burn,
+		}
+	}
+	return out
+}
+
 func (f *fixture) selected(account, credit string) (*accountpolicy.Snapshot, *accountpolicy.Credit) {
 	for i := range f.accounts {
 		a := &f.accounts[i]
@@ -335,6 +376,7 @@ func fixtureAtArgument(value string) (*fixture, error) {
 func main() {
 	addr := flag.String("listen", "127.0.0.1:8318", "explicit loopback or Tailscale fixture listener")
 	fixedTime := flag.String("now", "", "fixed RFC3339 fixture time; empty uses the current time")
+	creditDemo := flag.Bool("credit-demo", false, "show account A serving on its credit balance")
 	flag.Parse()
 	if err := validateListen(*addr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -345,6 +387,9 @@ func main() {
 	if errFixture != nil {
 		fmt.Fprintln(os.Stderr, errFixture)
 		os.Exit(1)
+	}
+	if *creditDemo {
+		fixture.exhaustForCreditDemo()
 	}
 	server := &http.Server{Addr: *addr, Handler: fixture.handler()}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -374,6 +374,29 @@
           " observed accounts; details may be incomplete",
       ],
     ];
+    const fleet = dashboard.fleetCredits(state.creditStatus, state.settings);
+    if (fleet)
+      rows.push(
+        [
+          "Spendable credits",
+          dashboard.number(Math.floor(fleet.spendable)),
+          (fleet.spendableValue ? fleet.spendableValue.text + " face value; " : "") +
+            (fleet.runwayHours !== null
+              ? "lasts ≈ " + dashboard.duration(fleet.runwayHours) + " at current burn"
+              : fleet.serving
+                ? "burn rate still being measured"
+                : "used only after an account's allowance runs out"),
+        ],
+        [
+          "Protected credit reserve",
+          dashboard.number(Math.floor(fleet.reserved)),
+          (fleet.reserveValue ? fleet.reserveValue.text + " across " : "Across ") +
+            fleet.accounts +
+            " account" +
+            (fleet.accounts === 1 ? "" : "s") +
+            "; manual unlock only",
+        ],
+      );
     $("metrics").innerHTML = rows
       .map(
         ([label, value, help]) =>
@@ -560,6 +583,7 @@
       if (data.snapshots) {
         state.observations = data.snapshots.accounts.accounts || [];
         state.settings = data.snapshots.accounts.settings || {};
+        state.creditStatus = data.snapshots.accounts.credit_status || {};
         state.operations = data.snapshots.resets.operations || [];
         state.schedules = data.snapshots.resets.schedules || [];
         state.decisions = data.snapshots.decisions.decisions || [];
@@ -666,6 +690,7 @@
       operations: resets.operations || [],
       schedules: resets.schedules || [],
       decisions: decisions.decisions || [],
+      creditStatus: accounts.credit_status || {},
     };
     telemetry = data;
     state.accounts = dashboard
@@ -720,6 +745,13 @@
     $("affinity").value = s.affinity || "strict";
     $("guard").value = s.expiry_guard_seconds ?? 600;
     $("saved-reserve").value = s.saved_credit_reserve ?? 1;
+    const credit = dashboard.creditSettings(s);
+    $("credit-enabled").checked = credit.enabled;
+    $("credit-floor").value = credit.floor_credits;
+    $("credit-margin").value = credit.margin_credits;
+    $("credit-guard-hours").value = credit.allowance_guard_hours;
+    $("credit-value-usd").value = credit.credit_value_usd;
+    $("credit-usd-eur").value = credit.usd_to_eur;
     $("read-only").checked = !!s.read_only;
     $("policy-status").textContent = s.enabled
       ? "Enabled · " + s.automation
@@ -744,6 +776,78 @@
   }
   function allowed(a, c, now) {
     return writeBlock(a, c, state.settings, now) === "";
+  }
+  function renderCreditBalance(a, now) {
+    const id = a.identity.credential_id,
+      view = dashboard.creditView(
+        (state.creditStatus || {})[id],
+        state.settings,
+      );
+    if (!view) return "";
+    const amount =
+      view.balance === null
+        ? view.unlimited
+          ? "Unlimited"
+          : "Unavailable"
+        : dashboard.number(Math.floor(view.balance)) + " credits";
+    const meter =
+      view.balance !== null && view.balance > 0
+        ? '<meter min="0" max="' +
+          attr(view.balance) +
+          '" value="' +
+          attr(view.spendable) +
+          '" aria-label="' +
+          attr("Spendable share of credit balance") +
+          '"></meter>'
+        : "";
+    const lockButton = view.unlocked
+      ? '<button type="button" class="secondary" data-action="credit-lock">Lock reserve now</button>'
+      : '<button type="button" class="secondary" data-action="credit-unlock">Unlock reserve for 4 h</button>';
+    return (
+      '<div class="credit-balance"><div class="bucket-head"><strong>Credit balance</strong>' +
+      badge(view.label, view.tone) +
+      "</div><div class=\"credit-amount\"><strong>" +
+      escape(amount) +
+      "</strong>" +
+      (view.value
+        ? " <span class=\"muted\">face value " +
+          escape(view.value.text) +
+          " (estimate)</span>"
+        : "") +
+      "</div>" +
+      meter +
+      '<div class="credit-legend"><span>Spendable <strong>' +
+      escape(view.spendable === null ? "Unavailable" : dashboard.number(Math.floor(view.spendable))) +
+      "</strong></span><span>Reserve <strong>" +
+      escape(dashboard.number(view.floor)) +
+      "</strong> " +
+      escape(view.reserveValue ? view.reserveValue.text : "") +
+      " · " +
+      escape(
+        view.unlocked
+          ? "unlocked until " + absolute(view.unlockedUntil)
+          : "locked",
+      ) +
+      '</span></div><div class="time">' +
+      escape(
+        (view.burn !== null
+          ? "Burn " +
+            dashboard.number(Math.round(view.burn)) +
+            " credits/h" +
+            (view.runwayHours !== null
+              ? " · spendable lasts ≈ " + dashboard.duration(view.runwayHours)
+              : "")
+          : "Burn rate: measuring") +
+          " · balance observed " +
+          countdownAge(view.observedAt, now) +
+          (view.fresh ? "" : " (not current; credits are not used)"),
+      ) +
+      "</div>" +
+      (state.settings.credit_spending && state.settings.credit_spending.enabled
+        ? '<div class="credit-actions">' + lockButton + "</div>"
+        : "") +
+      "</div>"
+    );
   }
   function renderAccount(a, first) {
     const now = Date.now(),
@@ -802,6 +906,7 @@
       " <strong>" +
       escape(dashboard.number(quota.resets)) +
       "</strong></span></div>";
+    const creditSummary = renderCreditBalance(a, now);
     const credits = [...(a.credits || [])].sort(
       (x, y) =>
         (stamp(x.expires_at) || Infinity) - (stamp(y.expires_at) || Infinity),
@@ -828,10 +933,12 @@
       '</p></div><div class="account-status">' +
       activityBadge +
       badge(a.status || "Unknown") +
-      badge(
-        a.eligible ? "Eligible" : "Ineligible",
-        a.eligible ? "good" : "error",
-      ) +
+      (((state.creditStatus || {})[id] || {}).state === "credits"
+        ? badge("Eligible on credits", "warn")
+        : badge(
+            a.eligible ? "Eligible" : "Ineligible",
+            a.eligible ? "good" : "error",
+          )) +
       (first ? badge("Earliest manual expiry", "warn") : "") +
       (controls.hold ? badge("On hold", "warn") : "") +
       (a.writes_disabled ? badge("Provider writes disabled", "error") : "") +
@@ -856,6 +963,7 @@
       ) +
       "</span></div>" +
       quotaSummary +
+      creditSummary +
       '<p class="time">Last successful usage refresh: ' +
       escape(absolute(a.observed_at)) +
       "<br>Inventory refresh: " +
@@ -1481,6 +1589,15 @@
         affinity: $("affinity").value,
         expiry_guard_seconds: Number($("guard").value),
         saved_credit_reserve: Number($("saved-reserve").value),
+        credit_spending: {
+          ...(state.settings.credit_spending || {}),
+          enabled: $("credit-enabled").checked,
+          floor_credits: Number($("credit-floor").value),
+          margin_credits: Number($("credit-margin").value),
+          allowance_guard_hours: Number($("credit-guard-hours").value),
+          credit_value_usd: Number($("credit-value-usd").value),
+          usd_to_eur: Number($("credit-usd-eur").value),
+        },
         usage_history_enabled: $("usage-history-enabled").checked,
         read_only: $("read-only").checked,
       };
@@ -1523,6 +1640,35 @@
       ),
       action = button.dataset.action,
       c = selectedCredit(a, button.dataset.credit);
+    if (action === "credit-unlock" || action === "credit-lock") {
+      run(async () => {
+        const id = a.identity.credential_id;
+        let until = new Date(0).toISOString();
+        if (action === "credit-unlock") {
+          until = new Date(Date.now() + 4 * 3600000).toISOString();
+          if (
+            !(await confirm(
+              "Unlock credit reserve for " + alias(a) + "?",
+              "Requests may spend this account's protected reserve until " +
+                absolute(until) +
+                ". Spending stops a small margin above zero.",
+              "Unlock reserve",
+            ))
+          )
+            return;
+        }
+        await request("/settings", "PATCH", {
+          accounts: { [id]: { credit_reserve_unlocked_until: until } },
+        });
+        await load();
+        notice(
+          action === "credit-unlock"
+            ? "Credit reserve unlocked until " + absolute(until) + "."
+            : "Credit reserve locked.",
+        );
+      });
+      return;
+    }
     if (action === "hide-schedule") {
       article.querySelector(".schedule-form").hidden = true;
       clearAccountDraft(a.identity.credential_id, "schedule");

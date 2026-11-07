@@ -55,6 +55,7 @@ type Service struct {
 	refreshMu                      sync.Mutex
 	requested                      map[string]uint64
 	wake                           chan struct{}
+	creditSamples                  map[string][]creditSample
 }
 
 func clone[T any](v T) T {
@@ -113,6 +114,16 @@ func NewService(opts Options) (*Service, error) {
 			// created before the independent observation setting existed.
 			s.state.Settings.ObservationsEnabled = opts.Settings.ObservationsEnabled
 			s.state.Settings.UsageHistoryEnabled = opts.Settings.UsageHistoryEnabled
+			// Journals written before credit spending existed adopt the startup
+			// configuration; once persisted, operator changes stay durable.
+			var raw struct {
+				Settings map[string]json.RawMessage `json:"settings"`
+			}
+			if json.Unmarshal(data, &raw) == nil {
+				if _, persisted := raw.Settings["credit_spending"]; !persisted {
+					s.state.Settings.CreditSpending = opts.Settings.CreditSpending
+				}
+			}
 			// A replica configured read-only cannot acquire authority from persisted settings.
 			if opts.Settings.ReadOnly {
 				s.state.Settings.ReadOnly = true
@@ -139,6 +150,9 @@ func NewService(opts Options) (*Service, error) {
 }
 
 func (s *Service) now() time.Time { return s.opts.Now().UTC() }
+
+// Now returns the service clock shared with routing evaluation.
+func (s *Service) Now() time.Time { return s.now() }
 
 // RequestRefresh coalesces provider quota and credential events without polling in inference handlers.
 func (s *Service) RequestRefresh(id string) {
@@ -283,6 +297,9 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	}
 	if err = ValidateSettings(next); err != nil {
 		return err
+	}
+	if !validCreditUnlocks(next, s.now()) {
+		return policyError("invalid_settings", "credit reserve unlock exceeds the maximum duration")
 	}
 	if next.StateDir != s.stateDir {
 		return policyError("invalid_settings", "state directory cannot change while running")
@@ -516,6 +533,7 @@ func (s *Service) discoverLocked(ctx context.Context, id Identity) (Snapshot, er
 		}
 	}
 	s.state.Snapshots[id.CredentialID] = clone(next)
+	s.recordCreditSampleLocked(id.CredentialID, next)
 	for i, op := range s.state.Operations {
 		if op.CredentialID == id.CredentialID && unresolved(op.State) && confirmedRecovery(op, next) {
 			op.State = "confirmed"

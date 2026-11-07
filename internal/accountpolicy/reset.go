@@ -590,7 +590,10 @@ func (s *Service) tickAccount(ctx context.Context, account Identity) error {
 			// Expiring allowance is refreshed immediately after weekly depletion when the benefit
 			// would otherwise expire before natural renewal. This does not require queued work.
 			earlyExpiring := weeklyExhausted(snapshot) && credit.ExpiresAt != nil && naturalWeeklyReset(snapshot, now).After(*credit.ExpiresAt)
-			earlySaved := credit.ExpiresAt == nil && settings.Automation == "auto_all_saved" && weeklyExhausted(snapshot) && demand
+			// Credit-served traffic is not demand for a saved reset: credit spending
+			// runs first, and saved resets keep their prior timing once the floor is reached.
+			earlySaved := credit.ExpiresAt == nil && settings.Automation == "auto_all_saved" && weeklyExhausted(snapshot) && demand &&
+				CreditState(snapshot, "", settings, now).State != CreditStateCredits
 			if credit.ExpiresAt == nil && (settings.Automation != "auto_all_saved" || !snapshot.InventoryComplete || snapshot.AvailableCredits <= settings.SavedCreditReserve) {
 				continue
 			}

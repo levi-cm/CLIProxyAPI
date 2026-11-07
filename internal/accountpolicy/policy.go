@@ -36,6 +36,9 @@ func ValidateSettings(s Settings) error {
 			return bad()
 		}
 	}
+	if !validCreditSpending(s.CreditSpending) {
+		return bad()
+	}
 	for id, c := range s.Accounts {
 		if id == "" || math.IsNaN(c.ReservePercent) || math.IsInf(c.ReservePercent, 0) || c.ReservePercent < 0 || c.ReservePercent > 100 {
 			return bad()
@@ -68,6 +71,9 @@ func Evaluate(snapshot Snapshot, model string, s Settings, now time.Time) Evalua
 	}
 	if s.ForceAccount != "" && s.ForceAccount != snapshot.Identity.CredentialID {
 		return blocked("different_forced_account")
+	}
+	if credit, ok := creditEvaluation(snapshot, model, s, now); ok {
+		return credit
 	}
 	if snapshot.Status != "" && snapshot.Status != "ready" && snapshot.Status != "healthy" && snapshot.Status != "quota" && snapshot.Status != "cooldown" {
 		return blocked("authentication_or_account_unavailable")

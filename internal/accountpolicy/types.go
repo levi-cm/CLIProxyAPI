@@ -26,10 +26,13 @@ type Settings struct {
 	ForceAccount              string                    `json:"force_account" yaml:"force-account"`
 	CreditTypes               []string                  `json:"credit_types" yaml:"credit-types"`
 	Accounts                  map[string]AccountControl `json:"accounts" yaml:"accounts"`
+	CreditSpending            CreditSpending            `json:"credit_spending" yaml:"credit-spending"`
 }
 type AccountControl struct {
 	Hold           bool    `json:"hold" yaml:"hold"`
 	ReservePercent float64 `json:"reserve_percent" yaml:"reserve-percent"`
+	// CreditReserveUnlockedUntil temporarily allows credit routing below the floor.
+	CreditReserveUnlockedUntil *time.Time `json:"credit_reserve_unlocked_until,omitempty" yaml:"credit-reserve-unlocked-until,omitempty"`
 }
 type Identity struct {
 	CredentialID string `json:"credential_id"`
@@ -76,12 +79,18 @@ type Snapshot struct {
 	ActiveRequests      int       `json:"active_requests"`
 	ActiveBindings      int       `json:"active_bindings"`
 	Transport           string    `json:"transport"`
+	// Provider credit balance observed with the usage snapshot (not reset credits).
+	CreditBalance    *float64 `json:"credit_balance,omitempty"`
+	HasCredits       *bool    `json:"has_credits,omitempty"`
+	CreditsUnlimited bool     `json:"credits_unlimited,omitempty"`
 }
 type Evaluation struct {
 	Eligible bool      `json:"eligible"`
 	Known    bool      `json:"known"`
 	Deadline time.Time `json:"deadline"`
 	Reason   string    `json:"reason"`
+	// Credits marks an exhausted account kept eligible by its credit balance.
+	Credits bool `json:"credits,omitempty"`
 }
 type Decision struct {
 	CredentialID string    `json:"credential_id"`

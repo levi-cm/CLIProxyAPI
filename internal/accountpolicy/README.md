@@ -67,3 +67,45 @@ Deployment, tailnet/operator boundaries and staged activation are documented in
 [the deployment guide](../../docs/account-policy-deployment.md). Production
 services and remote-device ACL verification are operator provisioning tasks, not
 claims made by the fixture tests.
+
+## Credit balance spending
+
+`credit-spending` is separate from saved reset credits. The Codex usage response
+reports an account credit balance (`credits.balance`, a decimal string). Upstream
+draws that balance only after the account's included allowance is exhausted;
+there is no request option to spend credits earlier.
+
+When enabled, an account whose ordinary allowance is exhausted stays eligible
+while its balance is fresh (`max-balance-age-seconds`) and above
+`floor-credits + margin-credits`. Its routing deadline becomes
+`now + allowance-guard-hours`, so it ranks before allowance that renews later
+(credit-first) and after allowance that renews sooner and would otherwise be
+lost. Holds, forced accounts, authentication or identity failures, spend
+controls, model-specific limits and stale or unknown balances never use credits.
+
+The floor is never spent automatically. A per-account
+`credit-reserve-unlocked-until` (at most 24 hours ahead) temporarily lowers the
+floor to zero; the margin still applies. `credit-value-usd` and `usd-to-eur` only
+drive estimated value displays. Burn rates come from the last two hours of
+in-memory balance observations and reset on restart. Nothing here purchases,
+reloads or redeems anything. Zero numeric values select the defaults, so a zero
+floor or guard cannot be configured; use the manual unlock instead.
+
+Every credit-serving account ranks at `now + allowance-guard-hours`. Credits are
+therefore spent before any allowance renewing later than that, however much of it
+remains; allowance renewing inside the window is used first. Under
+`auto_all_saved`, saved non-expiring resets are not redeemed early while the
+account is serving on credits; they keep their previous timing once the floor is
+reached. Expiring resets are unaffected.
+
+The floor is a routing threshold, not a provider limit. Streams and account-bound
+continuations already on the account may finish after a later poll shows the
+floor reached; the margin absorbs this. If upstream answers a credit-served
+request with `usage_limit_reached` (429), the existing credential cooldown applies
+until the provider's reset time and other accounts take over. A credit top-up
+does not clear that cooldown.
+
+Journals written before this feature adopt `credit-spending` from the startup
+configuration once. Afterwards the journal is authoritative, like other operator
+settings; change it through the dashboard or management API, or a configuration
+hot reload.

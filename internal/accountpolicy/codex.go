@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -80,7 +81,34 @@ type codexUsage struct {
 	SpendControl *struct {
 		Reached bool `json:"reached"`
 	} `json:"spend_control"`
+	Credits *struct {
+		HasCredits *bool           `json:"has_credits"`
+		Unlimited  *bool           `json:"unlimited"`
+		Balance    json.RawMessage `json:"balance"`
+	} `json:"credits"`
 }
+
+// parseCodexCreditBalance accepts the decimal string the backend sends and a
+// plain JSON number. Null, empty, or non-finite values are unknown.
+func parseCodexCreditBalance(raw json.RawMessage) *float64 {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return nil
+	}
+	if strings.HasPrefix(text, `"`) {
+		var unquoted string
+		if json.Unmarshal(raw, &unquoted) != nil {
+			return nil
+		}
+		text = strings.TrimSpace(unquoted)
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil
+	}
+	return &value
+}
+
 type codexInventory struct {
 	Count   *int `json:"available_count"`
 	Credits *[]struct {
@@ -324,6 +352,11 @@ func (c *CodexClient) Discover(ctx context.Context, id Identity) (snapshot Snaps
 	if !ordinaryKnown {
 		snapshot.WritesDisabled = true
 		snapshot.LastError = "ordinary_allowance_unknown"
+	}
+	if usage.Credits != nil {
+		snapshot.HasCredits = usage.Credits.HasCredits
+		snapshot.CreditsUnlimited = usage.Credits.Unlimited != nil && *usage.Credits.Unlimited
+		snapshot.CreditBalance = parseCodexCreditBalance(usage.Credits.Balance)
 	}
 	if usage.SpendControl != nil && usage.SpendControl.Reached {
 		snapshot.Eligible = false

@@ -469,6 +469,84 @@
                     resets expiring after the natural weekly refresh.</span
                   ></label
                 >
+                <fieldset class="credit-settings">
+                  <legend>Credit balance spending</legend>
+                  <label class="setting-check"
+                    ><span class="check"
+                      ><input id="credit-enabled" type="checkbox" /> Keep
+                      exhausted accounts serving on their credit balance</span
+                    ><span class="field-help"
+                      >Provider credits are drawn only after an account's
+                      weekly allowance is used up. An exhausted account then
+                      keeps serving until its balance reaches the protected
+                      reserve, before routing switches accounts. These are
+                      account credits, not saved full-reset credits.</span
+                    ></label
+                  >
+                  <label
+                    >Protected reserve per account (credits)<input
+                      id="credit-floor"
+                      type="number"
+                      min="1"
+                      step="1"
+                      required
+                    /><span class="field-help"
+                      >Never spent automatically. Unlock it per account for 4
+                      hours in an emergency.</span
+                    ></label
+                  >
+                  <label
+                    >Safety margin (credits)<input
+                      id="credit-margin"
+                      type="number"
+                      min="1"
+                      step="1"
+                      required
+                    /><span class="field-help"
+                      >Spending stops this far above the reserve to absorb
+                      in-flight requests and balance reporting delay.</span
+                    ></label
+                  >
+                  <label
+                    >Allowance guard (hours)<input
+                      id="credit-guard-hours"
+                      type="number"
+                      min="1"
+                      max="168"
+                      step="1"
+                      required
+                    /><span class="field-help"
+                      >Another account whose unused allowance renews within
+                      this window is used first, so renewing allowance is not
+                      wasted.</span
+                    ></label
+                  >
+                  <label
+                    >Estimated credit price (USD)<input
+                      id="credit-value-usd"
+                      type="number"
+                      min="0.001"
+                      max="10"
+                      step="0.001"
+                      required
+                    /><span class="field-help"
+                      >Display only. OpenAI publishes no current price; 0.04 is
+                      derived from earlier pack pricing.</span
+                    ></label
+                  >
+                  <label
+                    >USD to EUR rate<input
+                      id="credit-usd-eur"
+                      type="number"
+                      min="0.01"
+                      max="10"
+                      step="0.01"
+                      required
+                    /><span class="field-help"
+                      >Display only; used for euro estimates.</span
+                    ></label
+                  >
+                </fieldset>
                 <label class="setting-check"
                   ><span class="check"
                     ><input id="usage-history-enabled" type="checkbox" /> Keep

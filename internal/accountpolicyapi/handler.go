@@ -164,7 +164,7 @@ func (h *Handler) accounts(c *gin.Context) {
 			b.Source = ""
 			buckets = append(buckets, b)
 		}
-		out = append(out, gin.H{"credential_id": s.Identity.CredentialID, "provider": s.Identity.Provider, "label": "Account", "eligible": evaluation.Eligible, "evidence_known": evaluation.Known, "eligibility_reason": evaluation.Reason, "observed_at": s.ObservedAt, "buckets": buckets, "temporary_routing_supported": s.Identity.Provider == "codex"})
+		out = append(out, gin.H{"credential_id": s.Identity.CredentialID, "provider": s.Identity.Provider, "label": "Account", "eligible": evaluation.Eligible, "evidence_known": evaluation.Known, "eligibility_reason": evaluation.Reason, "serving_on_credits": evaluation.Credits, "observed_at": s.ObservedAt, "buckets": buckets, "temporary_routing_supported": s.Identity.Provider == "codex"})
 	}
 	c.JSON(200, gin.H{"schema_version": 1, "sampled_at": time.Now().UTC(), "accounts": out, "capabilities": gin.H{"global_override": true, "pressure_spreading": true, "automatic_spreading": true, "percentage_split": false, "legacy_split_membership": true, "split_min_percent": 1, "split_max_percent": 99, "policy_enabled": settings.Enabled, "duration_min_hours": 1, "duration_max_hours": 24, "account_bound_conversations_retain_owner": true}})
 }

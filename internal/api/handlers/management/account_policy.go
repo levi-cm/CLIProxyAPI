@@ -176,9 +176,32 @@ func policySchedules(service *accountpolicy.Service) []accountpolicy.Schedule {
 	return values
 }
 
+// policyCreditStatus is the operator view of an account's provider credit balance.
+type policyCreditStatus struct {
+	accountpolicy.CreditStatus
+	BurnPerHour *float64 `json:"burn_per_hour"`
+}
+
+func policyCreditStatuses(service *accountpolicy.Service) map[string]policyCreditStatus {
+	settings := service.Settings()
+	now := service.Now()
+	out := map[string]policyCreditStatus{}
+	for _, snapshot := range service.Accounts() {
+		if snapshot.Identity.Provider != "codex" {
+			continue
+		}
+		status := policyCreditStatus{CreditStatus: accountpolicy.CreditState(snapshot, "", settings, now)}
+		if burn, ok := service.CreditBurnPerHour(snapshot.Identity.CredentialID); ok {
+			status.BurnPerHour = &burn
+		}
+		out[snapshot.Identity.CredentialID] = status
+	}
+	return out
+}
+
 func (h *Handler) GetAccountPolicyAccounts(c *gin.Context) {
 	if service := h.policyService(c); service != nil {
-		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service)})
+		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service)})
 	}
 }
 func (h *Handler) GetAccountPolicyDecisions(c *gin.Context) {
@@ -194,7 +217,7 @@ func (h *Handler) GetAccountPolicyResets(c *gin.Context) {
 func (h *Handler) GetAccountPolicyDiagnostics(c *gin.Context) {
 	if service := h.policyService(c); service != nil {
 		c.Header("Cache-Control", "no-store")
-		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "decisions": policyDecisions(service), "operations": sanitizedOperations(service), "schedules": policySchedules(service)})
+		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service), "decisions": policyDecisions(service), "operations": sanitizedOperations(service), "schedules": policySchedules(service)})
 	}
 }
 
@@ -253,6 +276,24 @@ func (h *Handler) PatchAccountPolicySettings(c *gin.Context) {
 					current.Accounts[id] = old
 				}
 				fields[name], _ = json.Marshal(current.Accounts)
+			} else if name == "credit_spending" {
+				// Partial updates must never reset an omitted floor to its default.
+				var changes map[string]json.RawMessage
+				if err := json.Unmarshal(value, &changes); err != nil || changes == nil {
+					return current, &accountpolicy.Error{Code: "invalid_settings"}
+				}
+				var merged map[string]json.RawMessage
+				_ = json.Unmarshal(fields[name], &merged)
+				if merged == nil {
+					merged = map[string]json.RawMessage{}
+				}
+				for key, change := range changes {
+					if bytes.Equal(bytes.TrimSpace(change), []byte("null")) {
+						return current, &accountpolicy.Error{Code: "invalid_settings"}
+					}
+					merged[key] = change
+				}
+				fields[name], _ = json.Marshal(merged)
 			} else {
 				fields[name] = value
 			}

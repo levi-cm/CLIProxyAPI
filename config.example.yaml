@@ -29,8 +29,20 @@ account-policy:
   force-account: "" # proxy credential ID; real authentication/quota blocks still apply
   # Ordinary saved Codex reset credits only.
   credit-types: [codex_rate_limits]
-  # credential-ID: {hold: false, reserve-percent: 0}
+  # credential-ID: {hold: false, reserve-percent: 0, credit-reserve-unlocked-until: <RFC3339>}
   accounts: {}
+  # Codex credit balance (not saved reset credits). Upstream draws credits only
+  # after an account's included allowance is exhausted. When enabled, such an
+  # account keeps serving until its balance reaches floor + margin, before
+  # routing switches accounts. Zero values select the defaults shown.
+  credit-spending:
+    enabled: false
+    floor-credits: 7500 # protected per-account reserve; manual unlock only
+    margin-credits: 250 # absorbs in-flight requests and balance reporting delay
+    max-balance-age-seconds: 600 # older balances never authorize spending
+    allowance-guard-hours: 36 # prefer allowance that renews within this window
+    credit-value-usd: 0.04 # display-only estimate; no official price is published
+    usd-to-eur: 0.87 # display-only
 
 # Policy settings changed through management persist in the operation journal.
 # Selecting either automatic mode permanently requires automatic reset redemption.

@@ -647,7 +647,102 @@
         "Can move replayable work between completed requests to an earlier deadline. Live streams, WebSockets and account-bound continuation state stay with their owner.",
     },
   };
+
+  // Provider credit balance view. Money values are face-value estimates from
+  // the operator-configured credit price, never provider-reported amounts.
+  const creditDefaults = {
+    floor_credits: 7500,
+    margin_credits: 250,
+    allowance_guard_hours: 36,
+    credit_value_usd: 0.04,
+    usd_to_eur: 0.87,
+  };
+  function creditSettings(settings) {
+    const raw = (settings && settings.credit_spending) || {};
+    const out = { enabled: !!raw.enabled };
+    for (const [key, fallback] of Object.entries(creditDefaults))
+      out[key] = measured(raw[key]) && raw[key] > 0 ? raw[key] : fallback;
+    return out;
+  }
+  const creditStates = {
+    disabled: ["Credit spending off", ""],
+    allowance: ["Serving: allowance", "good"],
+    credits: ["Serving: credits", "warn"],
+    floor_reached: ["Reserve protected", "error"],
+    unknown: ["Balance unknown", "warn"],
+    unavailable: ["Credits unavailable", "error"],
+  };
+  function money(credits, c) {
+    if (!measured(credits)) return null;
+    const usd = credits * c.credit_value_usd;
+    const format = (value, currency) =>
+      new Intl.NumberFormat("en-GB", {
+        style: "currency",
+        currency,
+        maximumFractionDigits: value >= 100 ? 0 : 2,
+      }).format(value);
+    return { usd, eur: usd * c.usd_to_eur, text: "≈ " + format(usd * c.usd_to_eur, "EUR") + " / " + format(usd, "USD") };
+  }
+  function creditView(status, settings) {
+    const c = creditSettings(settings);
+    if (!status) return null;
+    const balance = typeof status.balance === "number" && Number.isFinite(status.balance) ? status.balance : null;
+    const [label, tone] = creditStates[status.state] || ["Credit state unknown", "warn"];
+    const burn = measured(status.burn_per_hour) ? status.burn_per_hour : null;
+    const spendable = balance === null ? null : Math.max(0, status.spendable || 0);
+    return {
+      state: status.state,
+      label,
+      tone,
+      balance,
+      unlimited: !!status.unlimited,
+      spendable,
+      reserved: balance === null ? null : Math.max(0, status.reserved || 0),
+      floor: c.floor_credits,
+      unlocked: !!status.unlocked,
+      unlockedUntil: status.unlocked_until || null,
+      fresh: !!status.fresh,
+      observedAt: status.observed_at || null,
+      burn,
+      runwayHours: burn && burn > 0 && spendable !== null ? spendable / burn : null,
+      value: money(balance, c),
+      spendableValue: money(spendable, c),
+      reserveValue: money(c.floor_credits, c),
+    };
+  }
+  function fleetCredits(statuses, settings) {
+    const views = Object.values(statuses || {})
+      .map((status) => creditView(status, settings))
+      .filter((v) => v && v.balance !== null);
+    if (!views.length) return null;
+    const sum = (key) => views.reduce((total, v) => total + (v[key] || 0), 0);
+    const burns = views.filter((v) => v.burn !== null);
+    const burn = burns.length ? burns.reduce((total, v) => total + v.burn, 0) : null;
+    const c = creditSettings(settings);
+    const spendable = sum("spendable");
+    return {
+      accounts: views.length,
+      balance: sum("balance"),
+      spendable,
+      reserved: sum("reserved"),
+      serving: views.filter((v) => v.state === "credits").length,
+      burn,
+      runwayHours: burn && burn > 0 ? spendable / burn : null,
+      spendableValue: money(spendable, c),
+      reserveValue: money(sum("reserved"), c),
+    };
+  }
+  function duration(hours) {
+    if (!measured(hours)) return "Unavailable";
+    if (hours < 1) return Math.max(1, Math.round(hours * 60)) + " min";
+    if (hours < 48) return number(Math.round(hours * 10) / 10) + " h";
+    return number(Math.round(hours / 2.4) / 10) + " days";
+  }
   const helpers = {
+    creditSettings,
+    creditView,
+    fleetCredits,
+    duration,
     activityView,
     quotaView,
     weeklyCycle,
