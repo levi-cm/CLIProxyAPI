@@ -97,6 +97,9 @@ def prepare(image,commit,retire_idle_clients=False):
         else:
             target.mkdir(mode=0o700);run(['rsync','-a','--numeric-ids',str(ROOT/source)+'/',str(target)+'/'],timeout=120)
     (fixture/'logs').mkdir(mode=0o700)
+    # Flush the fixture copy now: otherwise its writeback stalls Docker's
+    # metadata fsync and the bounded container create below times out.
+    run(['sync','-f',str(fixture/'account-policy-state')],timeout=120)
     shutil.copy2(ROOT/'.env',directory/'env.before')
     atomic(directory/'old-container.json',old)
     before=owners(fixture/'account-policy-state');created=[];results=[];max_stop=.1
