@@ -44,7 +44,41 @@ func lookupBase(kind, prefix string) string {
 	}
 	return "lookup/" + kind + "/" + prefix
 }
+
+// lookupMemo avoids re-reading the same few thousand lookup files for every
+// record of a bulk import, where nearly every record is a duplicate. It holds
+// only parsed derived metadata and is dropped on every lookup write or removal.
+type lookupMemo struct {
+	splits  map[string]bool
+	buckets map[string]map[string]string
+}
+
+func (a *Archive) startLookupMemo() {
+	a.lookupMemo = &lookupMemo{splits: map[string]bool{}, buckets: map[string]map[string]string{}}
+}
+
+func (a *Archive) stopLookupMemo() { a.lookupMemo = nil }
+
+func (a *Archive) resetLookupMemo() {
+	if a.lookupMemo != nil {
+		a.startLookupMemo()
+	}
+}
+
 func (a *Archive) lookupSplit(base string) (bool, error) {
+	if a.lookupMemo != nil {
+		if split, ok := a.lookupMemo.splits[base]; ok {
+			return split, nil
+		}
+	}
+	split, err := a.readLookupSplit(base)
+	if err == nil && a.lookupMemo != nil {
+		a.lookupMemo.splits[base] = split
+	}
+	return split, err
+}
+
+func (a *Archive) readLookupSplit(base string) (bool, error) {
 	info, err := a.root.Lstat(base + ".split")
 	if os.IsNotExist(err) {
 		return false, nil
@@ -54,7 +88,24 @@ func (a *Archive) lookupSplit(base string) (bool, error) {
 	}
 	return true, nil
 }
+
+// lookupBucket returns a leaf that callers may modify only immediately before
+// writing it back; writeLookup drops the memo first, so a modified cached leaf
+// is never served again.
 func (a *Archive) lookupBucket(base string) (map[string]string, error) {
+	if a.lookupMemo != nil {
+		if bucket, ok := a.lookupMemo.buckets[base]; ok {
+			return bucket, nil
+		}
+	}
+	bucket, err := a.readLookupBucket(base)
+	if err == nil && a.lookupMemo != nil {
+		a.lookupMemo.buckets[base] = bucket
+	}
+	return bucket, err
+}
+
+func (a *Archive) readLookupBucket(base string) (map[string]string, error) {
 	info, err := a.root.Lstat(base + ".json")
 	if os.IsNotExist(err) {
 		return map[string]string{}, nil
@@ -85,6 +136,7 @@ func (a *Archive) saveLookup(name string, v any) error {
 }
 
 func (a *Archive) writeLookup(name string, v any, durable bool) error {
+	a.resetLookupMemo()
 	for _, n := range []string{name, name + ".tmp"} {
 		info, err := a.root.Lstat(n)
 		if err == nil && !info.Mode().IsRegular() {

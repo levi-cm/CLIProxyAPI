@@ -47,6 +47,10 @@ func (a *Archive) importLegacyLocked(dir string) error {
 	if err = a.initialize(); err != nil {
 		return err
 	}
+	if a.lookupMemo == nil {
+		a.startLookupMemo()
+		defer a.stopLookupMemo()
+	}
 	for _, name := range []string{"usage.2.jsonl", "usage.1.jsonl", "usage.jsonl"} {
 		info, e := source.Lstat(name)
 		if os.IsNotExist(e) {

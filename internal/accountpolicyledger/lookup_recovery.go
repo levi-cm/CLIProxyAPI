@@ -61,12 +61,45 @@ func (a *Archive) lookupSignature(kind, prefix string) (lookupSignature, error) 
 	return result, nil
 }
 
+// repairLookup adds entries missing from an otherwise valid lookup. That is the
+// normal state after an abrupt stop between a segment append and its lookup
+// write, or after an interrupted rebuild, and it avoids rewriting the whole
+// tree for a handful of records. The caller re-verifies the complete signature
+// and falls back to restoreLookup if anything else differs.
+func (a *Archive) repairLookup(kind string, names []string) error {
+	if err := a.lookupDir(kind); err != nil {
+		return err
+	}
+	if a.lookupMemo == nil {
+		a.startLookupMemo()
+		defer a.stopLookupMemo()
+	}
+	missing := map[string]string{}
+	for _, name := range names {
+		idx, err := a.index(name)
+		if err != nil {
+			return err
+		}
+		for id := range idx.IDs {
+			found, err := a.hasID(kind, id)
+			if err != nil {
+				return err
+			}
+			if !found {
+				missing[lookupDigest(id)] = name
+			}
+		}
+	}
+	return a.mergeRecoveredLookup(kind, "", missing)
+}
+
 func (a *Archive) restoreLookup(kind string, names []string) error {
 	// Validate the namespace before deleting derived metadata. RemoveAll stays
 	// confined to the archive root and never alters authoritative raw segments.
 	if err := a.lookupDir(kind); err != nil {
 		return err
 	}
+	a.resetLookupMemo()
 	if err := a.root.RemoveAll("lookup/" + kind); err != nil {
 		return err
 	}

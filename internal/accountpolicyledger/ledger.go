@@ -35,14 +35,17 @@ type segmentIndex struct {
 // Archive serializes appenders independently of the router and policy locks.
 // Queries retain at most one segment index and a bounded page of raw records.
 type Archive struct {
-	lookupReady     bool
-	active          map[string]string
-	legacyDir       string
-	importComplete  bool
-	inFlight        string
-	recovery        map[string]bool
-	owner           *os.File
-	cache           map[string]segmentIndex
+	lookupReady    bool
+	active         map[string]string
+	legacyDir      string
+	importComplete bool
+	inFlight       string
+	recovery       map[string]bool
+	owner          *os.File
+	cache          map[string]segmentIndex
+	// lookupMemo caches parsed lookup leaves and split markers during startup
+	// repair and bulk legacy imports; nil otherwise. Any lookup write clears it.
+	lookupMemo      *lookupMemo
 	mu              sync.Mutex
 	dir             string
 	enabled         func() bool
@@ -172,6 +175,9 @@ func (a *Archive) initialize() error {
 			}
 		}
 		actual, lookupErr := a.lookupSignature(kind, "")
+		if lookupErr == nil && actual != expected && a.repairLookup(kind, names) == nil {
+			actual, lookupErr = a.lookupSignature(kind, "")
+		}
 		if lookupErr != nil || actual != expected {
 			if err := a.restoreLookup(kind, names); err != nil {
 				return err
