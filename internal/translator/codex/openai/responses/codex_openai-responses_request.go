@@ -60,6 +60,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 	rawJSON = normalizeEmptyFunctionCallArguments(rawJSON)
+	rawJSON, _ = translatorcommon.SanitizeOrphanResponsesToolOutputs(rawJSON)
 
 	return rawJSON, nil
 }
