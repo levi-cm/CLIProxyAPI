@@ -27,6 +27,10 @@ type Settings struct {
 	CreditTypes               []string                  `json:"credit_types" yaml:"credit-types"`
 	Accounts                  map[string]AccountControl `json:"accounts" yaml:"accounts"`
 	CreditSpending            CreditSpending            `json:"credit_spending" yaml:"credit-spending"`
+	// ClaudeFocus is "auto" (empty) or "off". Auto moves running Claude
+	// conversations to the account whose weekly allowance would otherwise expire
+	// unused; off keeps every running conversation on its account.
+	ClaudeFocus string `json:"claude_focus,omitempty" yaml:"claude-focus,omitempty"`
 }
 type AccountControl struct {
 	Hold           bool    `json:"hold" yaml:"hold"`

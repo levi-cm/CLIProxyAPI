@@ -109,3 +109,32 @@ Journals written before this feature adopt `credit-spending` from the startup
 configuration once. Afterwards the journal is authoritative, like other operator
 settings; change it through the dashboard or management API, or a configuration
 hot reload.
+
+## Claude weekly deadlines and focus mode
+
+Claude subscription accounts have no policy snapshot. Their weekly reset and
+utilization come passively from the `Anthropic-Ratelimit-Unified-7d-*` response
+headers each account returns. New Claude conversations go to the account whose
+weekly allowance resets first. Until every eligible Claude account has been
+observed (for example after a restart), the configured fallback selects instead,
+so unobserved accounts are not starved. A reset that has passed is projected
+forward by whole weeks for ordering only.
+
+Running conversations normally keep their account. Focus mode moves them only
+when the earliest-resetting account resets within 48 hours and, at its own
+utilization pace over the trailing 24 hours (at least one hour of observations,
+measured up to now), would otherwise reach its reset with at least 10 percentage
+points unused. Focus stays on while any leftover is still projected. A move
+happens at the conversation's next turn and costs one prompt-cache rebuild on
+the focus account. Only model families whose thinking stays valid across
+accounts move (Opus, Fable, Mythos). Sonnet 5.5 and Haiku 5.5 thinking is
+account-bound and would be dropped, so those conversations stay. Requests that
+reference workspace-scoped state (Files API sources, code-execution containers,
+server tool results) also stay. Set `claude_focus` to `off` through the settings
+API to disable moves. Transitions are logged as `claude focus changed`, and each
+move is recorded as decision `claude_focus_migration_from_<credential>`.
+
+A replayable Claude turn whose bound account became unavailable moves without
+waiting for that account to become idle, because Claude requests carry their
+full history and no account-local continuation state. Codex keeps its stricter
+rule.

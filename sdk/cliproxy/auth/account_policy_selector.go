@@ -45,6 +45,8 @@ type EarliestDeadlineSelector struct {
 	bindings         map[string]policyBinding
 	bindingStore     *accountpolicybindings.Store
 	bindingAuth      func(string) (*Auth, bool)
+	claude           map[string]*claudeWeeklyState
+	claudeFocus      string
 }
 
 func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, clocks ...func() time.Time) *EarliestDeadlineSelector {
@@ -133,6 +135,7 @@ func (s *EarliestDeadlineSelector) InvalidateAuth(id string) {
 	s.affinity.InvalidateAuth(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.claude, id)
 	for key, b := range s.bindings {
 		if b.authID == id {
 			delete(s.bindings, key)
@@ -300,6 +303,12 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 				evaluation.Reason = "last_known_weekly_reset"
 			}
 		}
+		if isClaudeAuth(a) && evaluation.Deadline.IsZero() {
+			if reset, ok := s.claudeDeadline(a, now); ok {
+				evaluation.Deadline = reset
+				evaluation.Reason = "claude_weekly_reset"
+			}
+		}
 		eligible = append(eligible, a)
 		evaluations[a.ID] = evaluation
 		unknown = unknown || !evaluation.Known
@@ -382,12 +391,17 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 		return nil, &Error{Code: "account_policy_unavailable", Message: "no account satisfies account policy", HTTPStatus: 503}
 	}
 	ranked := make([]*Auth, 0, len(eligible))
+	claudeIncomplete := false
 	for _, a := range eligible {
 		if !evaluations[a.ID].Deadline.IsZero() {
 			ranked = append(ranked, a)
+		} else if isClaudeAuth(a) {
+			claudeIncomplete = true
 		}
 	}
-	if len(ranked) == 0 {
+	// A Claude account is observed only after it serves a request, so ranking
+	// before every account has been observed would starve the unobserved ones.
+	if len(ranked) == 0 || claudeIncomplete {
 		a, err := s.effectiveFallback().Pick(ctx, provider, model, opts, eligible)
 		s.decision(a, provider, model, "missing_or_stale_evidence", accountpolicy.Evaluation{}, true)
 		return a, err
@@ -405,6 +419,11 @@ func (r *deadlineRankingSelector) Pick(ctx context.Context, provider, model stri
 
 func (r *deadlineRankingSelector) PickUnavailable(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, id string) error {
 	s := r.owner
+	// A replayable Claude turn carries its whole history and no account-local
+	// state, so it may move while the old account still serves other requests.
+	if strings.EqualFold(provider, "claude") && policyRequestReplayable(ctx, opts) {
+		return nil
+	}
 	s.mu.Lock()
 	idle := s.idle
 	s.mu.Unlock()
@@ -436,6 +455,16 @@ func (r *deadlineRankingSelector) PickBound(ctx context.Context, provider, model
 	if splitID != "" || pressureID != "" {
 		s.decision(bound, provider, model, "retained_spreading_owner", e, false)
 		return bound, nil
+	}
+	if isClaudeAuth(bound) {
+		if target := s.claudeFocusTarget(s.now()); target != "" && target != bound.ID && claudeConversationPortable(ctx, model, opts) {
+			for _, candidate := range auths {
+				if te, eligible := evaluations[candidate.ID]; eligible && candidate.ID == target {
+					s.decision(candidate, provider, model, "claude_focus_migration_from_"+bound.ID, te, false)
+					return candidate, nil
+				}
+			}
+		}
 	}
 	reason := "strict_affinity"
 	if s.policy.Settings().Affinity == "deadline_at_boundary" {

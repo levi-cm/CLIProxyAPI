@@ -39,6 +39,9 @@ func ValidateSettings(s Settings) error {
 	if !validCreditSpending(s.CreditSpending) {
 		return bad()
 	}
+	if !slices.Contains([]string{"", "auto", "off"}, s.ClaudeFocus) {
+		return bad()
+	}
 	for id, c := range s.Accounts {
 		if id == "" || math.IsNaN(c.ReservePercent) || math.IsInf(c.ReservePercent, 0) || c.ReservePercent < 0 || c.ReservePercent > 100 {
 			return bad()
