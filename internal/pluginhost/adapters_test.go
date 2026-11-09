@@ -4329,4 +4329,3 @@ func TestExecutorAdapterRefresh_PreservesDisabledState_Issue7225(t *testing.T) {
 		t.Fatalf("Refresh() token = %q, want new", got)
 	}
 }
-
