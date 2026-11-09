@@ -1,5 +1,5 @@
 import unittest
-from core import IdleWindow, validate_timing, Cutover
+from core import IdleWindow, validate_timing, validate_interrupt_timing, Cutover
 
 
 class Clock:
@@ -59,8 +59,12 @@ class IdleTests(unittest.TestCase):
             self.assertFalse(w.ready(e))
     def test_budget_includes_recovery_margin(self):
         self.assertGreater(validate_timing(6,7,2,40),0)
-        for values in [(18,18,4,40),(6,7,2,0),(-1,7,2,40)]:
+        for values in [(18,18,4,40),(6,7,2,0),(-1,7,2,40),(6,7,2,90)]:
             with self.assertRaises(ValueError):validate_timing(*values)
+    def test_interrupt_budget_is_capped_and_reserves_rollback(self):
+        self.assertEqual(validate_interrupt_timing(30,5,2,90),90-35)
+        for values in [(40,5,2,90),(10,5,2,91),(10,30,2,60)]:
+            with self.assertRaises(ValueError):validate_interrupt_timing(*values)
 
 
 class CutoverTests(unittest.TestCase):

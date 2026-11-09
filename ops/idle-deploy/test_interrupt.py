@@ -130,6 +130,20 @@ class InterruptPreflightTests(unittest.TestCase):
                 probe.assert_not_called();self.assertIsNone(b.redemption);self.assertFalse(b.journal.exists())
                 self.assertTrue(lock_available(b.state/'redemption.lock'))
 
+    def test_long_interrupt_budget_keeps_rollback_reserve(self):
+        for candidate,allowed in ((30,True),(40,False)):
+            with self.subTest(candidate=candidate),tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
+                b=make_backend(release_dir(tmp));started_journal(b)
+                b.m['timing']={'candidate':candidate,'rollback':4,'stop':2,'budget':90,'recovery_total':8,'rollback_wait':31}
+                with patch.object(interrupt,'inspect',side_effect=containers()),patch.object(interrupt,'probe'),patch.object(interrupt,'writers'):
+                    if allowed:
+                        b.preflight()
+                        try:self.assertEqual(b.candidate_budget,90-35)
+                        finally:b.release_redemption()
+                    else:
+                        with self.assertRaises(RuntimeError):b.preflight()
+                        self.assertIsNone(b.redemption)
+
     def test_release_identity_checks_are_kept(self):
         cases={'container':lambda b,d:b.m.update(old_pid=7),'config':lambda b,d:(d/'config.yaml').write_text('drift\n'),
                'rehearsal':lambda b,d:atomic(d/'rehearsal.json',{}),'expired':lambda b,d:b.m.update(prepared_at=time.time()-90000),

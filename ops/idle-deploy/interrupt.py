@@ -16,7 +16,7 @@ import time
 
 from backend import Backend,DrainConnection
 from common import ROOT,connections,digest,inspect,probe,run,writers
-from core import Cutover,DeploymentBlocked,validate_timing
+from core import Cutover,DeploymentBlocked,validate_interrupt_timing,validate_timing
 from main import codex_verify,failure_details,publish,release_path
 
 REDEMPTION_WAIT_SECONDS=120
@@ -62,10 +62,15 @@ class InterruptBackend(Backend):
             if any(digest(Path(__file__).parent/n)!=sha for n,sha in m['controller_files'].items()):raise DeploymentBlocked('controller_changed',requires_restage=True)
             if 'interrupt.py' not in m['controller_files']:raise DeploymentBlocked('interrupt_controller_unpinned',requires_restage=True)
             if not json.loads((self.dir/'rehearsal.json').read_text()).get('complete_cycles'):raise RuntimeError('complete cutover/watchdog rehearsal missing')
-            self.candidate_budget=validate_timing(**m['timing']);t=m['timing']
-            # validate_timing reserves 4s for the default 3.5s pre-stop window;
-            # the longer interrupt window must fit the same measured budget.
-            if t['candidate']*1.5+t['stop']+PRE_STOP_SECONDS+.5>=self.candidate_budget:raise DeploymentBlocked('interrupt_budget_insufficient',requires_restage=True)
+            t=m['timing']
+            if t.get('budget',40)>40:
+                try:self.candidate_budget=validate_interrupt_timing(**t,pre_stop=PRE_STOP_SECONDS)
+                except ValueError:raise DeploymentBlocked('interrupt_budget_insufficient',requires_restage=True)
+            else:
+                self.candidate_budget=validate_timing(**t)
+                # validate_timing reserves 4s for the default 3.5s pre-stop window;
+                # the longer interrupt window must fit the same measured budget.
+                if t['candidate']*1.5+t['stop']+PRE_STOP_SECONDS+.5>=self.candidate_budget:raise DeploymentBlocked('interrupt_budget_insufficient',requires_restage=True)
             probe(m['old_commit']);writers(self.state,True)
             self.reset_attempt();self.snapshot();self.phase('preflight',mode='interrupt')
         except BaseException:

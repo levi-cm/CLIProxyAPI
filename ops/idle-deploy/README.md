@@ -104,6 +104,14 @@ The release must be prepared with this controller version (`interrupt.py` hash
 pinned) and less than 24 hours ago. `--retire-idle-clients` is recommended so the
 fixture rehearsals exercise the same client freeze and `ss -K` path.
 
+The first start after a long uptime imports legacy usage logs rotated since the
+last start, which can take tens of seconds. The operator may then pin a longer
+outage budget during preparation with `--outage-budget SECONDS` (at most 90).
+Such a release keeps a fixed 35-second rollback reserve, waits that long for a
+recovering original, measures rehearsal startups up to 45 seconds, and can only
+be deployed by this interrupt controller; the idle and maintenance modes reject
+any budget above 40 seconds.
+
 Only the idle window, capture evidence and zero-activity/connection requirements
 are removed. Everything else is the unchanged cutover: container, candidate,
 config/.env, rehearsal and controller identity; measured timing budget;

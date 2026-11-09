@@ -289,7 +289,7 @@ class Backend:
         if journal.get('env_after_sha256') and digest(p)==journal['env_after_sha256']:
             with p.open('r+b') as f:f.write(before);f.truncate();f.flush();os.fsync(f.fileno())
         run(['docker','start',old['Id']],timeout=3)
-        deadline=time.monotonic()+max(5,self.m['timing']['rollback']*1.5+2)
+        deadline=time.monotonic()+max(5,self.m['timing']['rollback']*1.5+2,self.m['timing'].get('rollback_wait') or 0)
         while time.monotonic()<deadline:
             info=inspect(old['Id'])
             try:

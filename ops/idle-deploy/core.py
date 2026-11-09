@@ -26,7 +26,7 @@ class IdleWindow:
         except (KeyError,ValueError,TypeError): return False
 
 
-def validate_timing(candidate,rollback,stop,budget=40,recovery_total=None):
+def validate_timing(candidate,rollback,stop,budget=40,recovery_total=None,rollback_wait=None):
     values=[candidate,rollback,stop,budget]
     if not all(math.isfinite(v) and v>0 for v in values) or budget>40:
         raise ValueError('invalid measured deployment timings or outage budget')
@@ -34,6 +34,24 @@ def validate_timing(candidate,rollback,stop,budget=40,recovery_total=None):
     candidate_budget=budget-reserve
     if candidate*1.5+stop+4 >= candidate_budget:
         raise ValueError('rehearsal leaves insufficient rollback margin below 40 seconds')
+    return candidate_budget
+
+
+# An operator-authorized interrupting cutover may use a longer outage budget.
+# The first start after a long uptime can import rotated legacy usage logs, and a
+# rollback started mid-import repeats that work, so a fixed reserve is kept for it.
+INTERRUPT_MAX_BUDGET=90
+INTERRUPT_ROLLBACK_RESERVE=35
+
+
+def validate_interrupt_timing(candidate,rollback,stop,budget,recovery_total=None,rollback_wait=None,pre_stop=6):
+    values=[candidate,rollback,stop,budget]
+    if not all(math.isfinite(v) and v>0 for v in values) or budget>INTERRUPT_MAX_BUDGET:
+        raise ValueError('invalid measured deployment timings or interrupt outage budget')
+    reserve=max(INTERRUPT_ROLLBACK_RESERVE,rollback*1.5+stop+3,(recovery_total or 0)*1.5+3)
+    candidate_budget=budget-reserve
+    if candidate*1.25+stop+pre_stop+.5 >= candidate_budget:
+        raise ValueError('rehearsal leaves insufficient rollback margin below the interrupt budget')
     return candidate_budget
 
 

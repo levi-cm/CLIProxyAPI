@@ -206,14 +206,15 @@ def rescue(path):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['prepare','launch','watch','rescue','probe','status','fixture-worker']);p.add_argument('--release');p.add_argument('--image');p.add_argument('--commit');p.add_argument('--all-interfaces',action='store_true');p.add_argument('--now',action='store_true',help='explicitly skip the five-minute delay, retaining drain and recovery gates');p.add_argument('--retire-idle-clients',action='store_true',help='pin idle socket retirement after five quiet minutes and zero active requests');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['prepare','launch','watch','rescue','probe','status','fixture-worker']);p.add_argument('--release');p.add_argument('--image');p.add_argument('--commit');p.add_argument('--all-interfaces',action='store_true');p.add_argument('--now',action='store_true',help='explicitly skip the five-minute delay, retaining drain and recovery gates');p.add_argument('--retire-idle-clients',action='store_true',help='pin idle socket retirement after five quiet minutes and zero active requests');p.add_argument('--outage-budget',type=int,default=40,help='seconds; above 40 (max 90) only the interrupting cutover can deploy the release');a=p.parse_args()
+    if a.outage_budget!=40 and a.command!='prepare':p.error('--outage-budget must be pinned during prepare')
     if a.retire_idle_clients and a.command!='prepare':p.error('--retire-idle-clients must be pinned during prepare')
     if a.now and a.command not in ('launch','watch'):p.error('--now is only valid with launch or watch')
     if a.command=='probe':print(json.dumps(probe(a.commit,a.all_interfaces)));return
     if a.command=='prepare':
         from prepare import prepare
         from verify import before
-        path=prepare(a.image,a.commit,retire_idle_clients=a.retire_idle_clients);m=json.loads(path.read_text());proof=before(path.parent);publish(m,'continuity-preflight.json',proof)
+        path=prepare(a.image,a.commit,retire_idle_clients=a.retire_idle_clients,outage_budget=a.outage_budget);m=json.loads(path.read_text());proof=before(path.parent);publish(m,'continuity-preflight.json',proof)
         print(json.dumps({'release':str(path),'timing':m['timing'],'candidate_commit':m['candidate_commit']}));return
     path=release_path(a.release)
     if a.command=='fixture-worker':

@@ -12,7 +12,7 @@ from core import Cutover,IdleWindow
 
 from common import ROOT,LOCKS,atomic,digest,inspect,lock_available,owners,preserve_owners,probe,run,writers
 from backend import create_stopped
-from core import validate_timing
+from core import INTERRUPT_MAX_BUDGET,INTERRUPT_ROLLBACK_RESERVE,validate_interrupt_timing,validate_timing
 
 
 SOURCES={'config.yaml':'config.yaml','account-policy-state':'account-policy-state','auths':'auths','plugins':'plugins','static':'static'}
@@ -76,8 +76,12 @@ else:raise AssertionError('new connection passed closed admission')
         if child.poll() is None:child.kill();child.wait()
 
 
-def prepare(image,commit,retire_idle_clients=False):
+def prepare(image,commit,retire_idle_clients=False,outage_budget=40):
     if os.geteuid()!=0:raise RuntimeError('preparation needs local root for isolated namespace probes')
+    interrupt_budget=outage_budget>40
+    if interrupt_budget and not 40<outage_budget<=INTERRUPT_MAX_BUDGET:raise RuntimeError('unsupported outage budget')
+    # Larger budgets are only usable by the interrupting cutover; idle modes reject them.
+    limit=45 if interrupt_budget else 16
     os.umask(0o077)
     old=inspect('cli-proxy-api')
     if not old['State']['Running']:raise RuntimeError('production is not running')
@@ -106,7 +110,7 @@ def prepare(image,commit,retire_idle_clients=False):
     try:
         for kind,img,sha in [('candidate',image_id,commit),('rollback',old['Image'],old_commit)]:
             c=fixture_container(fixture,'cliproxy-idle-fixture-'+token+'-'+kind,img);created.append(c)
-            elapsed,report=startup(c,sha);writers(fixture/'account-policy-state',True)
+            elapsed,report=startup(c,sha,limit);writers(fixture/'account-policy-state',True)
             count=preserve_owners(before,fixture/'account-policy-state')
             if kind=='candidate':gate_rehearsal(c,token)
             stop_time=stop(c,fixture/'account-policy-state');max_stop=max(max_stop,stop_time)
@@ -116,16 +120,20 @@ def prepare(image,commit,retire_idle_clients=False):
         failed=fixture_container(fixture,'cliproxy-idle-fixture-'+token+'-failed',image_id,['/bin/false']);created.append(failed)
         run(['docker','start',failed]);run(['docker','wait',failed],timeout=4)
         recovery=fixture_container(fixture,'cliproxy-idle-fixture-'+token+'-recovery',old['Image']);created.append(recovery)
-        forced_start=time.monotonic();elapsed,_=startup(recovery,old_commit)
+        forced_start=time.monotonic();elapsed,_=startup(recovery,old_commit,limit)
         preserve_owners(before,fixture/'account-policy-state');max_stop=max(max_stop,stop(recovery,fixture/'account-policy-state'))
         results.append({'kind':'forced_failure_recovery','start_seconds':round(elapsed,3),'total_seconds':round(time.monotonic()-forced_start,3)})
     finally:
         for c in created:run(['docker','rm','-f',c],check=False)
-    timing={'candidate':results[0]['start_seconds'],'rollback':max(results[1]['start_seconds'],results[2]['start_seconds']),'stop':max(2,round(max_stop,3)),'budget':40}
-    validate_timing(**timing)
+    timing={'candidate':results[0]['start_seconds'],'rollback':max(results[1]['start_seconds'],results[2]['start_seconds']),'stop':max(2,round(max_stop,3)),'budget':outage_budget}
+    check=validate_interrupt_timing if interrupt_budget else validate_timing
+    if interrupt_budget:
+        # Recovery waits for an original that may repeat an interrupted import.
+        timing['rollback_wait']=INTERRUPT_ROLLBACK_RESERVE-timing['stop']-2
+    check(**timing)
     cycles=full_cycles(directory,fixture,token,image_id,commit,old['Image'],old_commit,retire_idle_clients=retire_idle_clients)
     timing['recovery_total']=cycles['recovery_seconds']
-    validate_timing(**timing)
+    check(**timing)
     atomic(directory/'rehearsal.json',{'results':results,'timing':timing,'complete_cycles':cycles,'fixture_only':True,'candidate_image_id':image_id,'old_image_id':old['Image']})
     old_again=inspect('cli-proxy-api')
     if old_again['Id']!=old['Id'] or old_again['State']['StartedAt']!=old['State']['StartedAt']:raise RuntimeError('production changed during rehearsal')
