@@ -1,11 +1,10 @@
 package claude
 
 import (
+	"encoding/base64"
 	"net/url"
 	"strings"
 	"testing"
-
-	"github.com/MoeForge/moego/base64"
 )
 
 func TestGenerateStateMatchesNativeClaudeCode(t *testing.T) {

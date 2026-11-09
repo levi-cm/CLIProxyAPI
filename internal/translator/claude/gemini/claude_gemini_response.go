@@ -8,10 +8,10 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"strings"
 	"time"
 
-	"encoding/base64"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"

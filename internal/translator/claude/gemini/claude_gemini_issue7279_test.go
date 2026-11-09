@@ -2,10 +2,10 @@ package gemini
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
-	"github.com/MoeForge/moego/base64"
 	"github.com/tidwall/gjson"
 )
 

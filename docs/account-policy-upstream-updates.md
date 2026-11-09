@@ -7,6 +7,16 @@ The integration candidate targets pinned upstream `8289ec4c71ad914d0612c2776352b
 Production automatic redemption is permanently required. Preserve `automation_required`,
 the mandatory 600-second expiry guard, supported reset credit type and identity checks.
 Use fixture-only state for tests; never suspend the authoritative writer for validation.
+
+The 2026-11-07 selective candidate adds upstream #7289, #7294, #7317, #7300
+and #7279 on top of the previously approved #7256-#7271 release. It includes
+only the necessary shared Gemini helpers from `c888ff72`, without moving the
+upstream merge base or importing the JSON-library migration. See
+[the integration record](integration/selective-7289-7317.md) for provenance,
+verification, and the zero-downtime deployment blocker. The 2026-11-09
+integration (`integration/claude-focus-20261109`) deploys this batch except
+upstream `68cd7572` (durable Codex refresh journal), which stays excluded until
+a rollback image honors the same journal protocol.
 Upstream `Selector`, executor, credential, HTTP, and usage plugin interfaces are
 preserved; extension capabilities are additive optional interfaces or callbacks.
 Custom policy code does not change executor payload-building or translators;

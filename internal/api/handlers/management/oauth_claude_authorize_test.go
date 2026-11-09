@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MoeForge/moego/base64"
-	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type claudeAuthorizationProbe struct {
@@ -59,13 +60,15 @@ func TestClaudeOAuthV8CallbackPreservesURLSafeState(t *testing.T) {
 				if form == "redirect_url" {
 					values = map[string]string{"redirect_url": "http://localhost:54545/callback?" + query.Encode()}
 				}
-				doc := ojson.NewDocString(`{}`)
+				doc := []byte(`{}`)
 				for key, value := range values {
-					if errSet := doc.Set(key, value); errSet != nil {
+					var errSet error
+					doc, errSet = sjson.SetBytes(doc, key, value)
+					if errSet != nil {
 						t.Fatalf("set callback field %s: %v", key, errSet)
 					}
 				}
-				request := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/callback", bytes.NewReader(doc.Bytes()))
+				request := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/callback", bytes.NewReader(doc))
 				request.Header.Set("Content-Type", "application/json")
 				return request
 			}
@@ -89,10 +92,10 @@ func TestClaudeOAuthV8CallbackPreservesURLSafeState(t *testing.T) {
 			if errRead != nil {
 				t.Fatalf("read callback file: %v", errRead)
 			}
-			if got := ojson.GetBytesNoCopy(payload, "state").String(); got != state {
+			if got := gjson.GetBytes(payload, "state").String(); got != state {
 				t.Fatalf("callback file state = %q, want %q", got, state)
 			}
-			if got := ojson.GetBytesNoCopy(payload, "code").String(); got != "callback-code" {
+			if got := gjson.GetBytes(payload, "code").String(); got != "callback-code" {
 				t.Fatalf("callback file code = %q, want callback-code", got)
 			}
 		})
@@ -103,14 +106,14 @@ func TestStartOAuthV8ClaudeUsesNativeAuthorizationParameters(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	probe := &claudeAuthorizationProbe{ClaudeAuth: &claude.ClaudeAuth{}}
 	originalFactory := newClaudeOAuthService
-	newClaudeOAuthService = func(*config.Config, string) claudeOAuthService { return probe }
+	newClaudeOAuthService = func(*config.Config) claudeOAuthService { return probe }
 	defer func() { newClaudeOAuthService = originalFactory }()
 
 	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	router := gin.New()
 	router.POST("/v8/management/oauth/auth-url", handler.StartOAuthV8)
 
-	request := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"claude"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url?provider=claude", strings.NewReader(`{"provider":"claude"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
