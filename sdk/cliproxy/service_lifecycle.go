@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -110,6 +112,7 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		s.coreManager.StartClaudeUsagePoller(ctx, s.fetchClaudeUsage)
 	}
 
 	if !homeEnabled {
@@ -442,4 +445,14 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+}
+
+// fetchClaudeUsage reads a Claude account's plan utilization through the
+// account's own proxy settings, without sending a model request.
+func (s *Service) fetchClaudeUsage(ctx context.Context, a *coreauth.Auth, accessToken string) (http.Header, error) {
+	report, errFetch := claudeauth.NewClaudeAuthWithProxyURL(s.currentConfig(), a.ProxyURL).FetchOAuthUsage(ctx, accessToken)
+	if errFetch != nil {
+		return nil, errFetch
+	}
+	return report.RateLimitHeaders(), nil
 }

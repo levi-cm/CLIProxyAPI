@@ -120,6 +120,15 @@ observed (for example after a restart), the configured fallback selects instead,
 so unobserved accounts are not starved. A reset that has passed is projected
 forward by whole weeks for ordering only.
 
+Accounts that routing keeps idle would otherwise go stale. Every five minutes,
+each enabled Claude account whose last observation is at least four minutes
+old reads `GET https://api.anthropic.com/api/oauth/usage` (the read-only
+endpoint behind Claude Code's `/usage`; no model request, no allowance used).
+The result is stored as the same unified headers, so usage dashboards and the
+deadline evidence stay fresh, and the evidence exists shortly after a restart.
+A failed read keeps the previous observation, and a response observed after the
+read started is never overwritten. Only the passive observation changes.
+
 Running conversations normally keep their account. Focus mode moves them only
 when the earliest-resetting account resets within 48 hours and, at its own
 utilization pace over the trailing 24 hours (at least one hour of observations,
