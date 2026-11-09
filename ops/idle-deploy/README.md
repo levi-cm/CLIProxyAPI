@@ -85,6 +85,46 @@ resets it. Status includes `idle_required_seconds`, `retire_idle_clients`, captu
 drop counts, and a persistent `last_block` with sanitized reason/counts. A normal
 status heartbeat no longer hides the last deployment gate failure.
 
+## Interrupting cutover (operator-authorized)
+
+Production traffic may never reach zero. When the operator explicitly authorizes
+interrupting in-flight requests, SSE streams and WebSockets, deploy a prepared
+release with the separate interrupt controller instead of `main.py launch`:
+
+```bash
+sudo -n python3 ops/idle-deploy/main.py prepare \
+  --image IMAGE --commit COMMIT --retire-idle-clients
+sudo -n python3 ops/idle-deploy/interrupt.py launch \
+  /DATA/AppData/CLIProxyAPI/.tmp/idle-deploy/RELEASE/release.json
+```
+
+`launch` starts the worker in the transient unit `cliproxy-idle-deploy-RELEASE`
+(`KillMode=control-group`) and prints JSON; the worker cuts over immediately.
+The release must be prepared with this controller version (`interrupt.py` hash
+pinned) and less than 24 hours ago. `--retire-idle-clients` is recommended so the
+fixture rehearsals exercise the same client freeze and `ss -K` path.
+
+Only the idle window, capture evidence and zero-activity/connection requirements
+are removed. Everything else is the unchanged cutover: container, candidate,
+config/.env, rehearsal and controller identity; measured timing budget;
+independent watchdog and rescue; admission gates; writer fencing; readiness;
+state preservation; `.env` image commit; ungating; journaling; `deployment.json`
+and Codex verification. The old container must not use host networking.
+
+- Automatic reset redemption is never interrupted. `redemption.lock` is taken
+  before any other step; an in-flight redemption is awaited for up to 120 seconds,
+  after which the attempt blocks without touching production.
+- After admission closes, client input is frozen (control socket excepted), the
+  authoritative active-request count and client connection count are journaled as
+  `interrupted_requests` / `interrupted_connections`, and every other client TCP
+  socket on the router ports is killed with `ss -K` in the old namespace.
+- If client sockets remain after about three seconds, the attempt blocks before
+  stop and the original is retained. The pre-stop window is six seconds and
+  preflight refuses releases whose measured budget cannot absorb it.
+- The journal and `failure.json` carry `mode: interrupt`. Interrupted clients must
+  reconnect or retry; durable conversation ownership, credentials and journals are
+  retained exactly as in the default mode.
+
 ## Idle and preservation rules
 
 - A passive IPv4/IPv6 observer runs in the serving network namespace. It sends no
