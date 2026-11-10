@@ -47,6 +47,7 @@ type EarliestDeadlineSelector struct {
 	bindingAuth      func(string) (*Auth, bool)
 	claude           map[string]*claudeWeeklyState
 	claudeFocus      string
+	claudeLimits     map[string]map[string]claudeLimitWindow
 }
 
 func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, clocks ...func() time.Time) *EarliestDeadlineSelector {
@@ -136,6 +137,7 @@ func (s *EarliestDeadlineSelector) InvalidateAuth(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.claude, id)
+	delete(s.claudeLimits, id)
 	for key, b := range s.bindings {
 		if b.authID == id {
 			delete(s.bindings, key)
@@ -268,6 +270,8 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		auths = positiveWeightAuths(auths)
 	}
 	evaluations := make(map[string]accountpolicy.Evaluation, len(auths))
+	var limited []*Auth
+	limitedEvaluations := make(map[string]accountpolicy.Evaluation)
 	for _, a := range auths {
 		if a == nil {
 			continue
@@ -309,9 +313,26 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 				evaluation.Reason = "claude_weekly_reset"
 			}
 		}
+		if isClaudeAuth(a) {
+			s.observeClaudeAuthLimits(a)
+			if s.claudeLimitBlocked(a.ID, quotaModel, now) {
+				limited = append(limited, a)
+				limitedEvaluations[a.ID] = evaluation
+				continue
+			}
+		}
 		eligible = append(eligible, a)
 		evaluations[a.ID] = evaluation
 		unknown = unknown || !evaluation.Known
+	}
+	// A full 5-hour or Fable window only steers traffic to an open account. When
+	// every account is full, upstream decides and the reactive cooldown applies.
+	if len(eligible) == 0 && len(limited) > 0 {
+		for _, a := range limited {
+			eligible = append(eligible, a)
+			evaluations[a.ID] = limitedEvaluations[a.ID]
+			unknown = unknown || !limitedEvaluations[a.ID].Known
+		}
 	}
 	return eligible, evaluations, unknown
 }
@@ -421,7 +442,8 @@ func (r *deadlineRankingSelector) PickUnavailable(ctx context.Context, provider,
 	s := r.owner
 	// A replayable Claude turn carries its whole history and no account-local
 	// state, so it may move while the old account still serves other requests.
-	if strings.EqualFold(provider, "claude") && policyRequestReplayable(ctx, opts) {
+	// The provider is "mixed" for multi-provider routing, so the owner decides.
+	if s.claudeCredential(provider, id) && policyRequestReplayable(ctx, opts) {
 		return nil
 	}
 	s.mu.Lock()

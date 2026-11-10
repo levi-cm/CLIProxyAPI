@@ -908,6 +908,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth
+	var observedHeaders http.Header
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
 	now := time.Now()
@@ -1355,6 +1356,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		if !result.SkipQuotaObservation && !predatesQuotaRecovery {
 			policyQuotaBefore := policyQuotaExhausted(auth.Quota)
+			observedHeaders = responseHeaders
 			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			policyQuotaWake = !policyQuotaBefore && policyQuotaExhausted(auth.Quota)
 			if modelState != nil {
@@ -1410,7 +1412,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	m.observeSelectorResponseHeaders(result, observedHeaders, now)
 	m.updateSessionAffinity(result)
+}
+
+// responseHeaderObserver receives every observed upstream response's headers.
+// The auth's quota snapshot keeps only the latest response, while a window that
+// Anthropic reports on some models only must survive later responses.
+type responseHeaderObserver interface {
+	ObserveResponseHeaders(authID, provider string, headers http.Header, at time.Time)
+}
+
+func (m *Manager) observeSelectorResponseHeaders(result Result, headers http.Header, at time.Time) {
+	if m == nil || len(headers) == 0 {
+		return
+	}
+	if observer, ok := m.Selector().(responseHeaderObserver); ok && observer != nil {
+		observer.ObserveResponseHeaders(result.AuthID, result.Provider, headers, at)
+	}
 }
 
 func (m *Manager) updateSessionAffinity(result Result) {

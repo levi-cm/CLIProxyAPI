@@ -145,5 +145,26 @@ move is recorded as decision `claude_focus_migration_from_<credential>`.
 
 A replayable Claude turn whose bound account became unavailable moves without
 waiting for that account to become idle, because Claude requests carry their
-full history and no account-local continuation state. Codex keeps its stricter
-rule.
+full history and no account-local continuation state. The bound credential's
+provider decides this, not the route namespace: the manager routes every
+request under `mixed`. Codex keeps its stricter rule.
+
+### 5-hour and Fable windows
+
+Two narrower windows can refuse a Claude account before its weekly allowance
+is used up. The 5-hour session window (`Anthropic-Ratelimit-Unified-5h-*`)
+refuses every model. The Fable-scoped weekly window (`...-7d_oi-*`) refuses
+Fable only, and Anthropic reports it on Fable responses only. The selector keeps
+the last reported state of both windows per account. It learns them from every
+response, including the 429 refusal, and from the usage poller (the `session`
+limit and the `weekly_scoped` limit for model "Fable").
+
+A window is full when its status is `rejected` or its utilization reaches 1.0.
+Until its reset passes, a full 5-hour window takes the account out of Claude
+routing, and a full Fable window takes it out of Fable routing only, so Opus
+keeps using the focus account. New conversations then go to the earliest weekly
+reset among accounts with an open window (an account without a 5-hour window
+is always open), and bound conversations move as above. A full window without
+a known reset, or every account full at once, leaves the decision to upstream
+and the reactive cooldown. Transitions are logged as `claude limit window full`
+and `claude limit window open`.
