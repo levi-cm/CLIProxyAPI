@@ -54,13 +54,18 @@ def ack_path(release):
 
 
 def acknowledge_controller(release):
-    """Called by a worker only after it holds both the host and release locks."""
-    atomic(ack_path(release),{'invocation_id':os.environ.get('INVOCATION_ID',''),'pid':os.getpid()})
+    """Called by a worker only after it holds both the host and release locks.
+    Managed workers always run under systemd; without an invocation identity the
+    launch can never be confirmed, so the worker must not proceed."""
+    invocation=os.environ.get('INVOCATION_ID','').strip()
+    if not invocation:raise RuntimeError('deployment controller has no systemd invocation identity; refusing to proceed')
+    atomic(ack_path(release),{'invocation_id':invocation,'pid':os.getpid()})
 
 
 def active_recovery_units(listing=None):
     """Watchdog timers/rescue services that still own a transaction."""
-    raw=listing if listing is not None else run(['systemctl','list-units','--all','--no-legend','--plain','cliproxy-idle-watchdog-*'],timeout=3,check=False).decode()
+    # A failed query raises: launches must fail closed when recovery is unknown.
+    raw=listing if listing is not None else run(['systemctl','list-units','--all','--no-legend','--plain','cliproxy-idle-watchdog-*'],timeout=3).decode()
     units=[]
     for line in raw.splitlines():
         fields=line.split()

@@ -76,9 +76,21 @@ class RecoveryTests(unittest.TestCase):
                 # Simulate a worker committing just before its death. The durable
                 # terminal state wins over the watchdog's initial observation.
                 atomic(b.journal,{'phase':'committed'});return b''
-            with patch.object(main,'Backend',return_value=b),patch.object(main,'run',side_effect=run),patch.object(main,'publish'):
+            with patch.object(main,'Backend',return_value=b),patch.object(main,'run',side_effect=run),patch.object(main,'publish'),\
+                    patch.object(main,'WATCHER_LOCK',d/'watcher.lock'):
                 main.rescue(path)
             b.recover.assert_not_called();b.ungate.assert_called_once()
+    def test_rescue_recovers_even_when_host_lock_is_held(self):
+        import fcntl
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
+            d=Path(tmp);path=d/'release.json';atomic(path,{'token':'test'})
+            b=MagicMock();b.journal=d/'transaction.json';atomic(b.journal,{'phase':'starting_candidate'})
+            with (d/'watcher.lock').open('a+') as other:
+                fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                with patch.object(main,'Backend',return_value=b),patch.object(main,'run',return_value=b''),patch.object(main,'publish'),\
+                        patch.object(main,'WATCHER_LOCK',d/'watcher.lock'):
+                    main.rescue(path)
+            b.recover.assert_called_once();b.ungate.assert_called_once()
     def test_rescue_does_not_signal_already_committed_worker(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
             d=Path(tmp);path=d/'release.json';atomic(path,{'token':'test'})

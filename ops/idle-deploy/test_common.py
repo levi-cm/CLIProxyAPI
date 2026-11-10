@@ -229,3 +229,35 @@ class SingleFlightTests(unittest.TestCase):
                    'cliproxy-idle-watchdog-b.service loaded inactive dead x\n'
                    'cliproxy-idle-watchdog-c.service loaded activating start x\n')
         self.assertEqual(active_recovery_units(listing), ['cliproxy-idle-watchdog-a.timer', 'cliproxy-idle-watchdog-c.service'])
+
+    def test_failed_watchdog_query_refuses_launch(self):
+        import common
+        started = []
+
+        def run(args, **kw):
+            if args[0] == 'systemctl':
+                raise RuntimeError('systemctl failed with exit 1')
+            started.append(args)
+            return b''
+        with patch.object(common, 'run', side_effect=run), self.assertRaises(RuntimeError):
+            common.launch_controller(self.release, 'u', ['systemd-run'], launch_lock=self.launch_lock, watcher_lock=self.lock,
+                                     clock=self.clock(), sleep=lambda _: None, state=lambda: 'active', invocation=lambda: 'mine')
+        self.assertEqual(started, [])
+
+    def test_watchdog_query_is_checked(self):
+        import common
+        with patch.object(common, 'run', return_value=b'') as run:
+            common.active_recovery_units()
+        self.assertNotEqual(run.call_args.kwargs.get('check', True), False)
+
+    def test_worker_without_invocation_identity_does_not_proceed(self):
+        import os
+        from common import acknowledge_controller, ack_path
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('INVOCATION_ID', None)
+            with self.assertRaises(RuntimeError):
+                acknowledge_controller(self.release)
+        self.assertFalse(ack_path(self.release).exists())
+        with patch.dict(os.environ, {'INVOCATION_ID': 'abc'}):
+            acknowledge_controller(self.release)
+        self.assertIn('abc', ack_path(self.release).read_text())
