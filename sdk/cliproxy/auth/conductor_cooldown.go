@@ -1420,7 +1420,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 // The auth's quota snapshot keeps only the latest response, while a window that
 // Anthropic reports on some models only must survive later responses.
 type responseHeaderObserver interface {
-	ObserveResponseHeaders(authID, provider string, headers http.Header, at time.Time)
+	ObserveResponseHeaders(authID, provider string, epoch uint64, headers http.Header, at time.Time)
 }
 
 func (m *Manager) observeSelectorResponseHeaders(result Result, headers http.Header, at time.Time) {
@@ -1428,7 +1428,7 @@ func (m *Manager) observeSelectorResponseHeaders(result Result, headers http.Hea
 		return
 	}
 	if observer, ok := m.Selector().(responseHeaderObserver); ok && observer != nil {
-		observer.ObserveResponseHeaders(result.AuthID, result.Provider, headers, at)
+		observer.ObserveResponseHeaders(result.AuthID, result.Provider, result.RegistrationEpoch, headers, at)
 	}
 }
 

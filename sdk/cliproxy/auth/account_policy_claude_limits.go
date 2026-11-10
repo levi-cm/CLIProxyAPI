@@ -32,27 +32,45 @@ type claudeLimitWindow struct {
 	observed time.Time
 }
 
+// claudeLimitState is one registration's windows. A re-registered credential
+// file may hold another account, so state from an older registration is dropped.
+type claudeLimitState struct {
+	epoch   uint64
+	windows map[string]claudeLimitWindow
+}
+
 // ObserveResponseHeaders records the limit windows carried by one upstream
 // response, including a 429 refusal.
-func (s *EarliestDeadlineSelector) ObserveResponseHeaders(authID, provider string, headers http.Header, at time.Time) {
-	if len(headers) == 0 || !s.registeredClaudeCredential(provider, authID) {
+func (s *EarliestDeadlineSelector) ObserveResponseHeaders(authID, provider string, epoch uint64, headers http.Header, at time.Time) {
+	if len(headers) == 0 {
 		return
 	}
-	s.observeClaudeLimits(authID, headers.Get, at)
+	registered, ok := s.registeredClaudeCredential(provider, authID)
+	if !ok || (epoch != 0 && registered != 0 && epoch != registered) {
+		return
+	}
+	if epoch == 0 {
+		epoch = registered
+	}
+	s.observeClaudeLimits(authID, epoch, headers.Get, at)
 }
 
 // registeredClaudeCredential is claudeCredential restricted to accounts the
 // manager still holds, so a result that completes after its account was removed
 // cannot recreate that account's limit state.
-func (s *EarliestDeadlineSelector) registeredClaudeCredential(provider, id string) bool {
+// It also returns the current registration epoch, 0 when unknown.
+func (s *EarliestDeadlineSelector) registeredClaudeCredential(provider, id string) (uint64, bool) {
 	s.mu.Lock()
 	resolve := s.bindingAuth
 	s.mu.Unlock()
 	if resolve == nil {
-		return strings.EqualFold(strings.TrimSpace(provider), "claude")
+		return 0, strings.EqualFold(strings.TrimSpace(provider), "claude")
 	}
 	a, ok := resolve(id)
-	return ok && isClaudeAuth(a)
+	if !ok || !isClaudeAuth(a) {
+		return 0, false
+	}
+	return a.RegistrationEpoch, true
 }
 
 // claudeCredential reports whether id is a Claude account. The manager routes
@@ -79,7 +97,7 @@ func (s *EarliestDeadlineSelector) observeClaudeAuthLimits(a *Auth) {
 		return
 	}
 	signals := a.Quota.Signals
-	s.observeClaudeLimits(a.ID, func(name string) string { return signals[http.CanonicalHeaderKey(name)] }, a.Quota.ObservedAt)
+	s.observeClaudeLimits(a.ID, a.RegistrationEpoch, func(name string) string { return signals[http.CanonicalHeaderKey(name)] }, a.Quota.ObservedAt)
 }
 
 // observeClaudeLimits updates each window the observation reports. A window the
@@ -90,7 +108,7 @@ func (s *EarliestDeadlineSelector) observeClaudeAuthLimits(a *Auth) {
 // Resets only move forward and utilization never falls within one window, so an
 // observation of an earlier window, or an open reading of a window already seen
 // full, is stale and ignored.
-func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(string) string, observed time.Time) {
+func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, epoch uint64, get func(string) string, observed time.Time) {
 	if id == "" || observed.IsZero() {
 		return
 	}
@@ -111,13 +129,23 @@ func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(strin
 		}
 		s.mu.Lock()
 		if s.claudeLimits == nil {
-			s.claudeLimits = make(map[string]map[string]claudeLimitWindow)
+			s.claudeLimits = make(map[string]*claudeLimitState)
 		}
-		windows := s.claudeLimits[id]
-		if windows == nil {
-			windows = make(map[string]claudeLimitWindow, len(claudeLimitWindows))
-			s.claudeLimits[id] = windows
+		state := s.claudeLimits[id]
+		if state != nil && epoch != 0 && state.epoch != 0 && epoch != state.epoch {
+			if epoch < state.epoch {
+				s.mu.Unlock()
+				continue // a result from an older registration
+			}
+			state = nil
 		}
+		if state == nil {
+			state = &claudeLimitState{epoch: epoch, windows: make(map[string]claudeLimitWindow, len(claudeLimitWindows))}
+			s.claudeLimits[id] = state
+		} else if state.epoch == 0 {
+			state.epoch = epoch
+		}
+		windows := state.windows
 		previous, known := windows[name]
 		if known && (!observed.After(previous.observed) || staleClaudeLimit(previous, next)) {
 			s.mu.Unlock()
@@ -151,10 +179,14 @@ func staleClaudeLimit(previous, next claudeLimitWindow) bool {
 // claudeLimitBlocked reports whether a full window that has not reset yet would
 // refuse model on the account. A full window without a known reset is left to
 // the reactive cooldown, because the selector cannot tell when it reopens.
-func (s *EarliestDeadlineSelector) claudeLimitBlocked(id, model string, now time.Time) bool {
+func (s *EarliestDeadlineSelector) claudeLimitBlocked(id string, epoch uint64, model string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	windows := s.claudeLimits[id]
+	state := s.claudeLimits[id]
+	if state == nil || (epoch != 0 && state.epoch != 0 && epoch != state.epoch) {
+		return false
+	}
+	windows := state.windows
 	blocked := func(name string) bool {
 		w, ok := windows[name]
 		return ok && w.full && w.reset.After(now)

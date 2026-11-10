@@ -143,7 +143,7 @@ func TestClaudeBoundFableConversationLeavesFullFableWindow(t *testing.T) {
 		t.Fatalf("initial Opus binding = %q", got)
 	}
 	// The refusal itself reports the full Fable window; x stays busy with Opus.
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{
 		"Anthropic-Ratelimit-Unified-Status":       {"rejected"},
 		"Anthropic-Ratelimit-Unified-7d-Status":    {"allowed"},
 		"Anthropic-Ratelimit-Unified-7d_oi-Status": {"rejected"},
@@ -172,32 +172,32 @@ func TestClaudeLimitObservationOrderingAndUnknownReset(t *testing.T) {
 	f := newMixedClaudeFixture(t)
 	f.observeAll()
 	reset := strconv.FormatInt(f.now.Add(time.Hour).Unix(), 10)
-	f.s.ObserveResponseHeaders("x", "mixed", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
-	f.s.ObserveResponseHeaders("x", "mixed", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(-time.Second))
-	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("x", "mixed", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	f.s.ObserveResponseHeaders("x", "mixed", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(-time.Second))
+	if !f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("an older observation reopened a full window")
 	}
 	// A long stream completes late with headers from before the window filled.
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(time.Second))
-	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(time.Second))
+	if !f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("a late open reading of the same window reopened it")
 	}
 	// The next window has a later reset and reopens the account.
 	nextReset := strconv.FormatInt(f.now.Add(6*time.Hour).Unix(), 10)
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"}, "Anthropic-Ratelimit-Unified-5h-Reset": {nextReset}}, f.now.Add(2*time.Second))
-	if f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"}, "Anthropic-Ratelimit-Unified-5h-Reset": {nextReset}}, f.now.Add(2*time.Second))
+	if f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("a newer window did not reopen the account")
 	}
 	// A late full reading of the previous window must not close the new one.
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(3*time.Second))
-	if f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(3*time.Second))
+	if f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("an observation of an earlier window replaced the current one")
 	}
-	f.s.ObserveResponseHeaders("m", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}}, f.now)
-	if f.s.claudeLimitBlocked("m", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("m", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}}, f.now)
+	if f.s.claudeLimitBlocked("m", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("a full window without a reset must be left to the reactive cooldown")
 	}
-	f.s.ObserveResponseHeaders("removed", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	f.s.ObserveResponseHeaders("removed", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
 	f.s.mu.Lock()
 	_, recorded := f.s.claudeLimits["removed"]
 	f.s.mu.Unlock()
@@ -205,8 +205,8 @@ func TestClaudeLimitObservationOrderingAndUnknownReset(t *testing.T) {
 		t.Fatal("a result for a removed account recreated its limit state")
 	}
 	f.auths["c"] = &Auth{ID: "c", Provider: "codex"}
-	f.s.ObserveResponseHeaders("c", "mixed", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
-	if f.s.claudeLimitBlocked("c", "claude-opus-5-5", f.now) {
+	f.s.ObserveResponseHeaders("c", "mixed", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	if f.s.claudeLimitBlocked("c", 0, "claude-opus-5-5", f.now) {
 		t.Fatal("a non-Claude account recorded a Claude window")
 	}
 }
@@ -217,7 +217,7 @@ type recordingHeaderSelector struct {
 	seen []http.Header
 }
 
-func (r *recordingHeaderSelector) ObserveResponseHeaders(authID, provider string, headers http.Header, _ time.Time) {
+func (r *recordingHeaderSelector) ObserveResponseHeaders(authID, provider string, _ uint64, headers http.Header, _ time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if authID == "claude-limit-hook" && provider == "claude" {
@@ -301,7 +301,7 @@ func TestClaudeLateStreamResultKeepsFullWindowThroughManager(t *testing.T) {
 	// A short request fills the window; a stream that started earlier finishes later.
 	mark(http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Utilization": {"1.0"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, false)
 	mark(http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"allowed"}, "Anthropic-Ratelimit-Unified-5h-Utilization": {"0.9"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, true)
-	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", time.Now()) {
+	if !f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", time.Now()) {
 		t.Fatal("a late stream reopened the full 5-hour window")
 	}
 }
@@ -309,22 +309,22 @@ func TestClaudeLateStreamResultKeepsFullWindowThroughManager(t *testing.T) {
 func TestClaudeResetlessReadingKeepsKnownFullWindow(t *testing.T) {
 	f := newMixedClaudeFixture(t)
 	reset := strconv.FormatInt(f.now.Add(time.Hour).Unix(), 10)
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
 	for i, headers := range []http.Header{
 		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}},
 		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {"0"}},
 		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {"bad"}},
 		{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}},
 	} {
-		f.s.ObserveResponseHeaders("x", "claude", headers, f.now.Add(time.Duration(i+1)*time.Second))
-		if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+		f.s.ObserveResponseHeaders("x", "claude", 0, headers, f.now.Add(time.Duration(i+1)*time.Second))
+		if !f.s.claudeLimitBlocked("x", 0, "claude-opus-5-5", f.now) {
 			t.Fatalf("reading %d without a usable reset erased the full window", i)
 		}
 	}
 	// Once the known reset passed, a reset-less reading is accepted.
-	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"}}, f.now.Add(2*time.Hour))
+	f.s.ObserveResponseHeaders("x", "claude", 0, http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"}}, f.now.Add(2*time.Hour))
 	f.s.mu.Lock()
-	w := f.s.claudeLimits["x"][claudeFiveHourWindow]
+	w := f.s.claudeLimits["x"].windows[claudeFiveHourWindow]
 	f.s.mu.Unlock()
 	if w.full {
 		t.Fatal("a reading after the reset was ignored")
@@ -357,5 +357,59 @@ func TestClaudeFreshContainerIsNotAccountBound(t *testing.T) {
 		if got := f.pickMixed(t, "claude-opus-5-5", opts); got != "x" {
 			t.Fatalf("idle=%v: fresh-container turn = %q want x", idle, got)
 		}
+	}
+}
+
+func TestClaudeLimitStateFollowsRegistrationEpoch(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	f.auths["x"].RegistrationEpoch = 2
+	reset := strconv.FormatInt(f.now.Add(time.Hour).Unix(), 10)
+	full := http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}
+	f.s.ObserveResponseHeaders("x", "claude", 1, full, f.now)
+	if f.s.claudeLimitBlocked("x", 2, "claude-opus-5-5", f.now) {
+		t.Fatal("a result from an older registration was recorded")
+	}
+	f.s.ObserveResponseHeaders("x", "claude", 2, full, f.now)
+	if !f.s.claudeLimitBlocked("x", 2, "claude-opus-5-5", f.now) {
+		t.Fatal("current registration not recorded")
+	}
+	// The credential file is re-registered, possibly with another account.
+	f.auths["x"].RegistrationEpoch = 3
+	if f.s.claudeLimitBlocked("x", 3, "claude-opus-5-5", f.now) {
+		t.Fatal("a new registration inherited the previous one's window")
+	}
+}
+
+type pollRecordingSelector struct {
+	RoundRobinSelector
+	mu   sync.Mutex
+	seen []uint64
+}
+
+func (r *pollRecordingSelector) ObserveResponseHeaders(_ string, _ string, epoch uint64, headers http.Header, _ time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if headers.Get("Anthropic-Ratelimit-Unified-7d_oi-Utilization") == "1" {
+		r.seen = append(r.seen, epoch)
+	}
+}
+
+// A later Opus response replaces the auth's snapshot, so the poller hands its
+// Fable window to the selector directly.
+func TestClaudeUsagePollDeliversWindowsToSelector(t *testing.T) {
+	selector := &pollRecordingSelector{}
+	m := NewManager(nil, selector, nil)
+	if _, err := m.Register(context.Background(), &Auth{ID: "claude-poll", Provider: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := m.GetByID("claude-poll")
+	headers := http.Header{"Anthropic-Ratelimit-Unified-7d_oi-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-7d_oi-Reset": {strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}
+	if !m.observeClaudeUsage("claude-poll", a.RegistrationEpoch, headers, time.Now()) {
+		t.Fatal("poll observation rejected")
+	}
+	selector.mu.Lock()
+	defer selector.mu.Unlock()
+	if len(selector.seen) != 1 || selector.seen[0] != a.RegistrationEpoch {
+		t.Fatalf("selector saw %v", selector.seen)
 	}
 }

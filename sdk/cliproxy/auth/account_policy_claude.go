@@ -196,10 +196,19 @@ func claudeConversationPortable(ctx context.Context, model string, opts cliproxy
 }
 
 func claudeRequestAccountBound(body []byte) bool {
-	// Only a reused container is account state; null or a fresh container
-	// configuration without an ID is created on whichever account serves it.
+	// Only a reused container or an organization's custom skill is account
+	// state; null or a fresh container with Anthropic skills is created on
+	// whichever account serves it.
 	container := gjson.GetBytes(body, "container")
 	if (container.Type == gjson.String && strings.TrimSpace(container.String()) != "") || strings.TrimSpace(container.Get("id").String()) != "" {
+		return true
+	}
+	customSkill := false
+	container.Get("skills").ForEach(func(_, skill gjson.Result) bool {
+		customSkill = !strings.EqualFold(strings.TrimSpace(skill.Get("type").String()), "anthropic")
+		return !customSkill
+	})
+	if customSkill {
 		return true
 	}
 	fileSource := func(block gjson.Result) bool {

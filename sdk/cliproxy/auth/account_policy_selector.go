@@ -47,7 +47,7 @@ type EarliestDeadlineSelector struct {
 	bindingAuth      func(string) (*Auth, bool)
 	claude           map[string]*claudeWeeklyState
 	claudeFocus      string
-	claudeLimits     map[string]map[string]claudeLimitWindow
+	claudeLimits     map[string]*claudeLimitState
 }
 
 func NewEarliestDeadlineSelector(policy AccountPolicySource, fallback Selector, clocks ...func() time.Time) *EarliestDeadlineSelector {
@@ -315,7 +315,7 @@ func (s *EarliestDeadlineSelector) evaluate(provider, model string, auths []*Aut
 		}
 		if isClaudeAuth(a) {
 			s.observeClaudeAuthLimits(a)
-			if s.claudeLimitBlocked(a.ID, quotaModel, now) {
+			if s.claudeLimitBlocked(a.ID, a.RegistrationEpoch, quotaModel, now) {
 				limited = append(limited, a)
 				limitedEvaluations[a.ID] = evaluation
 				continue

@@ -109,8 +109,12 @@ func (m *Manager) observeClaudeUsage(id string, epoch uint64, headers http.Heade
 	a.UpdatedAt = now
 	snapshot := a.Clone()
 	m.mu.Unlock()
+	releaseMutation()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
+	// A later response replaces the snapshot, so hand the windows to the
+	// selector now; the Fable window is otherwise visible on Fable responses only.
+	m.observeSelectorResponseHeaders(Result{AuthID: id, Provider: snapshot.Provider, RegistrationEpoch: epoch}, headers, now)
 	return true
 }
