@@ -15,7 +15,7 @@ import sys
 import time
 
 from backend import Backend,DrainConnection
-from common import ROOT,connections,digest,inspect,probe,run,writers
+from common import ROOT,confirm_controller,connections,digest,inspect,probe,require_no_active_deployment,run,writers
 from core import Cutover,DeploymentBlocked,validate_interrupt_timing,validate_timing
 from main import codex_verify,failure_details,publish,release_path
 
@@ -118,8 +118,9 @@ class InterruptBackend(Backend):
 
 def launch(path):
     m=json.loads(path.read_text());unit='cliproxy-idle-deploy-'+m['token']
-    run(['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path],timeout=5)
-    return {'unit':unit,'release':str(path),'mode':'interrupt','outage_target_seconds':40}
+    require_no_active_deployment()
+    run(['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path],timeout=5);confirm_controller(unit)
+    return {'unit':unit,'single_flight_lock_held':True,'release':str(path),'mode':'interrupt','outage_target_seconds':40}
 
 
 def worker(path):

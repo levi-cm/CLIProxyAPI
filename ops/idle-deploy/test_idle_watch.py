@@ -39,7 +39,20 @@ class IdleWatchTests(unittest.TestCase):
     def test_launch_reports_the_pinned_retirement_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'release.json';path.write_text(json.dumps({'token':'fixture','candidate_id':'candidate','retire_idle_clients':True}))
-            with patch.object(main,'inspect',return_value={'State':{'Running':False}}),patch.object(main,'run'):
+            with patch.object(main,'inspect',return_value={'State':{'Running':False}}),patch.object(main,'run'),\
+                    patch.object(main,'require_no_active_deployment') as guard,patch.object(main,'confirm_controller') as confirm:
                 receipt=main.launch(path)
+            guard.assert_called_once_with();confirm.assert_called_once_with('cliproxy-idle-deploy-fixture')
+            self.assertTrue(receipt.get('single_flight_lock_held'))
             self.assertTrue(receipt.get('retire_idle_clients'))
             self.assertEqual(receipt['idle_seconds'],300)
+
+
+class SingleFlightLaunchTests(unittest.TestCase):
+    def test_launch_refuses_while_another_controller_is_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'release.json';path.write_text(json.dumps({'token':'fixture','candidate_id':'candidate'}))
+            with patch.object(main,'inspect',return_value={'State':{'Running':False}}),patch.object(main,'run') as run,\
+                    patch.object(main,'require_no_active_deployment',side_effect=RuntimeError('held')):
+                with self.assertRaises(RuntimeError):main.launch(path)
+            run.assert_not_called()

@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 
-from common import ROOT,atomic,digest,inspect,probe,run
+from common import ROOT,atomic,confirm_controller,digest,inspect,probe,require_no_active_deployment,run
 from core import IdleWindow,Cutover,TERMINAL_OUTCOMES,DeploymentBlocked
 from backend import Backend
 
@@ -62,11 +62,12 @@ def publish(m,name,value):
 def launch(path,immediate=False):
     m=json.loads(path.read_text())
     if inspect(m['candidate_id'])['State']['Running']:raise RuntimeError('prepared candidate is already running')
+    require_no_active_deployment()
     name='cliproxy-idle-deploy-'+m['token']
     command=['systemd-run','--quiet','--collect','--unit',name,'--property=Nice=10','--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'watch','--release',path]
     if immediate:command.append('--now')
-    run(command,timeout=5)
-    return {'unit':name,'release':str(path),'idle_seconds':0 if immediate else 300,'outage_target_seconds':40,'retire_idle_clients':m.get('retire_idle_clients',False)}
+    run(command,timeout=5);confirm_controller(name)
+    return {'unit':name,'single_flight_lock_held':True,'release':str(path),'idle_seconds':0 if immediate else 300,'outage_target_seconds':40,'retire_idle_clients':m.get('retire_idle_clients',False)}
 
 
 def codex_verify(path,m):

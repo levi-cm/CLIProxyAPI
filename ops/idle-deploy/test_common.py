@@ -94,3 +94,49 @@ class ConnectionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SingleFlightTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory(dir='/DATA/AppData/CLIProxyAPI/.tmp')
+        self.lock = self.dir.name + '/watcher.lock'
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def hold(self):
+        import fcntl
+        f = open(self.lock, 'a+')
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(f.close)
+
+    def test_free_lock_allows_launch_and_is_released(self):
+        from common import require_no_active_deployment, single_flight_held
+        require_no_active_deployment(self.lock)
+        self.assertFalse(single_flight_held(self.lock))
+        self.hold()  # the probe must not have kept the lock
+
+    def test_held_lock_refuses_concurrent_release(self):
+        from common import require_no_active_deployment
+        self.hold()
+        with self.assertRaises(RuntimeError):
+            require_no_active_deployment(self.lock)
+
+    def test_confirm_waits_for_controller_lock(self):
+        from common import confirm_controller
+        ticks = iter(range(100))
+        calls = []
+
+        def sleep(_):
+            calls.append(1)
+            if len(calls) == 2:
+                self.hold()
+        self.assertTrue(confirm_controller('u', self.lock, timeout=50, clock=lambda: next(ticks), sleep=sleep, state=lambda: 'active'))
+
+    def test_confirm_fails_when_controller_exits_or_never_locks(self):
+        from common import confirm_controller
+        with self.assertRaises(RuntimeError):
+            confirm_controller('u', self.lock, timeout=50, clock=iter(range(100)).__next__, sleep=lambda _: None, state=lambda: 'failed')
+        with self.assertRaises(RuntimeError):
+            confirm_controller('u', self.lock, timeout=3, clock=iter(range(100)).__next__, sleep=lambda _: None, state=lambda: 'active')

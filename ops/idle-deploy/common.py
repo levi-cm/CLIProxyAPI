@@ -13,6 +13,36 @@ import uuid
 ROOT=Path('/DATA/AppData/CLIProxyAPI')
 
 
+WATCHER_LOCK=ROOT/'.tmp/idle-deploy/watcher.lock'
+
+
+def single_flight_held(lock=None):
+    """True while a deployment controller holds the host-wide single-flight lock."""
+    lock=Path(lock or WATCHER_LOCK);lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with lock.open('a+') as f:
+        try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:return True
+        fcntl.flock(f,fcntl.LOCK_UN);return False
+
+
+def require_no_active_deployment(lock=None):
+    # The lock stays authoritative; this only refuses a launch that would die on it.
+    if single_flight_held(lock):raise RuntimeError('another deployment controller holds the single-flight lock; refusing a concurrent release')
+
+
+def confirm_controller(unit,lock=None,timeout=10,clock=None,sleep=None,state=None):
+    """Wait until the launched unit owns the single-flight lock, or fail loudly."""
+    import time
+    clock=clock or time.monotonic;sleep=sleep or time.sleep
+    state=state or (lambda: run(['systemctl','is-active',unit],timeout=3,check=False).decode().strip())
+    deadline=clock()+timeout
+    while clock()<deadline:
+        if single_flight_held(lock):return True
+        if state() in ('failed','inactive'):raise RuntimeError('deployment controller exited before taking the single-flight lock')
+        sleep(.2)
+    raise RuntimeError('deployment controller did not take the single-flight lock')
+
+
 def run(args,timeout=8,check=True):
     r=subprocess.run([str(a) for a in args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
     if check and r.returncode: raise RuntimeError(str(args[0])+' failed with exit '+str(r.returncode))

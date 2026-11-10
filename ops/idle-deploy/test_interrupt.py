@@ -239,7 +239,10 @@ class LaunchTests(unittest.TestCase):
     def test_launch_runs_worker_in_its_own_control_group_unit(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
             path=Path(tmp)/'release.json';atomic(path,{'token':'tok'})
-            with patch.object(interrupt,'run') as run:receipt=interrupt.launch(path)
+            with patch.object(interrupt,'run') as run,patch.object(interrupt,'require_no_active_deployment') as guard,\
+                    patch.object(interrupt,'confirm_controller') as confirm:
+                receipt=interrupt.launch(path)
+            guard.assert_called_once_with();confirm.assert_called_once_with('cliproxy-idle-deploy-tok')
             args=run.call_args[0][0]
             self.assertEqual(args[:6],['systemd-run','--quiet','--collect','--unit','cliproxy-idle-deploy-tok','--property=KillMode=control-group'])
             self.assertEqual(args[-3:],[Path(interrupt.__file__).resolve(),'worker',path])

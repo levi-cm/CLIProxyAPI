@@ -43,7 +43,14 @@ Launch creates a background systemd service named `cliproxy-idle-deploy-RELEASE`
 It waits for up to seven days and performs at most one deployment. Live status and
 verification reports are in
 `/DATA/AppData/CLIProxyAPI/output/verification/idle-deploy/RELEASE/`.
-To cancel while still waiting, stop that exact service. The separate watchdog
+To cancel while still waiting, stop that exact service.
+
+Deployments are single-flight per host. Every controller (idle watcher,
+maintenance and interrupt worker) holds `.tmp/idle-deploy/watcher.lock` for
+its whole lifetime. `launch` refuses while another controller holds it, and
+reports success only after the new unit has taken the lock. To replace a
+waiting release with a newer combined one, stop the waiting unit first (only
+while its status is `waiting_for_idle`), then launch the new release. The separate watchdog
 retains responsibility for recovery if a cutover was already in progress.
 
 When the operator explicitly requests deployment now, add `--now` to `launch`.
