@@ -177,13 +177,32 @@ func TestClaudeLimitObservationOrderingAndUnknownReset(t *testing.T) {
 	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
 		t.Fatal("an older observation reopened a full window")
 	}
+	// A long stream completes late with headers from before the window filled.
 	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(time.Second))
+	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+		t.Fatal("a late open reading of the same window reopened it")
+	}
+	// The next window has a later reset and reopens the account.
+	nextReset := strconv.FormatInt(f.now.Add(6*time.Hour).Unix(), 10)
+	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"}, "Anthropic-Ratelimit-Unified-5h-Reset": {nextReset}}, f.now.Add(2*time.Second))
 	if f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
-		t.Fatal("a newer open observation did not reopen the window")
+		t.Fatal("a newer window did not reopen the account")
+	}
+	// A late full reading of the previous window must not close the new one.
+	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now.Add(3*time.Second))
+	if f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+		t.Fatal("an observation of an earlier window replaced the current one")
 	}
 	f.s.ObserveResponseHeaders("m", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}}, f.now)
 	if f.s.claudeLimitBlocked("m", "claude-opus-5-5", f.now) {
 		t.Fatal("a full window without a reset must be left to the reactive cooldown")
+	}
+	f.s.ObserveResponseHeaders("removed", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	f.s.mu.Lock()
+	_, recorded := f.s.claudeLimits["removed"]
+	f.s.mu.Unlock()
+	if recorded {
+		t.Fatal("a result for a removed account recreated its limit state")
 	}
 	f.auths["c"] = &Auth{ID: "c", Provider: "codex"}
 	f.s.ObserveResponseHeaders("c", "mixed", http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
@@ -219,5 +238,70 @@ func TestMarkResultPassesRefusalHeadersToSelector(t *testing.T) {
 	defer selector.mu.Unlock()
 	if len(selector.seen) != 1 || selector.seen[0].Get("Anthropic-Ratelimit-Unified-7d_oi-Status") != "rejected" {
 		t.Fatalf("selector saw %v", selector.seen)
+	}
+}
+
+func TestClaudeUnavailableOwnerKeepsAccountBoundTurn(t *testing.T) {
+	for _, idle := range []bool{false, true} {
+		f := newMixedClaudeFixture(t)
+		f.s.SetIdleCheck(func(string) bool { return idle })
+		opts := claudeOptions("files")
+		opts.OriginalRequest = []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_1"}},{"type":"text","text":"summarize"}]}]}`)
+		f.observe("a", 100*time.Hour, 0.5)
+		if got := f.pickMixed(t, "claude-opus-5-5", opts); got != "a" {
+			t.Fatalf("initial binding = %q", got)
+		}
+		f.observe("x", 40*time.Hour, 0.10)
+		f.observe("m", 60*time.Hour, 0.05)
+		f.limit("a", "5h", 1, time.Hour, "rejected")
+		_, err := f.s.Pick(context.Background(), "mixed", "claude-opus-5-5", opts, f.list)
+		var rejection *Error
+		if !errors.As(err, &rejection) || rejection.Code != "unsafe_affinity_unavailable" {
+			t.Fatalf("idle=%v: a turn referencing the owner's files moved: %v", idle, err)
+		}
+	}
+}
+
+// Sonnet and Haiku thinking is dropped, not refused, on another account, so a
+// turn whose owner is blocked continues there instead of failing for hours.
+func TestClaudeUnavailableOwnerMovesSonnetTurn(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	opts := mixedOpts("sonnet")
+	f.observe("a", 100*time.Hour, 0.5)
+	if got := f.pickMixed(t, "claude-sonnet-5-5", opts); got != "a" {
+		t.Fatalf("initial binding = %q", got)
+	}
+	f.observe("x", 40*time.Hour, 0.10)
+	f.observe("m", 60*time.Hour, 0.05)
+	f.limit("a", "5h", 1, time.Hour, "rejected")
+	if got := f.pickMixed(t, "claude-sonnet-5-5", opts); got != "x" {
+		t.Fatalf("got %q want x", got)
+	}
+}
+
+// Results reach the selector through the real manager in completion order.
+func TestClaudeLateStreamResultKeepsFullWindowThroughManager(t *testing.T) {
+	f := newClaudeFixture(t)
+	f.s.now = time.Now
+	m := NewManager(nil, f.s, nil)
+	f.s.SetBindingAuthResolver(m.GetByID)
+	if _, err := m.Register(context.Background(), &Auth{ID: "x", Provider: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	reset := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	mark := func(headers http.Header, success bool) {
+		ctx := logging.WithResponseHeadersHolder(context.Background())
+		logging.SetResponseHeaders(ctx, headers)
+		result := Result{AuthID: "x", Provider: "claude", Model: "claude-opus-5-5", Success: success}
+		if !success {
+			result.Error = &Error{HTTPStatus: http.StatusTooManyRequests}
+		}
+		m.MarkResult(ctx, result)
+	}
+	// A short request fills the window; a stream that started earlier finishes later.
+	mark(http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "Anthropic-Ratelimit-Unified-5h-Utilization": {"1.0"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, false)
+	mark(http.Header{"Anthropic-Ratelimit-Unified-5h-Status": {"allowed"}, "Anthropic-Ratelimit-Unified-5h-Utilization": {"0.9"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, true)
+	if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", time.Now()) {
+		t.Fatal("a late stream reopened the full 5-hour window")
 	}
 }

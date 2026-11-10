@@ -147,7 +147,11 @@ A replayable Claude turn whose bound account became unavailable moves without
 waiting for that account to become idle, because Claude requests carry their
 full history and no account-local continuation state. The bound credential's
 provider decides this, not the route namespace: the manager routes every
-request under `mixed`. Codex keeps its stricter rule.
+request under `mixed`. A turn that references workspace-scoped state (Files API
+sources, code-execution containers, server tool results) cannot succeed on
+another account and keeps its 409. Sonnet 5.5 and Haiku 5.5 turns do move:
+another account drops their earlier thinking instead of refusing the request.
+Codex keeps its stricter rule.
 
 ### 5-hour and Fable windows
 
@@ -160,6 +164,11 @@ response, including the 429 refusal, and from the usage poller (the `session`
 limit and the `weekly_scoped` limit for model "Fable").
 
 A window is full when its status is `rejected` or its utilization reaches 1.0.
+Results are observed when they complete, so a long stream can deliver headers
+older than another result's. Because resets only move forward and utilization
+never falls within one window, an observation of an earlier window, or an open
+reading of a window already seen full, is ignored. Results for accounts the
+manager no longer holds are ignored.
 Until its reset passes, a full 5-hour window takes the account out of Claude
 routing, and a full Fable window takes it out of Fable routing only, so Opus
 keeps using the focus account. New conversations then go to the earliest weekly

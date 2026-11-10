@@ -22,6 +22,10 @@ const (
 
 var claudeLimitWindows = []string{claudeFiveHourWindow, claudeFableWindow}
 
+// claudeLimitResetSlack absorbs sub-second and rounding differences between the
+// reset reported by response headers and by the usage endpoint for one window.
+const claudeLimitResetSlack = time.Minute
+
 type claudeLimitWindow struct {
 	full     bool
 	reset    time.Time
@@ -31,10 +35,24 @@ type claudeLimitWindow struct {
 // ObserveResponseHeaders records the limit windows carried by one upstream
 // response, including a 429 refusal.
 func (s *EarliestDeadlineSelector) ObserveResponseHeaders(authID, provider string, headers http.Header, at time.Time) {
-	if len(headers) == 0 || !s.claudeCredential(provider, authID) {
+	if len(headers) == 0 || !s.registeredClaudeCredential(provider, authID) {
 		return
 	}
 	s.observeClaudeLimits(authID, headers.Get, at)
+}
+
+// registeredClaudeCredential is claudeCredential restricted to accounts the
+// manager still holds, so a result that completes after its account was removed
+// cannot recreate that account's limit state.
+func (s *EarliestDeadlineSelector) registeredClaudeCredential(provider, id string) bool {
+	s.mu.Lock()
+	resolve := s.bindingAuth
+	s.mu.Unlock()
+	if resolve == nil {
+		return strings.EqualFold(strings.TrimSpace(provider), "claude")
+	}
+	a, ok := resolve(id)
+	return ok && isClaudeAuth(a)
 }
 
 // claudeCredential reports whether id is a Claude account. The manager routes
@@ -66,6 +84,12 @@ func (s *EarliestDeadlineSelector) observeClaudeAuthLimits(a *Auth) {
 
 // observeClaudeLimits updates each window the observation reports. A window the
 // observation does not mention keeps its previous state.
+//
+// Results are observed when they complete, but a stream's headers were sent when
+// it started, so a long stream can deliver older headers after a newer result.
+// Resets only move forward and utilization never falls within one window, so an
+// observation of an earlier window, or an open reading of a window already seen
+// full, is stale and ignored.
 func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(string) string, observed time.Time) {
 	if id == "" || observed.IsZero() {
 		return
@@ -95,7 +119,7 @@ func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(strin
 			s.claudeLimits[id] = windows
 		}
 		previous, known := windows[name]
-		if known && !observed.After(previous.observed) {
+		if known && (!observed.After(previous.observed) || staleClaudeLimit(previous, next)) {
 			s.mu.Unlock()
 			continue
 		}
@@ -107,6 +131,16 @@ func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(strin
 			log.WithFields(log.Fields{"auth": id, "window": name}).Info("account policy: claude limit window open")
 		}
 	}
+}
+
+func staleClaudeLimit(previous, next claudeLimitWindow) bool {
+	if previous.reset.IsZero() || next.reset.IsZero() {
+		return false
+	}
+	if next.reset.Before(previous.reset.Add(-claudeLimitResetSlack)) {
+		return true
+	}
+	return previous.full && !next.full && !next.reset.After(previous.reset.Add(claudeLimitResetSlack))
 }
 
 // claudeLimitBlocked reports whether a full window that has not reset yet would

@@ -442,9 +442,15 @@ func (r *deadlineRankingSelector) PickUnavailable(ctx context.Context, provider,
 	s := r.owner
 	// A replayable Claude turn carries its whole history and no account-local
 	// state, so it may move while the old account still serves other requests.
-	// The provider is "mixed" for multi-provider routing, so the owner decides.
-	if s.claudeCredential(provider, id) && policyRequestReplayable(ctx, opts) {
-		return nil
+	// Workspace-scoped state (files, containers, server tool results) exists only
+	// on the owner, so such a turn keeps its 409. The provider is "mixed" for
+	// multi-provider routing, so the owner's credential decides.
+	if s.claudeCredential(provider, id) {
+		if policyRequestReplayable(ctx, opts) && !claudeRequestAccountBound(opts.OriginalRequest) {
+			return nil
+		}
+		s.policy.RecordDecision(accountpolicy.Decision{CredentialID: id, Provider: provider, Model: model, Reason: "unsafe_affinity_unavailable", At: s.now()})
+		return &Error{Code: "unsafe_affinity_unavailable", Message: "account-specific continuation cannot move to another account", HTTPStatus: 409}
 	}
 	s.mu.Lock()
 	idle := s.idle
