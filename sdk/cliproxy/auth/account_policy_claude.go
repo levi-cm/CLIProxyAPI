@@ -196,7 +196,10 @@ func claudeConversationPortable(ctx context.Context, model string, opts cliproxy
 }
 
 func claudeRequestAccountBound(body []byte) bool {
-	if gjson.GetBytes(body, "container").Exists() {
+	// Only a reused container is account state; null or a fresh container
+	// configuration without an ID is created on whichever account serves it.
+	container := gjson.GetBytes(body, "container")
+	if (container.Type == gjson.String && strings.TrimSpace(container.String()) != "") || strings.TrimSpace(container.Get("id").String()) != "" {
 		return true
 	}
 	fileSource := func(block gjson.Result) bool {

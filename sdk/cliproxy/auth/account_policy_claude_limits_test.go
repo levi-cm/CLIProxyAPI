@@ -305,3 +305,57 @@ func TestClaudeLateStreamResultKeepsFullWindowThroughManager(t *testing.T) {
 		t.Fatal("a late stream reopened the full 5-hour window")
 	}
 }
+
+func TestClaudeResetlessReadingKeepsKnownFullWindow(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	reset := strconv.FormatInt(f.now.Add(time.Hour).Unix(), 10)
+	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-5h-Reset": {reset}}, f.now)
+	for i, headers := range []http.Header{
+		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}},
+		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {"0"}},
+		{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"}, "Anthropic-Ratelimit-Unified-5h-Reset": {"bad"}},
+		{"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}},
+	} {
+		f.s.ObserveResponseHeaders("x", "claude", headers, f.now.Add(time.Duration(i+1)*time.Second))
+		if !f.s.claudeLimitBlocked("x", "claude-opus-5-5", f.now) {
+			t.Fatalf("reading %d without a usable reset erased the full window", i)
+		}
+	}
+	// Once the known reset passed, a reset-less reading is accepted.
+	f.s.ObserveResponseHeaders("x", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"}}, f.now.Add(2*time.Hour))
+	f.s.mu.Lock()
+	w := f.s.claudeLimits["x"][claudeFiveHourWindow]
+	f.s.mu.Unlock()
+	if w.full {
+		t.Fatal("a reading after the reset was ignored")
+	}
+}
+
+func TestClaudeFreshContainerIsNotAccountBound(t *testing.T) {
+	for body, bound := range map[string]bool{
+		`{"container":null,"messages":[{"role":"user","content":"hi"}]}`:                                               false,
+		`{"container":{"skills":[{"type":"anthropic","skill_id":"pdf"}]},"messages":[{"role":"user","content":"hi"}]}`: false,
+		`{"container":"container_1","messages":[{"role":"user","content":"hi"}]}`:                                      true,
+		`{"container":{"id":"container_1"},"messages":[{"role":"user","content":"hi"}]}`:                               true,
+	} {
+		if got := claudeRequestAccountBound([]byte(body)); got != bound {
+			t.Fatalf("%s: bound=%v want %v", body, got, bound)
+		}
+	}
+	for _, idle := range []bool{false, true} {
+		f := newMixedClaudeFixture(t)
+		f.s.SetIdleCheck(func(string) bool { return idle })
+		opts := claudeOptions("fresh-container")
+		opts.OriginalRequest = []byte(`{"container":null,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"again"}]}`)
+		f.observe("a", 100*time.Hour, 0.5)
+		if got := f.pickMixed(t, "claude-opus-5-5", opts); got != "a" {
+			t.Fatalf("initial binding = %q", got)
+		}
+		f.observe("x", 40*time.Hour, 0.10)
+		f.observe("m", 60*time.Hour, 0.05)
+		f.limit("a", "5h", 1, time.Hour, "rejected")
+		if got := f.pickMixed(t, "claude-opus-5-5", opts); got != "x" {
+			t.Fatalf("idle=%v: fresh-container turn = %q want x", idle, got)
+		}
+	}
+}

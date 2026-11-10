@@ -134,7 +134,12 @@ func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, get func(strin
 }
 
 func staleClaudeLimit(previous, next claudeLimitWindow) bool {
-	if previous.reset.IsZero() || next.reset.IsZero() {
+	// A reading without a reset cannot prove a newer window, so it never
+	// replaces a full window that has not reset yet.
+	if next.reset.IsZero() {
+		return previous.full && previous.reset.After(next.observed)
+	}
+	if previous.reset.IsZero() {
 		return false
 	}
 	if next.reset.Before(previous.reset.Add(-claudeLimitResetSlack)) {
