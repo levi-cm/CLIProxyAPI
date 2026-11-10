@@ -47,9 +47,13 @@ To cancel while still waiting, stop that exact service.
 
 Deployments are single-flight per host. Every controller (idle watcher,
 maintenance and interrupt worker) holds `.tmp/idle-deploy/watcher.lock` for
-its whole lifetime. `launch` refuses while another controller holds it, and
-reports success only after the new unit has taken the lock. To replace a
-waiting release with a newer combined one, stop the waiting unit first (only
+its whole lifetime, and the watchdog rescue holds it during recovery when it is
+free. All three `launch` commands are serialized by `launch.lock` and refuse
+while another controller holds the lock or any `cliproxy-idle-watchdog-*` unit
+is active. A launch succeeds only after the worker, holding both the host and
+release locks, writes `controller-ack.json` with its own systemd invocation ID.
+Workers tolerate a launcher's momentary lock probe for two seconds. To replace
+a waiting release with a newer combined one, stop the waiting unit first (only
 while its status is `waiting_for_idle`), then launch the new release. The separate watchdog
 retains responsibility for recovery if a cutover was already in progress.
 

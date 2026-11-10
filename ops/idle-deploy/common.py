@@ -14,6 +14,18 @@ ROOT=Path('/DATA/AppData/CLIProxyAPI')
 
 
 WATCHER_LOCK=ROOT/'.tmp/idle-deploy/watcher.lock'
+LAUNCH_LOCK=ROOT/'.tmp/idle-deploy/launch.lock'
+SINGLE_FLIGHT_WAIT=2
+
+
+def _monotonic():
+    import time
+    return time.monotonic()
+
+
+def _sleep(seconds):
+    import time
+    time.sleep(seconds)
 
 
 def single_flight_held(lock=None):
@@ -25,22 +37,67 @@ def single_flight_held(lock=None):
         fcntl.flock(f,fcntl.LOCK_UN);return False
 
 
-def require_no_active_deployment(lock=None):
-    # The lock stays authoritative; this only refuses a launch that would die on it.
-    if single_flight_held(lock):raise RuntimeError('another deployment controller holds the single-flight lock; refusing a concurrent release')
+def acquire_single_flight(f,wait=SINGLE_FLIGHT_WAIT,clock=None,sleep=None):
+    """Take the host-wide lock on an open file. A launcher's momentary probe is
+    tolerated for a bounded time; a controller holding it longer wins."""
+    clock=clock or _monotonic;sleep=sleep or _sleep
+    deadline=clock()+wait
+    while True:
+        try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);return
+        except BlockingIOError:
+            if clock()>=deadline:raise RuntimeError('another deployment controller holds the single-flight lock')
+            sleep(.05)
 
 
-def confirm_controller(unit,lock=None,timeout=10,clock=None,sleep=None,state=None):
-    """Wait until the launched unit owns the single-flight lock, or fail loudly."""
-    import time
-    clock=clock or time.monotonic;sleep=sleep or time.sleep
+def ack_path(release):
+    return Path(release).parent/'controller-ack.json'
+
+
+def acknowledge_controller(release):
+    """Called by a worker only after it holds both the host and release locks."""
+    atomic(ack_path(release),{'invocation_id':os.environ.get('INVOCATION_ID',''),'pid':os.getpid()})
+
+
+def active_recovery_units(listing=None):
+    """Watchdog timers/rescue services that still own a transaction."""
+    raw=listing if listing is not None else run(['systemctl','list-units','--all','--no-legend','--plain','cliproxy-idle-watchdog-*'],timeout=3,check=False).decode()
+    units=[]
+    for line in raw.splitlines():
+        fields=line.split()
+        if len(fields)>=3 and fields[2] in ('active','activating','reloading','deactivating'):units.append(fields[0])
+    return units
+
+
+def confirm_controller(release,unit,timeout=10,clock=None,sleep=None,state=None,invocation=None):
+    """Wait for the acknowledgement written by this exact unit invocation."""
+    clock=clock or _monotonic;sleep=sleep or _sleep
     state=state or (lambda: run(['systemctl','is-active',unit],timeout=3,check=False).decode().strip())
+    invocation=invocation or (lambda: run(['systemctl','show','-p','InvocationID','--value',unit],timeout=3,check=False).decode().strip())
+    expected=invocation()
+    if not expected:raise RuntimeError('launched deployment controller has no systemd invocation')
     deadline=clock()+timeout
     while clock()<deadline:
-        if single_flight_held(lock):return True
+        try:ack=json.loads(ack_path(release).read_text())
+        except (OSError,ValueError):ack={}
+        if ack.get('invocation_id')==expected:return True
         if state() in ('failed','inactive'):raise RuntimeError('deployment controller exited before taking the single-flight lock')
         sleep(.2)
-    raise RuntimeError('deployment controller did not take the single-flight lock')
+    raise RuntimeError('deployment controller did not acknowledge the single-flight lock')
+
+
+def launch_controller(release,unit,command,launch_lock=None,watcher_lock=None,**confirm):
+    """Single-flight launch shared by every deployment entry point. Launchers are
+    serialized; a held controller lock or a live watchdog refuses the launch."""
+    launch_lock=Path(launch_lock or LAUNCH_LOCK);launch_lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with launch_lock.open('a+') as serial:
+        fcntl.flock(serial,fcntl.LOCK_EX)
+        if single_flight_held(watcher_lock):raise RuntimeError('another deployment controller holds the single-flight lock; refusing a concurrent release')
+        recovering=active_recovery_units()
+        if recovering:raise RuntimeError('a deployment watchdog is still active; refusing a concurrent release')
+        ack_path(release).unlink(missing_ok=True)
+        run(command,timeout=5)
+        confirm_controller(release,unit,**confirm)
+    return True
 
 
 def run(args,timeout=8,check=True):

@@ -8,7 +8,7 @@ import sys
 import time
 
 from backend import Backend
-from common import ROOT,run,inspect
+from common import ROOT,acknowledge_controller,acquire_single_flight,inspect,launch_controller,run
 from core import Cutover,IdleWindow,DeploymentBlocked
 from main import Capture,codex_verify,publish,release_path
 
@@ -44,8 +44,9 @@ class MaintenanceBackend(Backend):
 def worker(path):
     m=json.loads(path.read_text())
     with (ROOT/'.tmp/idle-deploy/watcher.lock').open('a+') as owner,(path.parent/'worker.lock').open('a+') as lock:
-        fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acquire_single_flight(owner)
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acknowledge_controller(path)
         capture=Capture(m['old_pid']);idle=IdleWindow(immediate=True)
         def stop(*_):raise KeyboardInterrupt()
         signal.signal(signal.SIGTERM,stop)
@@ -66,8 +67,8 @@ def main():
     path=release_path(value);m=json.loads(path.read_text())
     if command=='launch':
         unit='cliproxy-idle-deploy-'+m['token']
-        run(['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path],timeout=5)
-        print(json.dumps({'unit':unit,'maintenance':True,'outage_target_seconds':40}))
+        launch_controller(path,unit,['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path])
+        print(json.dumps({'unit':unit,'maintenance':True,'single_flight_lock_held':True,'outage_target_seconds':40}))
     elif command=='worker':worker(path)
     else:raise RuntimeError('expected launch or worker')
 

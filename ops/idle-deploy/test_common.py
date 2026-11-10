@@ -1,5 +1,6 @@
 """Deterministic namespace TCP accounting; never read live /proc state."""
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from common import connections
@@ -97,46 +98,134 @@ if __name__ == '__main__':
 
 
 class SingleFlightTests(unittest.TestCase):
+    """Real flock calls on private lock files; never the production lock."""
+
     def setUp(self):
         import tempfile
         self.dir = tempfile.TemporaryDirectory(dir='/DATA/AppData/CLIProxyAPI/.tmp')
+        self.addCleanup(self.dir.cleanup)
         self.lock = self.dir.name + '/watcher.lock'
+        self.launch_lock = self.dir.name + '/launch.lock'
+        self.release = self.dir.name + '/rel/release.json'
+        Path(self.release).parent.mkdir()
 
-    def tearDown(self):
-        self.dir.cleanup()
-
-    def hold(self):
+    def hold(self, path=None):
         import fcntl
-        f = open(self.lock, 'a+')
+        f = open(path or self.lock, 'a+')
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.addCleanup(f.close)
+        return f
 
-    def test_free_lock_allows_launch_and_is_released(self):
-        from common import require_no_active_deployment, single_flight_held
-        require_no_active_deployment(self.lock)
+    def clock(self):
+        ticks = iter(range(10000))
+        return lambda: next(ticks)
+
+    def ack(self, invocation):
+        import json
+        Path(self.release).with_name('controller-ack.json').write_text(json.dumps({'invocation_id': invocation, 'pid': 1}))
+
+    def test_probe_releases_a_free_lock(self):
+        from common import single_flight_held
         self.assertFalse(single_flight_held(self.lock))
         self.hold()  # the probe must not have kept the lock
+        self.assertTrue(single_flight_held(self.lock))
 
-    def test_held_lock_refuses_concurrent_release(self):
-        from common import require_no_active_deployment
-        self.hold()
-        with self.assertRaises(RuntimeError):
-            require_no_active_deployment(self.lock)
-
-    def test_confirm_waits_for_controller_lock(self):
-        from common import confirm_controller
-        ticks = iter(range(100))
+    def test_worker_tolerates_a_momentary_probe(self):
+        import fcntl
+        from common import acquire_single_flight
+        probe = self.hold()
         calls = []
 
         def sleep(_):
             calls.append(1)
             if len(calls) == 2:
-                self.hold()
-        self.assertTrue(confirm_controller('u', self.lock, timeout=50, clock=lambda: next(ticks), sleep=sleep, state=lambda: 'active'))
+                fcntl.flock(probe, fcntl.LOCK_UN)
+        with open(self.lock, 'a+') as worker:
+            acquire_single_flight(worker, wait=50, clock=self.clock(), sleep=sleep)
+            self.assertTrue(len(calls) >= 2)
 
-    def test_confirm_fails_when_controller_exits_or_never_locks(self):
+    def test_worker_exits_behind_a_long_lived_controller(self):
+        from common import acquire_single_flight
+        self.hold()
+        with open(self.lock, 'a+') as worker, self.assertRaises(RuntimeError):
+            acquire_single_flight(worker, wait=3, clock=self.clock(), sleep=lambda _: None)
+
+    def test_confirmation_requires_this_invocation(self):
         from common import confirm_controller
+        self.ack('mine')
+        self.assertTrue(confirm_controller(self.release, 'u', clock=self.clock(), sleep=lambda _: None, state=lambda: 'active', invocation=lambda: 'mine'))
+
+    def test_foreign_lock_holder_or_stale_ack_is_not_success(self):
+        from common import confirm_controller
+        self.hold()  # an unrelated controller holds the host lock
+        self.ack('someone-else')
+        states = []
+
+        def state():
+            states.append(1)
+            return 'failed'
         with self.assertRaises(RuntimeError):
-            confirm_controller('u', self.lock, timeout=50, clock=iter(range(100)).__next__, sleep=lambda _: None, state=lambda: 'failed')
+            confirm_controller(self.release, 'u', clock=self.clock(), sleep=lambda _: None, state=state, invocation=lambda: 'mine')
+        self.assertTrue(states, 'the launched unit state must be checked')
         with self.assertRaises(RuntimeError):
-            confirm_controller('u', self.lock, timeout=3, clock=iter(range(100)).__next__, sleep=lambda _: None, state=lambda: 'active')
+            confirm_controller(self.release, 'u', timeout=3, clock=self.clock(), sleep=lambda _: None, state=lambda: 'active', invocation=lambda: 'mine')
+        with self.assertRaises(RuntimeError):
+            confirm_controller(self.release, 'u', clock=self.clock(), sleep=lambda _: None, state=lambda: 'active', invocation=lambda: '')
+
+    def launch(self, run, recovery=''):
+        import common
+        with patch.object(common, 'run', side_effect=run), patch.object(common, 'active_recovery_units', return_value=[recovery] if recovery else []):
+            return common.launch_controller(self.release, 'u', ['systemd-run'], launch_lock=self.launch_lock, watcher_lock=self.lock,
+                                            clock=self.clock(), sleep=lambda _: None, state=lambda: 'active', invocation=lambda: 'mine')
+
+    def test_launch_starts_unit_and_waits_for_its_ack(self):
+        started = []
+
+        def run(args, **_):
+            started.append(args)
+            self.ack('mine')
+            return b''
+        self.assertTrue(self.launch(run))
+        self.assertEqual(started, [['systemd-run']])
+
+    def test_competing_launch_is_refused_before_starting_a_unit(self):
+        import fcntl
+        started = []
+
+        def first(args, **_):
+            started.append('first')
+            worker = open(self.lock, 'a+')
+            fcntl.flock(worker, fcntl.LOCK_EX | fcntl.LOCK_NB)  # first worker now runs
+            self.addCleanup(worker.close)
+            self.ack('mine')
+            return b''
+        self.launch(first)
+
+        def second(args, **_):
+            started.append('second')
+            return b''
+        with self.assertRaises(RuntimeError):
+            self.launch(second)
+        self.assertEqual(started, ['first'])
+
+    def test_live_watchdog_refuses_launch(self):
+        started = []
+        with self.assertRaises(RuntimeError):
+            self.launch(lambda args, **_: started.append(args), recovery='cliproxy-idle-watchdog-x.timer')
+        self.assertEqual(started, [])
+
+    def test_stale_ack_is_removed_before_launch(self):
+        self.ack('old')
+
+        def run(args, **_):
+            self.assertFalse(Path(self.release).with_name('controller-ack.json').exists())
+            self.ack('mine')
+            return b''
+        self.launch(run)
+
+    def test_recovery_unit_listing(self):
+        from common import active_recovery_units
+        listing = ('cliproxy-idle-watchdog-a.timer loaded active waiting x\n'
+                   'cliproxy-idle-watchdog-b.service loaded inactive dead x\n'
+                   'cliproxy-idle-watchdog-c.service loaded activating start x\n')
+        self.assertEqual(active_recovery_units(listing), ['cliproxy-idle-watchdog-a.timer', 'cliproxy-idle-watchdog-c.service'])

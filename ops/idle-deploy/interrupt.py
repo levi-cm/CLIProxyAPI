@@ -15,7 +15,7 @@ import sys
 import time
 
 from backend import Backend,DrainConnection
-from common import ROOT,confirm_controller,connections,digest,inspect,probe,require_no_active_deployment,run,writers
+from common import ROOT,acknowledge_controller,acquire_single_flight,connections,digest,inspect,launch_controller,probe,run,writers
 from core import Cutover,DeploymentBlocked,validate_interrupt_timing,validate_timing
 from main import codex_verify,failure_details,publish,release_path
 
@@ -118,16 +118,16 @@ class InterruptBackend(Backend):
 
 def launch(path):
     m=json.loads(path.read_text());unit='cliproxy-idle-deploy-'+m['token']
-    require_no_active_deployment()
-    run(['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path],timeout=5);confirm_controller(unit)
+    launch_controller(path,unit,['systemd-run','--quiet','--collect','--unit',unit,'--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'worker',path])
     return {'unit':unit,'single_flight_lock_held':True,'release':str(path),'mode':'interrupt','outage_target_seconds':40}
 
 
 def worker(path):
     m=json.loads(path.read_text())
     with (ROOT/'.tmp/idle-deploy/watcher.lock').open('a+') as owner,(path.parent/'worker.lock').open('a+') as lock:
-        fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acquire_single_flight(owner)
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acknowledge_controller(path)
         def stop(*_):raise KeyboardInterrupt()
         signal.signal(signal.SIGTERM,stop)
         backend=InterruptBackend(path)

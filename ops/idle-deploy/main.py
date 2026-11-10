@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 
-from common import ROOT,atomic,confirm_controller,digest,inspect,probe,require_no_active_deployment,run
+from common import ROOT,WATCHER_LOCK,acknowledge_controller,acquire_single_flight,atomic,digest,inspect,launch_controller,probe,run
 from core import IdleWindow,Cutover,TERMINAL_OUTCOMES,DeploymentBlocked
 from backend import Backend
 
@@ -62,11 +62,10 @@ def publish(m,name,value):
 def launch(path,immediate=False):
     m=json.loads(path.read_text())
     if inspect(m['candidate_id'])['State']['Running']:raise RuntimeError('prepared candidate is already running')
-    require_no_active_deployment()
     name='cliproxy-idle-deploy-'+m['token']
     command=['systemd-run','--quiet','--collect','--unit',name,'--property=Nice=10','--property=KillMode=control-group','/usr/bin/python3',Path(__file__).resolve(),'watch','--release',path]
     if immediate:command.append('--now')
-    run(command,timeout=5);confirm_controller(name)
+    launch_controller(path,name,command)
     return {'unit':name,'single_flight_lock_held':True,'release':str(path),'idle_seconds':0 if immediate else 300,'outage_target_seconds':40,'retire_idle_clients':m.get('retire_idle_clients',False)}
 
 
@@ -139,10 +138,11 @@ def watch_status(idle,evidence,last_block=None,retire_idle_clients=False):
 
 def watch(path,immediate=False):
     if os.geteuid()!=0:raise RuntimeError('root is required for namespace observation and admission exclusion')
-    m=json.loads(path.read_text());lock=ROOT/'.tmp/idle-deploy/watcher.lock'
+    m=json.loads(path.read_text());lock=WATCHER_LOCK
     with lock.open('a+') as owner:
-        fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acquire_single_flight(owner)
         worker=(path.parent/'worker.lock').open('a+');fcntl.flock(worker,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        acknowledge_controller(path)
         capture=Capture(m['old_pid']);idle=IdleWindow(immediate=immediate);deadline=time.monotonic()+7*86400;last_block=None
         def stop(*_):raise KeyboardInterrupt()
         signal.signal(signal.SIGTERM,stop)
@@ -197,12 +197,21 @@ def rescue(path):
                 except BlockingIOError:
                     if time.monotonic()>deadline:raise RuntimeError('worker did not terminate; refusing concurrent rollback')
                     time.sleep(.05)
+            # Hold host-wide exclusion through recovery when it is free; never wait for
+            # it, because recovery must not queue behind another controller.
+            host=None
+            try:
+                host=WATCHER_LOCK.open('a+');fcntl.flock(host,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError:pass
             # Durable state is reread only after the worker has stopped.
             transaction=json.loads(backend.journal.read_text()) if backend.journal.exists() else {}
             if transaction.get('phase') not in TERMINAL_OUTCOMES:backend.phase(transaction.get('phase','rescue'),rescue_started=rescue_started)
             try:
                 if transaction.get('phase') not in TERMINAL_OUTCOMES:backend.recover()
-            finally:backend.ungate()
+            finally:
+                try:backend.ungate()
+                finally:
+                    if host:host.close()
     publish(m,'deployment.json',json.loads(backend.journal.read_text()))
 
 
