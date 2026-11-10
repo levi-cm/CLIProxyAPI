@@ -413,3 +413,63 @@ func TestClaudeUsagePollDeliversWindowsToSelector(t *testing.T) {
 		t.Fatalf("selector saw %v", selector.seen)
 	}
 }
+
+func TestClaudeCustomSkillContainerIsAccountBound(t *testing.T) {
+	for _, body := range []string{
+		`{"container":{"skills":[{"type":"custom","skill_id":"skill_123"}]},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"again"}]}`,
+		`{"container":{"skills":[{"type":"anthropic","skill_id":"pdf"},{"type":"custom","skill_id":"skill_1"}]},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"again"}]}`,
+	} {
+		if !claudeRequestAccountBound([]byte(body)) {
+			t.Fatalf("custom skill not account-bound: %s", body)
+		}
+		for _, idle := range []bool{false, true} {
+			f := newMixedClaudeFixture(t)
+			f.s.SetIdleCheck(func(string) bool { return idle })
+			opts := claudeOptions("custom-skill")
+			opts.OriginalRequest = []byte(body)
+			f.observe("a", 100*time.Hour, 0.5)
+			if got := f.pickMixed(t, "claude-opus-5-5", opts); got != "a" {
+				t.Fatalf("initial binding = %q", got)
+			}
+			f.observe("x", 40*time.Hour, 0.10)
+			f.observe("m", 60*time.Hour, 0.05)
+			f.limit("a", "5h", 1, time.Hour, "rejected")
+			_, err := f.s.Pick(context.Background(), "mixed", "claude-opus-5-5", opts, f.list)
+			var rejection *Error
+			if !errors.As(err, &rejection) || rejection.Code != "unsafe_affinity_unavailable" {
+				t.Fatalf("idle=%v: custom-skill turn moved: %v", idle, err)
+			}
+		}
+	}
+}
+
+// A polled full Fable window survives a later Opus response that replaces the
+// auth's quota snapshot, through the real manager and selector.
+func TestClaudePolledFableWindowSurvivesOpusResponse(t *testing.T) {
+	f := newClaudeFixture(t)
+	f.s.now = time.Now
+	m := NewManager(nil, f.s, nil)
+	f.s.SetBindingAuthResolver(m.GetByID)
+	if _, err := m.Register(context.Background(), &Auth{ID: "x", Provider: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := m.GetByID("x")
+	reset := strconv.FormatInt(time.Now().Add(40*time.Hour).Unix(), 10)
+	poll := http.Header{"Anthropic-Ratelimit-Unified-7d-Utilization": {"0.5"}, "Anthropic-Ratelimit-Unified-7d-Reset": {reset}, "Anthropic-Ratelimit-Unified-7d_oi-Utilization": {"1"}, "Anthropic-Ratelimit-Unified-7d_oi-Reset": {reset}}
+	if !m.observeClaudeUsage("x", a.RegistrationEpoch, poll, time.Now().Add(-time.Second)) {
+		t.Fatal("poll observation rejected")
+	}
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, http.Header{"Anthropic-Ratelimit-Unified-7d-Utilization": {"0.51"}, "Anthropic-Ratelimit-Unified-7d-Reset": {reset}})
+	m.MarkResult(ctx, Result{AuthID: "x", Provider: "claude", Model: "claude-opus-5-5", Success: true, RegistrationEpoch: a.RegistrationEpoch})
+	current, _ := m.GetByID("x")
+	if current.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Utilization"] != "" {
+		t.Fatal("test premise: the Opus response should replace the snapshot")
+	}
+	if !f.s.claudeLimitBlocked("x", current.RegistrationEpoch, "claude-fable-5-2", time.Now()) {
+		t.Fatal("polled Fable window lost after an Opus response")
+	}
+	if f.s.claudeLimitBlocked("x", current.RegistrationEpoch, "claude-opus-5-5", time.Now()) {
+		t.Fatal("Fable window blocked Opus")
+	}
+}
