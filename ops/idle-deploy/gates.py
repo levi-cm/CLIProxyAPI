@@ -37,7 +37,12 @@ class Gates:
             if chain.encode() in run(prefix+['-S'],timeout=2):raise RuntimeError('maintenance admission rule remains')
 
     def match(self,host=False):
-        return ['-p','tcp','-m','multiport','--dports',self.host_ports if host else self.ports,'--syn','-m','comment','--comment',self.tag,'-j','REJECT','--reject-with','tcp-reset']
+        # New connections are dropped silently, not reset: the client's kernel
+        # retransmits its SYN and connects once admission reopens, so a short
+        # cutover looks like connect latency instead of a refused connection.
+        # A dropped SYN never confirms a conntrack entry, so its retransmission
+        # is NATed afresh to whichever container serves after ungating.
+        return ['-p','tcp','-m','multiport','--dports',self.host_ports if host else self.ports,'--syn','-m','comment','--comment',self.tag,'-j','DROP']
 
     def rules(self):
         for exe in ('iptables','ip6tables'):

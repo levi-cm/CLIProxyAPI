@@ -104,13 +104,23 @@ if __name__=='__main__':unittest.main()
 
 
 class CleanupTests(unittest.TestCase):
+    def test_admission_drops_new_connections_without_reset(self):
+        g=gates.Gates('token',[8317,1455],42,[8317])
+        for host in (False,True):
+            rule=g.match(host)
+            self.assertEqual(rule[-2:],['-j','DROP'])
+            self.assertIn('--syn',rule)
+            self.assertNotIn('REJECT',rule)
+            self.assertNotIn('tcp-reset',rule)
+        self.assertIn('8317',g.match(True))
+        self.assertIn('1455,8317',g.match(False))
     def test_firewall_operational_failure_cannot_be_reported_as_ungated(self):
         failure=MagicMock(returncode=4)
         with patch.object(gates.subprocess,'run',return_value=failure),patch.object(gates,'run',return_value=b''):
             with self.assertRaises(RuntimeError):gates.Gates('token',[8317],42).disable()
     def test_surviving_firewall_token_cannot_be_reported_as_ungated(self):
         absent=MagicMock(returncode=1)
-        with patch.object(gates.subprocess,'run',return_value=absent),patch.object(gates,'run',return_value=b'-A OUTPUT --comment cliproxy-idle-token -j REJECT'):
+        with patch.object(gates.subprocess,'run',return_value=absent),patch.object(gates,'run',return_value=b'-A OUTPUT --comment cliproxy-idle-token -j DROP'):
             with self.assertRaises(RuntimeError):gates.Gates('token',[8317],42).disable()
     def test_missing_rules_are_idempotent_when_host_dump_is_clean(self):
         absent=MagicMock(returncode=1)

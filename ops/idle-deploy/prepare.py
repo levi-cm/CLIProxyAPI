@@ -62,17 +62,34 @@ try:
  n=http.client.HTTPConnection('127.0.0.1',8317,timeout=1);n.request('GET','/healthz');n.getresponse()
 except (OSError,http.client.HTTPException):print('guarded',flush=True)
 else:raise AssertionError('new connection passed closed admission')
+print('holding',flush=True)
+h=http.client.HTTPConnection('127.0.0.1',8317,timeout=12)
+h.request('GET','/healthz');r=h.getresponse();r.read();assert r.status==200
+print('held',flush=True)
 '''
     child=subprocess.Popen(['nsenter','-t',str(pid),'-n','python3','-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
-    rule=['-p','tcp','--dport','8317','--syn','-m','comment','--comment',tag,'-j','REJECT','--reject-with','tcp-reset']
+    rule=['-p','tcp','--dport','8317','--syn','-m','comment','--comment',tag,'-j','DROP']
+    installed=False
     try:
         import select
-        if not select.select([child.stdout],[],[],3)[0] or child.stdout.readline().strip()!='ready':raise RuntimeError('fixture keepalive did not become ready')
+        def line(wait):
+            if not select.select([child.stdout],[],[],wait)[0]:return ''
+            return child.stdout.readline().strip()
+        if line(3)!='ready':raise RuntimeError('fixture keepalive did not become ready')
         for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-I','INPUT','1']+rule)
+        installed=True
         child.stdin.write('go\n');child.stdin.flush()
-        if child.communicate(timeout=4)[0].strip()!='guarded' or child.returncode:raise RuntimeError('admission gate did not preserve established HTTP')
+        if line(4)!='guarded':raise RuntimeError('admission gate did not preserve established HTTP')
+        if line(2)!='holding':raise RuntimeError('held-connection probe did not start')
+        # A connection opened while admission is closed must be served once it
+        # reopens, after a kernel SYN retransmission rather than a reset.
+        time.sleep(1.5)
+        for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule)
+        installed=False
+        if line(12)!='held' or child.wait(timeout=2):raise RuntimeError('connection opened during admission was not served after reopening')
     finally:
-        for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule,check=False)
+        if installed:
+            for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule,check=False)
         if child.poll() is None:child.kill();child.wait()
 
 

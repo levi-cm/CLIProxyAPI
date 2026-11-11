@@ -161,7 +161,15 @@ and Codex verification. The old container must not use host networking.
   replaces a changed release or live configuration.
 - Admission closes across loopback/LAN/Tailscale, host INPUT/OUTPUT/Docker traffic,
   root clients, IPv4/IPv6 and the old namespace. Existing connections are not
-  reset. A final drain and fresh quiet observation happen before any stop.
+  reset. New connections are dropped silently (filter-table `DROP` of the SYN),
+  not refused with a TCP reset: the client's kernel retransmits its SYN (Linux
+  after about 1, 3, 7 and 15 seconds) and connects to whichever container serves
+  once admission reopens, so a short cutover appears as connect latency. A
+  dropped SYN never confirms a conntrack entry, so the retransmission is NATed
+  afresh. Clients with a connect timeout shorter than the remaining outage still
+  fail. Preparation proves in the old fixture namespace that a connection opened
+  while closed is served after reopening. A final drain and fresh quiet
+  observation happen before any stop.
 - Both `owner.lock` and `history/writer.lock` are required; `redemption.lock` is
   briefly fenced only after an in-flight redemption has completed. Automatic
   redemption stays enabled. No policy mode or readonly switch is used to pause it.
