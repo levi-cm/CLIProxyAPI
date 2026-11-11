@@ -69,28 +69,43 @@ print('held',flush=True)
 '''
     child=subprocess.Popen(['nsenter','-t',str(pid),'-n','python3','-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     rule=['-p','tcp','--dport','8317','--syn','-m','comment','--comment',tag,'-j','DROP']
-    installed=False
+    installed=[]
+    def remove():
+        # Every installed family is removed independently.
+        for exe in list(installed):
+            try:run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule,check=False)
+            except (OSError,subprocess.TimeoutExpired):continue
+            installed.remove(exe)
     try:
         import select
+        # Unbuffered reads with an explicit line buffer: lines printed together
+        # must not hide in a text buffer that select() cannot see.
+        fd=child.stdout.fileno();pending=[b'']
         def line(wait):
-            if not select.select([child.stdout],[],[],wait)[0]:return ''
-            return child.stdout.readline().strip()
+            deadline=time.monotonic()+wait
+            while b'\n' not in pending[0]:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not select.select([fd],[],[],remaining)[0]:return ''
+                chunk=os.read(fd,4096)
+                if not chunk:return ''
+                pending[0]+=chunk
+            text,_,pending[0]=pending[0].partition(b'\n')
+            return text.decode(errors='replace').strip()
         if line(3)!='ready':raise RuntimeError('fixture keepalive did not become ready')
-        for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-I','INPUT','1']+rule)
-        installed=True
+        for exe in ('iptables','ip6tables'):
+            run(['nsenter','-t',str(pid),'-n',exe,'-I','INPUT','1']+rule);installed.append(exe)
         child.stdin.write('go\n');child.stdin.flush()
         if line(4)!='guarded':raise RuntimeError('admission gate did not preserve established HTTP')
         if line(2)!='holding':raise RuntimeError('held-connection probe did not start')
         # A connection opened while admission is closed must be served once it
         # reopens, after a kernel SYN retransmission rather than a reset.
         time.sleep(1.5)
-        for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule)
-        installed=False
+        remove()
         if line(12)!='held' or child.wait(timeout=2):raise RuntimeError('connection opened during admission was not served after reopening')
     finally:
-        if installed:
-            for exe in ('iptables','ip6tables'):run(['nsenter','-t',str(pid),'-n',exe,'-D','INPUT']+rule,check=False)
-        if child.poll() is None:child.kill();child.wait()
+        try:remove()
+        finally:
+            if child.poll() is None:child.kill();child.wait()
 
 
 def prepare(image,commit,retire_idle_clients=False,outage_budget=40):
