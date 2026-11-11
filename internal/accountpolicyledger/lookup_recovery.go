@@ -64,8 +64,10 @@ func (a *Archive) lookupSignature(kind, prefix string) (lookupSignature, error) 
 // repairLookup adds entries missing from an otherwise valid lookup. That is the
 // normal state after an abrupt stop between a segment append and its lookup
 // write, or after an interrupted rebuild, and it avoids rewriting the whole
-// tree for a handful of records. The caller re-verifies the complete signature
-// and falls back to restoreLookup if anything else differs.
+// tree for a handful of records. It also drops entries that name the newest
+// segment but are absent from its index (see pruneTailLookup). The caller
+// re-verifies the complete signature and falls back to restoreLookup if
+// anything else differs.
 func (a *Archive) repairLookup(kind string, names []string) error {
 	if err := a.lookupDir(kind); err != nil {
 		return err
@@ -73,6 +75,21 @@ func (a *Archive) repairLookup(kind string, names []string) error {
 	if a.lookupMemo == nil {
 		a.startLookupMemo()
 		defer a.stopLookupMemo()
+	}
+	pruned := map[string]bool{}
+	if len(names) > 0 {
+		tail := names[len(names)-1]
+		idx, err := a.index(tail)
+		if err != nil {
+			return err
+		}
+		known := make(map[string]bool, len(idx.IDs))
+		for id := range idx.IDs {
+			known[lookupDigest(id)] = true
+		}
+		if err := a.pruneTailLookup(kind, "", tail, known, pruned); err != nil {
+			return err
+		}
 	}
 	missing := map[string]string{}
 	for _, name := range names {
@@ -90,7 +107,55 @@ func (a *Archive) repairLookup(kind string, names []string) error {
 			}
 		}
 	}
+	for digest := range pruned {
+		if _, ok := missing[digest]; ok {
+			// The record exists in an older segment: the entry was assigned to
+			// the wrong segment, which only the full rebuild may resolve.
+			return errors.New("lookup entry assigned to the wrong segment")
+		}
+	}
 	return a.mergeRecoveredLookup(kind, "", missing)
+}
+
+// pruneTailLookup removes entries that name the newest segment but are absent
+// from its index. A copy of a live writer takes the raw segments before the
+// lookup tree, so its lookup can already hold records appended after the
+// segment was copied; a full rebuild drops exactly those entries. Sealed older
+// segments never gain records, so extra entries there (or for unknown
+// segments) are left alone and still force the full rebuild.
+func (a *Archive) pruneTailLookup(kind, prefix, tail string, known, pruned map[string]bool) error {
+	base := lookupBase(kind, prefix)
+	split, err := a.lookupSplit(base)
+	if err != nil {
+		return err
+	}
+	if split {
+		if len(prefix) >= sha256.Size*2-1 {
+			return errors.New("invalid lookup depth")
+		}
+		for _, digit := range "0123456789abcdef" {
+			if err := a.pruneTailLookup(kind, prefix+string(digit), tail, known, pruned); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	bucket, err := a.lookupBucket(base)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for digest, segment := range bucket {
+		if segment == tail && !known[digest] {
+			delete(bucket, digest)
+			pruned[digest] = true
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return a.writeLookup(base+".json", bucket, false)
 }
 
 func (a *Archive) restoreLookup(kind string, names []string) error {

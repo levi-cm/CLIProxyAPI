@@ -113,7 +113,9 @@ func TestStartupRepairsMissingLookupEntriesWithoutFullRebuild(t *testing.T) {
 func TestStartupFallsBackToFullRebuildForStaleLookupEntries(t *testing.T) {
 	dir, a, ids := seedSplitArchive(t)
 	// An entry for a record that no segment contains cannot be repaired by
-	// adding entries; the full rebuild must remove it.
+	// adding entries. Here it names the only (newest) segment, so the tail
+	// prune removes it; elsewhere the full rebuild must (see
+	// TestStartupTailPruneFallsBackToFullRebuild).
 	ghost := "ghost-request"
 	ghostBase := lookupLeaf(t, a, "requests", ghost)
 	bucket, err := a.lookupBucket(ghostBase)
