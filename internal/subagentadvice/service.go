@@ -187,6 +187,7 @@ func modelAdvice(c modelChoice) ModelAdvice {
 		Harnesses:        harnesses,
 		CapabilitySource: c.offer.capabilitySource,
 		Reason:           c.reason,
+		IncludesCredits:  c.credits,
 	}
 	if c.budget >= 0 {
 		tasks := int(math.Min(c.budget, math.MaxInt32))

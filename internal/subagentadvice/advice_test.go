@@ -975,3 +975,52 @@ func TestMonthlyWindowBindsWhenTighter(t *testing.T) {
 		t.Fatalf("allowance = %+v", adv.Providers)
 	}
 }
+
+// liveCodex mirrors the Codex pool on 2026-11-12: one account with 76% of its
+// week left, one used up until tomorrow, ~52k and ~54k credits above the
+// 7.5k floors and three full-reset grants each.
+func liveCodex(creditsOn bool) Inventory {
+	a := codexAcct("codex-a", 24, 129*time.Hour, 0.9)
+	b := codexAcct("codex-b", 100, 25*time.Hour, 0)
+	grants := []time.Time{t0.Add(18 * 24 * time.Hour), t0.Add(18 * 24 * time.Hour), t0.Add(18 * 24 * time.Hour)}
+	a.ResetGrants, b.ResetGrants = grants, grants
+	a.Credits = &Credits{Balance: 59855, Spendable: 52105, Floor: 7500, Enabled: creditsOn}
+	b.Credits = &Credits{Balance: 62176, Spendable: 54426, Floor: 7500, Enabled: creditsOn}
+	if creditsOn {
+		b.ServingOnCredits = true
+	} else {
+		b.Blocked, b.BlockedUntil = "allowance_exhausted", t0.Add(25*time.Hour)
+	}
+	return Inventory{Accounts: []Account{a, b}, Models: discovered()}
+}
+
+func TestCreditsAboveFloorAreSpent(t *testing.T) {
+	svc, _, _ := newTestService(t, Config{}, liveCodex(true))
+	adv := mustAdvise(t, svc, Request{})
+	s := by(adv, sol)
+	if adv.Posture != PostureSpendFreely || s == nil || s.Basis != KindSurplus || !s.IncludesCredits || s.BudgetTasks == nil {
+		t.Fatalf("credit advice = %s %+v", adv.Posture, s)
+	}
+	// 106531 credits are 832% of one Pro week; a priority xhigh task costs
+	// 2% * 1.5 * 2 = 6%, so the credits alone pay for 67 + 70 tasks.
+	if *s.BudgetTasks < 137 {
+		t.Fatalf("budget = %d\n%s", *s.BudgetTasks, adv.Text())
+	}
+	text := adv.Text()
+	if !strings.Contains(text, "codex weekly, all 2 accounts as one: 38% left now; refills +50% in 25h, +12% in 5d9h; ") ||
+		!strings.Contains(text, "; credits above the 7.5k floors: 107k (+416%), spend them; 6 full-reset grants (earliest expires in 18d), redeemed automatically\n") ||
+		!strings.Contains(text, "credits above the floors") {
+		t.Fatalf("text = %s", text)
+	}
+}
+
+func TestCreditsUnusedWhileRoutingIgnoresThem(t *testing.T) {
+	svc, _, _ := newTestService(t, Config{}, liveCodex(false))
+	adv := mustAdvise(t, svc, Request{})
+	if s := by(adv, sol); s != nil && s.IncludesCredits {
+		t.Fatalf("credits advised while routing does not spend them: %+v", s)
+	}
+	if text := adv.Text(); !strings.Contains(text, "; credits above the 7.5k floors: 107k (+416%), unused because credit spending is off in routing;") {
+		t.Fatalf("text = %s", text)
+	}
+}

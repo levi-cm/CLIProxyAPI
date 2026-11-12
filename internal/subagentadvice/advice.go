@@ -56,14 +56,17 @@ type Advice struct {
 
 // ModelAdvice is how subagents should use one model, in preference order.
 type ModelAdvice struct {
-	Capability       string            `json:"capability"`
-	Provider         string            `json:"provider"`
-	Model            string            `json:"model"`
-	ReasoningEffort  string            `json:"reasoning_effort"`
-	Mode             string            `json:"mode"`
-	Basis            string            `json:"basis"`
-	BudgetTasks      *int              `json:"budget_tasks,omitempty"`
-	BudgetUntil      *time.Time        `json:"budget_until,omitempty"`
+	Capability      string     `json:"capability"`
+	Provider        string     `json:"provider"`
+	Model           string     `json:"model"`
+	ReasoningEffort string     `json:"reasoning_effort"`
+	Mode            string     `json:"mode"`
+	Basis           string     `json:"basis"`
+	BudgetTasks     *int       `json:"budget_tasks,omitempty"`
+	BudgetUntil     *time.Time `json:"budget_until,omitempty"`
+	// IncludesCredits marks a budget that also spends credits above the
+	// protected floors (after the allowance is exhausted).
+	IncludesCredits  bool              `json:"includes_credits,omitempty"`
 	Harnesses        map[string]string `json:"harnesses"`
 	CapabilitySource string            `json:"capability_source"`
 	Reason           string            `json:"reason"`
@@ -107,6 +110,24 @@ type CombinedAllowance struct {
 	// ProjectedUnusedPercent is the allowance projected to expire unused at
 	// resets within the surplus horizon; nil when the pace is unknown.
 	ProjectedUnusedPercent *float64 `json:"projected_unused_percent,omitempty"`
+	// Credits sums the credit balances above the protected floors.
+	Credits *CombinedCredits `json:"credits,omitempty"`
+	// ResetGrants counts available full-reset grants, which the reset
+	// automation redeems; ResetGrantsExpireAt is the earliest expiry.
+	ResetGrants         int        `json:"reset_grants,omitempty"`
+	ResetGrantsExpireAt *time.Time `json:"reset_grants_expire_at,omitempty"`
+}
+
+// CombinedCredits is a provider's credit balance above the protected floors.
+type CombinedCredits struct {
+	Spendable float64 `json:"spendable"`
+	// FloorPerAccount is the protected reserve each account keeps.
+	FloorPerAccount float64 `json:"floor_per_account"`
+	// AddPercent is the spendable balance in percent of the combined
+	// allowance; zero when the provider sets no credits-per-allowance.
+	AddPercent float64 `json:"add_percent"`
+	// Enabled reports whether routing spends credits at all.
+	Enabled bool `json:"enabled"`
 }
 
 // Refill is one account reset in a combined allowance.

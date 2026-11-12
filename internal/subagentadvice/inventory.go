@@ -75,6 +75,22 @@ type Account struct {
 	History []Sample
 	// Usage holds token totals from the request ledger; nil when unavailable.
 	Usage *UsageHistory
+	// Credits is the provider credit balance; nil when none is reported.
+	Credits *Credits
+	// ResetGrants lists the expiry of each available full-reset grant (zero
+	// when it does not expire). The reset automation decides when to redeem.
+	ResetGrants []time.Time
+}
+
+// Credits is a provider credit balance that routing can draw once the
+// ordinary allowance is exhausted, down to a protected floor.
+type Credits struct {
+	Balance float64
+	// Spendable is the balance above the protected floor and safety margin.
+	Spendable float64
+	Floor     float64
+	// Enabled reports whether routing spends credits at all.
+	Enabled bool
 }
 
 // Block is a temporary model-level unavailability.

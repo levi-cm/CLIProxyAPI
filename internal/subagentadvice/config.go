@@ -87,6 +87,11 @@ type ProviderConfig struct {
 	PlanCapacityUnits map[string]float64 `yaml:"plan-capacity-units,omitempty" json:"plan-capacity-units,omitempty"`
 	// DefaultPrice estimates historical cost for models without a price entry.
 	DefaultPrice *Price `yaml:"default-price,omitempty" json:"default-price,omitempty"`
+	// CreditsPerAllowance is how many provider credits one account's full
+	// long-window allowance is worth at our workload (Codex Pro: ~12800 per
+	// week). It turns credit balances above the protected floor into capacity
+	// that advice spends. Zero ignores credits.
+	CreditsPerAllowance float64 `yaml:"credits-per-allowance,omitempty" json:"credits-per-allowance,omitempty"`
 	// Disabled removes the provider from planning.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
@@ -153,7 +158,7 @@ func DefaultConfig() Config {
 				CapacityUnits: 13000,
 				DefaultPrice:  &Price{Input: 4, Output: 20, CacheRead: 0.2},
 			},
-			"codex":       {},
+			"codex":       {CreditsPerAllowance: 12800},
 			"opencode-go": {},
 		},
 		Models: []ModelCapability{
@@ -255,6 +260,9 @@ func (cfg Config) Resolve() Config {
 		if p.DefaultPrice != nil {
 			price := *p.DefaultPrice
 			base.DefaultPrice = &price
+		}
+		if p.CreditsPerAllowance != 0 {
+			base.CreditsPerAllowance = p.CreditsPerAllowance
 		}
 		base.Disabled = p.Disabled
 		out.Providers[key] = base
@@ -416,6 +424,9 @@ func (r Config) validateNumbers() error {
 	}
 	for name, p := range r.Providers {
 		if err := nonNegative("providers."+name+".capacity-units", p.CapacityUnits); err != nil {
+			return err
+		}
+		if err := nonNegative("providers."+name+".credits-per-allowance", p.CreditsPerAllowance); err != nil {
 			return err
 		}
 		for plan, v := range p.PlanCapacityUnits {

@@ -62,6 +62,14 @@ type accountState struct {
 
 	wasteUnits   float64
 	surplusUnits float64
+	// creditUnits is the credit balance above the floor in capacity units;
+	// routing draws it only after the allowance is exhausted.
+	creditUnits float64
+}
+
+// spendsCredits reports whether advice may spend this account's credits.
+func (st *accountState) spendsCredits() bool {
+	return st.creditUnits > 0 && st.acct.Credits != nil && st.acct.Credits.Enabled && st.blocked == ""
 }
 
 func (st *accountState) reserveUnits(cfg Config, demandKnown bool) float64 {
@@ -194,6 +202,9 @@ func (f *forecaster) account(a *Account, poolMin float64) *accountState {
 	}
 	f.estimatePace(st)
 
+	if c := a.Credits; c != nil && cfg.Providers[a.Provider].CreditsPerAllowance > 0 && c.Spendable > 0 {
+		st.creditUnits = c.Spendable / cfg.Providers[a.Provider].CreditsPerAllowance * st.capacity
+	}
 	st.inFlightUnits = float64(a.ActiveRequests) * cfg.InFlightRequestPercent / 100 * st.capacity
 	if st.metered {
 		remaining := 100 - st.used

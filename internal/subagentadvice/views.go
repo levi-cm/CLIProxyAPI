@@ -162,6 +162,27 @@ func (f *forecaster) combined(provider string) *CombinedAllowance {
 		}
 	}
 	c.LeftPercent = round(left/total, 0)
+	credits := &CombinedCredits{}
+	for _, st := range accounts {
+		if cr := st.acct.Credits; cr != nil {
+			credits.Spendable += cr.Spendable
+			credits.FloorPerAccount = math.Max(credits.FloorPerAccount, cr.Floor)
+			credits.Enabled = credits.Enabled || cr.Enabled
+			credits.AddPercent += st.creditUnits / total * 100
+			c.Credits = credits
+		}
+		for _, expires := range st.acct.ResetGrants {
+			c.ResetGrants++
+			if !expires.IsZero() && (c.ResetGrantsExpireAt == nil || expires.Before(*c.ResetGrantsExpireAt)) {
+				at := expires
+				c.ResetGrantsExpireAt = &at
+			}
+		}
+	}
+	if c.Credits != nil {
+		c.Credits.Spendable = math.Round(c.Credits.Spendable)
+		c.Credits.AddPercent = round(c.Credits.AddPercent, 0)
+	}
 	sort.SliceStable(c.Refills, func(i, j int) bool { return c.Refills[i].At.Before(c.Refills[j].At) })
 	if pool := f.pools[provider]; pool != nil && pool.demandKnown {
 		unused := round(pool.wasteUnits/total*100, 0)

@@ -87,7 +87,37 @@ func combinedText(provider string, c CombinedAllowance, now time.Time) string {
 	if c.ProjectedUnusedPercent != nil {
 		line += fmt.Sprintf("; projected to expire unused: %.0f%%", *c.ProjectedUnusedPercent)
 	}
+	if cr := c.Credits; cr != nil {
+		line += fmt.Sprintf("; credits above the %s floors: %s", roughCredits(cr.FloorPerAccount), roughCredits(cr.Spendable))
+		if cr.AddPercent > 0 {
+			line += fmt.Sprintf(" (+%.0f%%)", cr.AddPercent)
+		}
+		switch {
+		case !cr.Enabled:
+			line += ", unused because credit spending is off in routing"
+		case cr.Spendable > 0:
+			line += ", spend them"
+		}
+	}
+	if c.ResetGrants > 0 {
+		line += fmt.Sprintf("; %d full-reset grants", c.ResetGrants)
+		if c.ResetGrantsExpireAt != nil {
+			line += " (earliest expires in " + roughDuration(c.ResetGrantsExpireAt.Sub(now)) + ")"
+		}
+		line += ", redeemed automatically"
+	}
 	return line
+}
+
+// roughCredits prints a credit amount like 7.5k or 106k.
+func roughCredits(v float64) string {
+	switch {
+	case v >= 10000:
+		return fmt.Sprintf("%.0fk", v/1000)
+	case v >= 1000:
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", v/1000), ".0") + "k"
+	}
+	return fmt.Sprintf("%.0f", v)
 }
 
 func budgetText(m ModelAdvice, now time.Time) string {
@@ -98,6 +128,12 @@ func budgetText(m ModelAdvice, now time.Time) string {
 		return "budget unknown"
 	}
 	text := fmt.Sprintf("~%s subagent tasks", roughCount(*m.BudgetTasks))
+	if m.IncludesCredits {
+		if m.BudgetUntil != nil {
+			return text + " of expiring allowance (use within " + roughDuration(m.BudgetUntil.Sub(now)) + ") and credits above the floors"
+		}
+		return text + " of credits above the floors"
+	}
 	if m.BudgetUntil != nil {
 		in := roughDuration(m.BudgetUntil.Sub(now))
 		switch m.Basis {

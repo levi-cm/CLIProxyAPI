@@ -51,8 +51,10 @@ type modelChoice struct {
 	cost   float64   // one task, in the reference account's units
 	budget float64   // tasks the evidence supports; negative means unknown
 	until  time.Time // when the budget ends (next relevant reset)
-	stale  bool
-	reason string
+	// credits marks a budget that includes credits above the floors.
+	credits bool
+	stale   bool
+	reason  string
 }
 
 type decision struct {
@@ -146,7 +148,7 @@ func (s *scheduler) classify(o *offer) {
 		return
 	}
 	effort := o.defaultEffort()
-	if s.tasks(o, effort, ModeStandard, s.surplusSpend(o)) >= 1 {
+	if s.tasks(o, effort, ModeStandard, s.surplusSpend(o).spend) >= 1 {
 		o.state, o.reason = OfferSurplus, ""
 		return
 	}
@@ -163,39 +165,61 @@ func (s *scheduler) classify(o *offer) {
 	o.state, o.reason = OfferTight, "projected_shortfall_before_reset"
 }
 
-// spendable lists the eligible metered accounts that spend their own
-// allowance, in router order (earliest reset first).
+// spendable lists the eligible metered accounts that can take extra spend:
+// their own allowance, or credits above the floor once it is exhausted. The
+// order is the router's (earliest reset first).
 func (s *scheduler) spendable(o *offer) []*accountState {
 	var out []*accountState
 	for _, st := range s.routerOrder(o) {
-		if st.metered && !st.acct.ServingOnCredits {
+		if st.metered && (!st.acct.ServingOnCredits || st.spendsCredits()) {
 			out = append(out, st)
 		}
 	}
 	return out
 }
 
-// surplusSpend is the extra spend the eligible accounts can take now out of
-// allowance the pool would otherwise leave unused at its weekly (or monthly)
-// resets: at most the projected waste, and never so much that it causes a
-// shortfall before a refill or breaches a reserve. Short windows only matter
-// through eligibility.
-func (s *scheduler) surplusSpend(o *offer) map[*accountState]float64 {
+// surplusPlan is extra spend that would otherwise be lost or left idle.
+type surplusPlan struct {
+	spend map[*accountState]float64
+	// until is when the expiring allowance part must be used; zero when the
+	// plan only spends credits.
+	until time.Time
+	// allowance and credits are the plan's parts in capacity units.
+	allowance, credits float64
+}
+
+// surplusSpend plans extra spend for the eligible accounts: allowance the
+// pool would otherwise leave unused at its weekly (or monthly) resets (at
+// most the projected waste, never causing a shortfall before a refill or
+// breaching a reserve), plus every credit above the protected floors, which
+// routing draws once an account's allowance is exhausted. Short windows only
+// matter through eligibility.
+func (s *scheduler) surplusSpend(o *offer) surplusPlan {
+	plan := surplusPlan{spend: map[*accountState]float64{}}
 	pool := s.f.pools[o.provider]
-	if o.override || pool == nil || pool.surplusUnits <= 0 {
-		return nil
+	if o.override || pool == nil {
+		return plan
 	}
 	accounts := s.spendable(o)
-	room := s.headroom(accounts)
-	left := pool.surplusUnits
-	out := map[*accountState]float64{}
+	if pool.surplusUnits > 0 {
+		room := s.headroom(accounts)
+		left := pool.surplusUnits
+		for _, st := range accounts {
+			if take := math.Min(room[st], left); take > 0 {
+				plan.spend[st] = take
+				plan.allowance += take
+				left -= take
+			}
+		}
+		plan.until = spendDeadline(plan.spend)
+	}
 	for _, st := range accounts {
-		if take := math.Min(room[st], left); take > 0 {
-			out[st] = take
-			left -= take
+		if st.spendsCredits() {
+			plan.spend[st] += st.creditUnits
+			plan.credits += st.creditUnits
 		}
 	}
-	return out
+	return plan
 }
 
 // spendDeadline is the earliest allowance reset among accounts that receive
@@ -211,15 +235,15 @@ func spendDeadline(spend map[*accountState]float64) time.Time {
 	return until
 }
 
-// surplusChoice spends allowance projected to expire: the highest allowed
-// effort and, when configured and no account is near a short-window limit,
-// fast or priority mode.
+// surplusChoice spends allowance projected to expire and credits above the
+// floors: the highest allowed effort and, when configured and no account is
+// near a short-window limit, fast or priority mode.
 func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
-	spend := s.surplusSpend(o)
+	plan := s.surplusSpend(o)
 	var first *accountState
 	stale, caution := false, false
 	for _, st := range s.spendable(o) {
-		if spend[st] <= 0 {
+		if plan.spend[st] <= 0 {
 			continue
 		}
 		if first == nil {
@@ -232,7 +256,18 @@ func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
 		return modelChoice{}, false
 	}
 	pool := s.f.pools[o.provider]
-	until := spendDeadline(spend)
+	var parts []string
+	if plan.allowance > 0 {
+		part := fmt.Sprintf("about %.0f%% of one account's allowance is projected to expire unused at upcoming resets", pool.wasteUnits/first.capacity*100)
+		if !plan.until.IsZero() {
+			part += " (use it before " + plan.until.UTC().Format("Jan 2 15:04 MST") + ")"
+		}
+		parts = append(parts, part)
+	}
+	if plan.credits > 0 {
+		parts = append(parts, "credits above the protected floors are meant to be spent; routing draws them once the allowance is exhausted")
+	}
+	reason := strings.Join(parts, "; ")
 	for i := len(o.efforts) - 1; i >= 0; i-- {
 		effort := o.efforts[i]
 		var modes []string
@@ -245,15 +280,11 @@ func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
 		}
 		modes = append(modes, ModeStandard)
 		for _, mode := range modes {
-			budget := s.tasks(o, effort, mode, spend)
+			budget := s.tasks(o, effort, mode, plan.spend)
 			if budget < 1 {
 				continue
 			}
-			reason := fmt.Sprintf("about %.0f%% of one account's allowance is projected to expire unused at upcoming resets; spend it", pool.wasteUnits/first.capacity*100)
-			if !until.IsZero() {
-				reason += " before " + until.UTC().Format("Jan 2 15:04 MST")
-			}
-			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: s.f.slotCost(o, first, effort, mode, s.input), budget: budget, until: until, stale: stale, reason: reason}, true
+			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: s.f.slotCost(o, first, effort, mode, s.input), budget: budget, until: plan.until, credits: plan.credits > 0, stale: stale, reason: reason}, true
 		}
 	}
 	return modelChoice{}, false

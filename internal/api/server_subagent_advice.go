@@ -116,6 +116,7 @@ func (r *subagentInventory) Inventory(ctx context.Context) (subagentadvice.Inven
 			acct.Windows = claudeWindows(a, limits)
 		default:
 			r.policyWindows(a, &acct)
+			r.policyCredits(a, &acct, settings, now)
 		}
 		r.policyEligibility(a, &acct, settings, now)
 		if u, ok := usage[a.ID]; ok {
@@ -291,6 +292,41 @@ func (r *subagentInventory) policyWindows(a *auth.Auth, acct *subagentadvice.Acc
 			// The policy treats a disallowed bucket as blocked, whatever its percentage.
 			Full: b.UsedPercent >= 100 || (b.Allowed != nil && !*b.Allowed),
 		})
+	}
+}
+
+// policyCredits reports the credit balance above the protected floor, as the
+// credit router computes it, and the available full-reset grants.
+func (r *subagentInventory) policyCredits(a *auth.Auth, acct *subagentadvice.Account, settings accountpolicy.Settings, now time.Time) {
+	if r.policy == nil {
+		return
+	}
+	snapshot, ok := r.policy.Snapshot(a.ID)
+	if !ok || snapshot.Identity.CredentialID != a.ID {
+		return
+	}
+	for _, c := range snapshot.Credits {
+		if c.Status != "available" {
+			continue
+		}
+		var expires time.Time
+		if c.ExpiresAt != nil {
+			if !c.ExpiresAt.After(now) {
+				continue
+			}
+			expires = *c.ExpiresAt
+		}
+		acct.ResetGrants = append(acct.ResetGrants, expires)
+	}
+	status := accountpolicy.CreditState(snapshot, "", settings, now)
+	if status.Balance == nil || !status.Fresh {
+		return
+	}
+	acct.Credits = &subagentadvice.Credits{
+		Balance:   *status.Balance,
+		Spendable: status.Spendable,
+		Floor:     status.Floor,
+		Enabled:   settings.Enabled && settings.CreditSpending.Enabled,
 	}
 }
 
