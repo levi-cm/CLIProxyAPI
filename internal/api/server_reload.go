@@ -119,6 +119,9 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 
 	applySignatureCacheConfig(oldCfg, cfg)
 	applyClaudeToolSearchConfig(cfg)
+	if s.subagentAdvisor != nil {
+		s.subagentAdvisor.SetConfig(cfg.SubagentAdvisor)
+	}
 
 	if oldCfg != nil && !reflect.DeepEqual(oldCfg.Antigravity.ConnectionPool, cfg.Antigravity.ConnectionPool) {
 		executor.ResetAntigravityTransports()

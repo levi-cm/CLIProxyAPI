@@ -1,0 +1,4 @@
+interface:
+  display_name: "Usage Split"
+  short_description: "Which subagents to run, from CLIProxyAPI's live quota"
+  default_prompt: "Use $usage-split to see which subagents to run right now, then start exactly those."

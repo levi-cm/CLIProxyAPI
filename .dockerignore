@@ -11,6 +11,8 @@ Dockerfile
 
 # Documentation and license
 docs
+# Agent skills are client-side tools, not part of the server image
+skills
 README.md
 README_CN.md
 LICENSE

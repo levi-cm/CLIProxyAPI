@@ -50,6 +50,39 @@ account-policy:
 # observations-enabled is config-authoritative on restart, including false.
 # An active Home controller or scheduler plugin cannot share account ownership.
 
+# Read-only subagent advice for orchestrators (GET /v1/account-policy/subagent-advice,
+# no key: it reserves and runs nothing and shows only hashed account references).
+# The server forecasts every account's allowance and answers which model, reasoning
+# effort and standard/fast/priority mode subagents should use, with a spending posture
+# and a rough task budget per model. It never limits how many subagents run. Zero
+# values and an empty section select the built-in defaults shown here. Capacity
+# figures are estimates for forecasting, not billing.
+# subagent-advisor:
+#   enabled: true
+#   min-refresh-seconds: 120      # advice validity bounds; within them the interval
+#   max-refresh-seconds: 3600     # follows the situation and the next reset or recovery
+#   never-advise: ["claude-fable-*"]  # model globs never recommended; [] allows all
+#   task-input-tokens: 300000     # estimated total input of one subagent task
+#   task-output-tokens: 40000     # estimated total output at high effort
+#   surplus-horizon-hours: 72     # only resets within this horizon count as surplus
+#   safety-factor: 1.25           # multiplies forecast demand for continuity checks
+#   reserve-percent: 5            # per-account floor when usage pace is unknown
+#   stale-after-seconds: 900      # older quota observations lower confidence
+#   expired-after-seconds: 21600  # older observations are not used as quota
+#   short-window-caution-percent: 85  # no surplus/fast advice above this 5h usage
+#   short-window-block-percent: 97
+#   fast-mode: auto               # or off
+#   providers:
+#     claude: {capacity-units: 13000}
+#     codex: {}                   # add capacity-units or plan-capacity-units: {pro: N}
+#     opencode-go: {}
+#   account-capacity-units: {}    # credential ID -> capacity override
+#   models:                       # preference order; replaces the default list when set
+#     - {name: claude-opus-5.5, match: [claude-opus-5-5], provider: claude, efforts: [xhigh], modes: [standard, fast], price: {input: 4, output: 20, cache-read: 0.2}, harnesses: {claude-code: opus, opencode: ""}}
+#     - {name: gpt-6.1-sol, match: [gpt-6.1-sol], provider: codex, efforts: [high, xhigh], default-effort: high, modes: [standard, priority], harnesses: {codex: "", opencode: ""}}
+#     - {name: deepseek-4.1, match: ["opencode-go/deepseek-v4.1*", "deepseek-v4.1*"], provider: opencode-go, efforts: [high, max], harnesses: {opencode: ""}}
+#   # A harness model of "" means the resolved CLIProxyAPI model ID.
+
 # Optional model catalog sources: http(s) URLs or absolute local file paths.
 # Each explicit source overrides --local-model; otherwise --local-model uses
 # embedded catalogs, and normal mode uses the official remote sources.

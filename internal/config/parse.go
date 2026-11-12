@@ -52,6 +52,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := accountpolicy.ValidateSettings(cfg.AccountPolicy); errValidate != nil {
 		return nil, fmt.Errorf("account-policy: %w", errValidate)
 	}
+	if errValidate := cfg.SubagentAdvisor.Validate(); errValidate != nil {
+		return nil, fmt.Errorf("subagent-advisor: %w", errValidate)
+	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {

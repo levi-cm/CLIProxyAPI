@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/subagentadvice"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -40,6 +41,12 @@ import (
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
 	policyIntegration *accountpolicyapi.Handler
+	// subagentAdvisor serves read-only subagent advice. The sampler context
+	// is created with the server and cancelled by Stop; Start launches it once.
+	subagentAdvisor *subagentadvice.Service
+	subagentCtx     context.Context
+	subagentStop    context.CancelFunc
+	subagentOnce    sync.Once
 	// engine is the Gin web framework engine instance.
 	engine *gin.Engine
 
@@ -221,6 +228,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.policyIntegration = &accountpolicyapi.Handler{Service: optionState.accountPolicy, History: optionState.accountPolicyHistory}
+	s.subagentAdvisor = subagentadvice.New(cfg.SubagentAdvisor, newSubagentInventory(authManager, optionState.accountPolicy, optionState.accountPolicyHistory))
+	s.subagentCtx, s.subagentStop = context.WithCancel(context.Background())
 	s.mgmt.SetAccountPolicy(optionState.accountPolicy)
 	s.mgmt.SetAccountPolicySettingsValidator(optionState.accountPolicyValidator)
 	s.mgmt.SetAccountPolicyUsage(optionState.accountPolicyUsage)
@@ -310,6 +319,7 @@ func (s *Server) Start() error {
 	if errListen != nil {
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
+	s.startSubagentSampler()
 
 	cfg := s.getConfig()
 	useTLS := cfg != nil && cfg.TLS.Enable
@@ -423,6 +433,9 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+	if s.subagentStop != nil {
+		s.subagentStop()
+	}
 
 	if s.keepAliveEnabled {
 		select {

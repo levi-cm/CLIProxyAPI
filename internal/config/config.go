@@ -4,7 +4,10 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import "github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/subagentadvice"
+)
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -116,6 +119,10 @@ type Config struct {
 
 	// AccountPolicy enables optional deadline routing and saved-reset automation.
 	AccountPolicy accountpolicy.Settings `yaml:"account-policy,omitempty" json:"account-policy"`
+
+	// SubagentAdvisor configures the read-only subagent advice served under
+	// /v1/account-policy/subagent-advice. Empty values select built-in defaults.
+	SubagentAdvisor subagentadvice.Config `yaml:"subagent-advisor,omitempty" json:"subagent-advisor"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`

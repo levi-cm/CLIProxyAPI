@@ -200,3 +200,30 @@ func (s *EarliestDeadlineSelector) claudeLimitBlocked(id string, epoch uint64, m
 func claudeFableModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(canonicalModelKey(model)), "claude-fable-")
 }
+
+// ClaudeLimitWindowState is the last known state of one Claude limit window.
+type ClaudeLimitWindowState struct {
+	Full     bool
+	Reset    time.Time
+	Observed time.Time
+}
+
+// ClaudeLimitWindows returns a copy of the account's last known limit windows
+// keyed by window name ("5h", "7d_oi"). State from another registration epoch
+// is ignored, as in claudeLimitBlocked. It never mutates selector state.
+func (s *EarliestDeadlineSelector) ClaudeLimitWindows(id string, epoch uint64) map[string]ClaudeLimitWindowState {
+	out := map[string]ClaudeLimitWindowState{}
+	if s == nil {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.claudeLimits[id]
+	if state == nil || (epoch != 0 && state.epoch != 0 && epoch != state.epoch) {
+		return out
+	}
+	for name, w := range state.windows {
+		out[name] = ClaudeLimitWindowState{Full: w.full, Reset: w.reset, Observed: w.observed}
+	}
+	return out
+}
