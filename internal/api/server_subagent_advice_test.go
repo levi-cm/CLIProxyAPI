@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyledger"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/subagentadvice"
@@ -311,5 +312,27 @@ func TestClaudeWindowsKeepSelectorFullWindow(t *testing.T) {
 	a.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Reset"] = strconv.FormatInt(now.Add(8*time.Hour).Unix(), 10)
 	if w := find(claudeWindows(a, limits)); w.Full {
 		t.Fatalf("a later window stayed full: %+v", w)
+	}
+}
+
+// Keyless advice requests never touch the history archive: its queries can
+// initialize or import, so only the background sampler reads it.
+func TestAdviceRequestsNeverTouchHistoryArchive(t *testing.T) {
+	m := auth.NewManager(nil, nil, nil)
+	m.SetConfig(&config.Config{})
+	calls := 0
+	inv := newSubagentInventory(m, nil, func() *accountpolicyledger.Archive { calls++; return nil })
+	svc := subagentadvice.New(subagentadvice.Config{}, inv)
+	if _, err := svc.Advise(context.Background(), subagentadvice.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("an advice request opened the history archive %d times", calls)
+	}
+	if err := svc.Sample(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("the background sampler never read history")
 	}
 }

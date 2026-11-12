@@ -64,9 +64,6 @@ type Query struct {
 	CredentialID string
 	Cursor       string
 	Limit        int
-	// ReadOnly answers only from an archive that is already open and fully
-	// imported; it never initializes, imports or rebuilds archive state.
-	ReadOnly bool
 }
 
 type Page struct {

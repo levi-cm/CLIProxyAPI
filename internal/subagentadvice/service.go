@@ -120,7 +120,7 @@ func (s *Service) prepare(ctx context.Context) (*forecaster, Inventory, error) {
 // Sample records quota observations so usage pace is measurable between requests.
 func (s *Service) Sample(ctx context.Context) error {
 	s.compute.Lock()
-	inv, err := s.inventory(ctx)
+	inv, err := s.inventory(WithBackgroundRefresh(ctx))
 	s.compute.Unlock()
 	if err != nil {
 		return err

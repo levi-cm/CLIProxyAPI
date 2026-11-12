@@ -12,6 +12,21 @@ type InventorySource interface {
 	Inventory(ctx context.Context) (Inventory, error)
 }
 
+type backgroundKey struct{}
+
+// WithBackgroundRefresh marks ctx as the advisor's own background sampler, the
+// only caller allowed to read durable history. Advice requests never touch it
+// and use what the sampler last read.
+func WithBackgroundRefresh(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundKey{}, true)
+}
+
+// BackgroundRefresh reports whether ctx belongs to the background sampler.
+func BackgroundRefresh(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundKey{}).(bool)
+	return v
+}
+
 // InventoryFunc adapts a function to InventorySource.
 type InventoryFunc func(ctx context.Context) (Inventory, error)
 

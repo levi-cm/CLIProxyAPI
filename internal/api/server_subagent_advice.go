@@ -331,21 +331,24 @@ func (r *subagentInventory) archive() *accountpolicyledger.Archive {
 }
 
 // ledgerUsage returns token totals per credential for the last 24 and 3 hours,
-// or nil when the history archive is unavailable. Results are cached briefly.
+// or nil when unavailable. Only the background sampler reads the archive (its
+// queries may prepare it); keyless advice requests use the sampler's result.
 func (r *subagentInventory) ledgerUsage(ctx context.Context, now time.Time) map[string]*subagentadvice.UsageHistory {
+	r.mu.Lock()
+	cached := r.usage
+	if r.usage != nil && now.Sub(r.usageAt) > 3*subagentLedgerTTL {
+		cached = nil // the sampler stopped refreshing; do not forecast from old totals
+	}
+	r.mu.Unlock()
+	if !subagentadvice.BackgroundRefresh(ctx) {
+		return cached
+	}
 	a := r.archive()
 	if a == nil || !a.Status().Healthy {
 		return nil
 	}
-	r.mu.Lock()
-	if r.usage != nil && now.Sub(r.usageAt) < subagentLedgerTTL {
-		cached := r.usage
-		r.mu.Unlock()
-		return cached
-	}
-	r.mu.Unlock()
 	collect := func(from time.Time) (map[string][]subagentadvice.ModelUsage, error) {
-		totals, err := a.SummaryContext(ctx, accountpolicyledger.Query{From: from, To: now, Limit: 100, ReadOnly: true}, "day")
+		totals, err := a.SummaryContext(ctx, accountpolicyledger.Query{From: from, To: now, Limit: 100}, "day")
 		if err != nil {
 			return nil, err
 		}
@@ -397,20 +400,20 @@ func (r *subagentInventory) ledgerUsage(ctx context.Context, now time.Time) map[
 }
 
 // allowanceHistory returns durable weekly observations from the last day.
+// Like ledgerUsage, only the background sampler reads the archive.
 func (r *subagentInventory) allowanceHistory(ctx context.Context, id string, now time.Time) []subagentadvice.Sample {
+	r.mu.Lock()
+	cached := r.allow[id]
+	r.mu.Unlock()
+	if !subagentadvice.BackgroundRefresh(ctx) {
+		return cached
+	}
 	a := r.archive()
 	if a == nil {
 		return nil
 	}
-	r.mu.Lock()
-	if at, ok := r.allowAt[id]; ok && now.Sub(at) < subagentLedgerTTL {
-		cached := r.allow[id]
-		r.mu.Unlock()
-		return cached
-	}
-	r.mu.Unlock()
 	var samples []subagentadvice.Sample
-	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-24 * time.Hour), To: now, ReadOnly: true}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
+	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-24 * time.Hour), To: now}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

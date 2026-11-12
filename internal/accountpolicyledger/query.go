@@ -137,9 +137,6 @@ func (a *Archive) requestPositions(q Query) (*os.Root, []segmentPosition, cursor
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var pos cursor
-	if q.ReadOnly && !a.readyLocked() {
-		return nil, nil, pos, errNotReady
-	}
 	if a.root == nil {
 		if _, err := os.Stat(a.dir); os.IsNotExist(err) && (a.enabled == nil || !a.enabled()) {
 			return nil, nil, pos, nil
@@ -404,15 +401,6 @@ func (a *Archive) ExportContext(ctx context.Context, q Query, visit func(Request
 	}
 }
 
-var errNotReady = errors.New("history archive not ready for read-only queries")
-
-// readyLocked reports whether prepare would do nothing: the archive is open,
-// not closed, and has no pending legacy import.
-func (a *Archive) readyLocked() bool {
-	pendingImport := a.legacyDir != "" && !a.importComplete && a.enabled != nil && a.enabled()
-	return a.root != nil && !a.closed && !pendingImport
-}
-
 // PublicObservation omits the internal logical-account continuity reference.
 func PublicObservation(o Observation) Observation { o.IdentityRef = ""; return o }
 
@@ -427,9 +415,6 @@ type segmentPosition struct {
 func (a *Archive) allowancePositions(q Query) (*os.Root, []segmentPosition, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if q.ReadOnly && !a.readyLocked() {
-		return nil, nil, errNotReady
-	}
 	if a.root == nil {
 		if _, err := os.Stat(a.dir); os.IsNotExist(err) && (a.enabled == nil || !a.enabled()) {
 			return nil, nil, nil
