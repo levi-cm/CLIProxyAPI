@@ -8,6 +8,7 @@ description: "Use when orchestrating subagents: tells you which model, effort an
 Run `bash <skill-dir>/scripts/advise.sh` (no key needed) and follow it:
 
 - The first line says how freely to spend. You decide how many subagents the work needs; "spend freely" means many in parallel are welcome.
+- Provider lines show each weekly (or monthly) allowance: what is left, when it resets, and when used-up accounts refill. The goal is to use these allowances fully before they reset; 5h limits rarely matter.
 - Model lines are in preference order. Start each subagent with the model named for your harness (e.g. `claude-code: opus`) and the given effort, set explicitly. Skip lines without your harness.
 - Stay well within each line's task budget. Use fast/priority mode only if your harness supports it.
 - Reuse the advice until its "reuse until" time; ask earlier only after rate-limit errors.

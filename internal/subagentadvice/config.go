@@ -42,14 +42,17 @@ type Config struct {
 	StaleAfterSeconds int `yaml:"stale-after-seconds,omitempty" json:"stale-after-seconds,omitempty"`
 	// ExpiredAfterSeconds makes a quota observation unusable (default 21600).
 	ExpiredAfterSeconds int `yaml:"expired-after-seconds,omitempty" json:"expired-after-seconds,omitempty"`
-	// SurplusHorizonHours limits surplus claims to resets within this horizon (default 72).
+	// SurplusHorizonHours counts allowance projected to expire unused at resets
+	// within this horizon (default 192: every weekly window and its refill).
+	// The goal is to use the weekly and monthly allowances fully.
 	SurplusHorizonHours float64 `yaml:"surplus-horizon-hours,omitempty" json:"surplus-horizon-hours,omitempty"`
 	// SafetyFactor multiplies forecast demand when checking continuity (default 1.25).
 	SafetyFactor float64 `yaml:"safety-factor,omitempty" json:"safety-factor,omitempty"`
 	// ReservePercent is the per-account floor used when demand is unknown (default 5).
 	ReservePercent float64 `yaml:"reserve-percent,omitempty" json:"reserve-percent,omitempty"`
-	// ShortWindowCautionPercent stops surplus and fast slots on an account whose
-	// short window (for example 5h) is at least this full (default 85).
+	// ShortWindowCautionPercent stops fast and priority mode on an account whose
+	// short window (for example 5h) is at least this full (default 85). Short
+	// windows never limit budgets; they only block an account while closed.
 	ShortWindowCautionPercent float64 `yaml:"short-window-caution-percent,omitempty" json:"short-window-caution-percent,omitempty"`
 	// ShortWindowBlockPercent treats a short window this full as closed (default 97).
 	ShortWindowBlockPercent float64 `yaml:"short-window-block-percent,omitempty" json:"short-window-block-percent,omitempty"`
@@ -135,7 +138,7 @@ func DefaultConfig() Config {
 		NeverAdvise:               []string{"claude-fable-*"},
 		StaleAfterSeconds:         900,
 		ExpiredAfterSeconds:       21600,
-		SurplusHorizonHours:       72,
+		SurplusHorizonHours:       192,
 		SafetyFactor:              1.25,
 		ReservePercent:            5,
 		ShortWindowCautionPercent: 85,

@@ -67,7 +67,7 @@ func (s *Service) recordSamplesLocked(inv Inventory, now time.Time) {
 	live := map[string]bool{}
 	for _, a := range inv.Accounts {
 		live[a.ID] = true
-		w, ok := latestWindow(a.Windows, func(w Window) bool { return w.Long && w.Model == "" })
+		w, ok := bindingLongWindow(a.Windows)
 		if !ok || w.ObservedAt.IsZero() || math.IsNaN(w.UsedPercent) || math.IsInf(w.UsedPercent, 0) {
 			continue
 		}
@@ -239,7 +239,7 @@ func refreshAfter(f *forecaster, d decision) (time.Duration, string) {
 		tight = tight || (len(d.choices) > 0 && p.demandKnown && p.shortfallBase > 0)
 	}
 	if tight {
-		consider(cautionRefresh, "capacity is tight before the next reset")
+		consider(cautionRefresh, "capacity is tight before the next refill")
 	}
 	if stale {
 		consider(cautionRefresh, "advice relies on stale quota observations")
@@ -251,8 +251,8 @@ func refreshAfter(f *forecaster, d decision) (time.Duration, string) {
 }
 
 // nextChange returns the earliest known future event that changes what can
-// be advised: an account recovering, a closed or nearly full short window
-// reopening, or a metered allowance resetting.
+// be advised: an account recovering, a closed short window reopening, or a
+// metered allowance resetting.
 func (f *forecaster) nextChange() (time.Time, string) {
 	var at time.Time
 	var why string
@@ -275,7 +275,7 @@ func (f *forecaster) nextChange() (time.Time, string) {
 			if (w.Long && w.Model == "") || !f.windowRelevant(w) {
 				continue
 			}
-			if w.Full || w.UsedPercent >= f.cfg.ShortWindowCautionPercent {
+			if w.Full || w.UsedPercent >= f.cfg.ShortWindowBlockPercent {
 				consider(w.ResetAt, "a "+w.Name+" window reopens")
 			}
 		}

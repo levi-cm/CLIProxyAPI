@@ -271,6 +271,8 @@ func (r *subagentInventory) policyWindows(a *auth.Auth, acct *subagentadvice.Acc
 		}
 		name := b.Scope
 		switch {
+		case b.DurationSeconds >= 20*24*3600:
+			name = "30d"
 		case b.DurationSeconds >= 6*24*3600:
 			name = "7d"
 		case b.DurationSeconds == claudeShortWindowSeconds:

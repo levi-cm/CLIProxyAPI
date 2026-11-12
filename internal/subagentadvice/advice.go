@@ -88,6 +88,21 @@ type ProviderSummary struct {
 	UsableSurplusUnits float64    `json:"usable_surplus_units"`
 	Confidence         float64    `json:"confidence"`
 	Note               string     `json:"note,omitempty"`
+	// Allowance lists each metered account's weekly (or monthly) allowance,
+	// earliest reset first, without identifying accounts.
+	Allowance []AllowanceWindow `json:"allowance,omitempty"`
+	// ProjectedUnusedPercent is the allowance projected to expire unused at
+	// resets within the surplus horizon, in percent of one account.
+	ProjectedUnusedPercent *float64 `json:"projected_unused_percent,omitempty"`
+}
+
+// AllowanceWindow is one account's long allowance window.
+type AllowanceWindow struct {
+	// Period is "weekly" or "monthly".
+	Period      string     `json:"period"`
+	Usable      bool       `json:"usable"`
+	LeftPercent float64    `json:"left_percent"`
+	ResetAt     *time.Time `json:"reset_at,omitempty"`
 }
 
 // Forecast is the diagnostic view of the evidence behind advice.

@@ -64,15 +64,15 @@ func discovered() []DiscoveredModel {
 	}
 }
 
-// normalFleet has no allowance projected to expire within the horizon.
+// normalFleet's demand uses every weekly allowance before it resets.
 func normalFleet() Inventory {
 	return Inventory{
 		Accounts: []Account{
 			claudeAcct("claude-a", 50, 72*time.Hour, 1),
-			claudeAcct("claude-b", 20, 120*time.Hour, 0),
-			claudeAcct("claude-c", 10, 144*time.Hour, 0),
+			claudeAcct("claude-b", 20, 120*time.Hour, 0.5),
+			claudeAcct("claude-c", 10, 144*time.Hour, 0.5),
 			codexAcct("codex-a", 30, 96*time.Hour, 0.5),
-			codexAcct("codex-b", 10, 150*time.Hour, 0),
+			codexAcct("codex-b", 10, 150*time.Hour, 0.5),
 			opencodeAcct("opencode"),
 		},
 		Models: discovered(),
@@ -253,9 +253,12 @@ func TestSurplusSpendsFreelyButNeverMaxForOpus(t *testing.T) {
 	if o.ReasoningEffort != "xhigh" || o.Mode != ModeFast || o.Basis != KindSurplus {
 		t.Fatalf("opus = %+v", o)
 	}
-	// 60% of 13000 units at 0.6 pace confidence is 4680 units; a fast xhigh
-	// task costs (300k*$4 + 40k*1.5*$20)/1e6 * 2 = 4.8 units: 975 tasks.
-	if o.BudgetTasks == nil || *o.BudgetTasks != 975 || o.BudgetUntil == nil || !o.BudgetUntil.Equal(t0.Add(10*time.Hour)) {
+	// The pool leaves about 106% of one account unused at resets within 8 days
+	// (claude-a's 60% expiring in 10h, its refilled week and claude-c's tail);
+	// at 0.6 pace confidence that is ~8285 units. claude-a can spend all 7800
+	// units it holds before its reset, claude-b the remaining ~485. A fast
+	// xhigh task costs (300k*$4 + 40k*1.5*$20)/1e6 * 2 = 4.8 units: 1625 + 101.
+	if o.BudgetTasks == nil || *o.BudgetTasks != 1726 || o.BudgetUntil == nil || !o.BudgetUntil.Equal(t0.Add(10*time.Hour)) {
 		t.Fatalf("opus budget = %v until %v", o.BudgetTasks, o.BudgetUntil)
 	}
 	if d := by(a, deepseek); d == nil || d.ReasoningEffort != "high" || d.Basis != KindUnmetered {
@@ -396,8 +399,13 @@ func TestRefreshFollowsTheSituation(t *testing.T) {
 		t.Fatalf("recovery: %d %q", a.RefreshAfterSeconds, a.RefreshReason)
 	}
 	inv = normalFleet()
+	// A nearly full 5h window does not matter; a closed one does.
 	inv.Accounts[1].Windows[1].UsedPercent = 90
 	inv.Accounts[1].Windows[1].ResetAt = t0.Add(40 * time.Minute)
+	if a = refresh(inv); a.RefreshAfterSeconds != 3600 {
+		t.Fatalf("5h caution should not drive refresh: %d %q", a.RefreshAfterSeconds, a.RefreshReason)
+	}
+	inv.Accounts[1].Windows[1].Full = true
 	if a = refresh(inv); a.RefreshAfterSeconds != 2400 || a.RefreshReason != "a 5h window reopens" {
 		t.Fatalf("5h window: %d %q", a.RefreshAfterSeconds, a.RefreshReason)
 	}
@@ -529,14 +537,19 @@ func TestShortWindowCautionAndClosure(t *testing.T) {
 	inv := surplusFleet()
 	inv.Accounts[0].Windows[1].UsedPercent = 90
 	svc, src, _ := newTestService(t, Config{}, inv)
-	noSurplus(t, mustAdvise(t, svc, Request{}), "surplus or fast advice despite 5h caution")
+	// A nearly full 5h window keeps the weekly surplus but drops fast mode.
+	o := by(mustAdvise(t, svc, Request{}), opus)
+	if o == nil || o.Basis != KindSurplus || o.Mode != ModeStandard || !o.BudgetUntil.Equal(t0.Add(10*time.Hour)) {
+		t.Fatalf("5h caution: %+v", o)
+	}
 	src.mu.Lock()
 	src.inv.Accounts[0].Windows[1].Full = true
 	src.mu.Unlock()
-	a := mustAdvise(t, svc, Request{})
-	noSurplus(t, a, "closed 5h window account used for surplus")
-	if by(a, opus) == nil {
-		t.Fatalf("other claude accounts should still serve opus: %+v", a.Models)
+	// A closed 5h window takes claude-a out; the rest of the pool still
+	// holds weekly surplus, spent on the next account.
+	o = by(mustAdvise(t, svc, Request{}), opus)
+	if o == nil || o.BudgetUntil == nil || !o.BudgetUntil.Equal(t0.Add(120*time.Hour)) {
+		t.Fatalf("closed 5h window account used for surplus: %+v", o)
 	}
 }
 
@@ -686,18 +699,24 @@ func TestTextIsShortAndComplete(t *testing.T) {
 	a := mustAdvise(t, svc, Request{})
 	text := a.Text()
 	lines := strings.Split(strings.TrimSpace(text), "\n")
-	if len(lines) != 4 || len(text) > 700 {
-		t.Fatalf("text should be one posture line plus one line per model:\n%s", text)
+	if len(lines) != 6 || len(text) > 900 {
+		t.Fatalf("text should be one posture line, one allowance line per metered provider and one line per model:\n%s", text)
 	}
 	if !strings.HasPrefix(lines[0], "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome | reuse until 2026-11-12T12:15:00Z (") {
 		t.Fatalf("posture line = %q", lines[0])
 	}
 	budget := roughCount(*by(a, opus).BudgetTasks)
-	if lines[1] != "claude-opus-5-5 effort=xhigh mode=fast | ~"+budget+" subagent tasks before reset in 10h | claude-code: opus, opencode: claude-opus-5-5" {
-		t.Fatalf("opus line = %q", lines[1])
+	if lines[1] != "claude weekly: 60% left, resets in 10h; 80% left, resets in 5d; 90% left, resets in 6d | projected unused at resets: 106% of one account" {
+		t.Fatalf("claude allowance line = %q", lines[1])
 	}
-	if !strings.Contains(lines[3], "budget unknown") {
-		t.Fatalf("unmetered line = %q", lines[3])
+	if lines[2] != "codex weekly: 70% left, resets in 4d; 90% left, resets in 6d6h" {
+		t.Fatalf("codex allowance line = %q", lines[2])
+	}
+	if lines[3] != "claude-opus-5-5 effort=xhigh mode=fast | ~"+budget+" subagent tasks of allowance that expires unused; use within 10h | claude-code: opus, opencode: claude-opus-5-5" {
+		t.Fatalf("opus line = %q", lines[3])
+	}
+	if !strings.Contains(lines[4], "before the allowance resets in 4d") || !strings.Contains(lines[5], "budget unknown") {
+		t.Fatalf("model lines = %q / %q", lines[4], lines[5])
 	}
 	src.mu.Lock()
 	src.inv.Accounts = nil
@@ -794,7 +813,7 @@ func TestPrefixedAndAliasedFableIsNeverAdvised(t *testing.T) {
 }
 
 func TestSurplusBudgetStaysAboveReserves(t *testing.T) {
-	inv := surplusFleet()
+	inv := Inventory{Accounts: []Account{claudeAcct("claude-a", 40, 10*time.Hour, 0)}, Models: discovered()}
 	// 60% of 13000 left; a 50% reserve leaves 1300 units: 270 fast xhigh tasks.
 	inv.Accounts[0].ReservePercent = 50
 	svc, _, _ := newTestService(t, Config{}, inv)
@@ -830,7 +849,8 @@ func TestMixedPricingBudgetUsesEachAccountsCost(t *testing.T) {
 	a := codexAcct("codex-a", 99, 150*time.Hour, 0)
 	b := codexAcct("codex-b", 0, 160*time.Hour, 0)
 	b.Plan = "plus"
-	cfg := Config{Providers: map[string]ProviderConfig{"codex": {PlanCapacityUnits: map[string]float64{"pro": 5000}}}}
+	// A short surplus horizon keeps this on the default (headroom) budget.
+	cfg := Config{SurplusHorizonHours: 24, Providers: map[string]ProviderConfig{"codex": {PlanCapacityUnits: map[string]float64{"pro": 5000}}}}
 	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{a, b}, Models: discovered()})
 	// codex-a: 50 units at 1.35 per task = 37; codex-b (pool minimum, 2% per task) = 50.
 	s := by(mustAdvise(t, svc, Request{}), sol)
@@ -905,5 +925,49 @@ func TestCreditsCoverFullOrdinaryWindows(t *testing.T) {
 	svc, _, _ = newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
 	if s := by(mustAdvise(t, svc, Request{}), sol); s != nil {
 		t.Fatalf("full window without credits was advised: %+v", s)
+	}
+}
+
+// The live case from 2026-11-12: one Claude account with 45% of its week left
+// that resets in 5.6 days, two used-up accounts whose new weeks start in 4h
+// and 17h, and light demand. Weekly allowance would expire unused, so the
+// advice must spend freely until the usable account's own weekly reset and
+// report the refills; 5h windows play no part.
+func TestWeeklyAllowanceDrivesAdvice(t *testing.T) {
+	a := claudeAcct("claude-a", 55, 134*time.Hour, 0.3)
+	b := claudeAcct("claude-b", 100, 4*time.Hour, 0)
+	b.Blocked, b.BlockedUntil = "rate_limited", t0.Add(4*time.Hour)
+	c := claudeAcct("claude-c", 100, 17*time.Hour, 0)
+	c.Blocked, c.BlockedUntil = "rate_limited", t0.Add(17*time.Hour)
+	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{a, b, c}, Models: discovered()})
+	adv := mustAdvise(t, svc, Request{})
+	o := by(adv, opus)
+	if adv.Posture != PostureSpendFreely || o == nil || o.Basis != KindSurplus || o.BudgetUntil == nil || !o.BudgetUntil.Equal(t0.Add(134*time.Hour)) {
+		t.Fatalf("advice = %s %+v", adv.Posture, o)
+	}
+	// claude-a can spend nearly all it holds, since the refills cover later
+	// demand; it keeps only what regular demand needs until the first refill
+	// in 4h. 45% of 13000 units is 1218 fast xhigh tasks at 4.8 units.
+	if o.BudgetTasks == nil || *o.BudgetTasks != 1177 {
+		t.Fatalf("budget = %d\n%s", *o.BudgetTasks, adv.Text())
+	}
+	text := adv.Text()
+	if !strings.Contains(text, "claude weekly: used up, refills in 4h; used up, refills in 17h; 45% left, resets in 5d14h | projected unused at resets: ") ||
+		!strings.Contains(text, "use within 5d14h") {
+		t.Fatalf("text = %s", text)
+	}
+}
+
+func TestMonthlyWindowBindsWhenTighter(t *testing.T) {
+	acct := codexAcct("codex-a", 20, 100*time.Hour, 0.5)
+	acct.Windows = append(acct.Windows, Window{Name: "30d", Long: true, UsedPercent: 90, ResetAt: t0.Add(20 * 24 * time.Hour), DurationSeconds: 30 * 86400, ObservedAt: t0.Add(-time.Minute)})
+	w, ok := bindingLongWindow(acct.Windows)
+	if !ok || w.Name != "30d" {
+		t.Fatalf("binding window = %+v", w)
+	}
+	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	adv := mustAdvise(t, svc, Request{})
+	if len(adv.Providers) != 1 || len(adv.Providers[0].Allowance) != 1 || adv.Providers[0].Allowance[0].Period != "monthly" || adv.Providers[0].Allowance[0].LeftPercent != 10 {
+		t.Fatalf("allowance = %+v", adv.Providers)
 	}
 }

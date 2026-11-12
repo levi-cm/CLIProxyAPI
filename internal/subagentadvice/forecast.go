@@ -15,8 +15,9 @@ const (
 	paceLongSpan      = 24 * time.Hour
 	paceShortSpan     = 3 * time.Hour
 	resetMatchSlack   = 2 * time.Minute
-	maxSimHorizon     = 8 * 24 * time.Hour
-	minSimHorizon     = 24 * time.Hour
+	// simHorizon covers every account's current weekly window and the refill
+	// after it, so allowance that expires unused anywhere in the pool counts.
+	simHorizon = 8 * 24 * time.Hour
 	// pctUnits is the capacity assumed for an account whose capacity is
 	// unknown, so one unit equals one percentage point of its window.
 	pctUnits = 100.0
@@ -81,6 +82,11 @@ type poolState struct {
 	horizon       time.Time
 	shortfallBase float64
 	nextReset     time.Time
+	// wasteUnits is the allowance projected to expire unused at resets within
+	// the surplus horizon, across all accounts and refills.
+	wasteUnits float64
+	// surplusUnits is wasteUnits discounted by pace confidence.
+	surplusUnits float64
 }
 
 type forecaster struct {
@@ -162,7 +168,7 @@ func (f *forecaster) account(a *Account, poolMin float64) *accountState {
 	}
 	st.blocked, st.blockedUntil = a.Blocked, a.BlockedUntil
 
-	long, found := latestWindow(a.Windows, func(w Window) bool { return w.Long && w.Model == "" })
+	long, found := bindingLongWindow(a.Windows)
 	switch {
 	case !found || long.ObservedAt.IsZero():
 		st.meterReason = "no_quota_telemetry"
@@ -220,14 +226,36 @@ func (f *forecaster) account(a *Account, poolMin float64) *accountState {
 	return st
 }
 
-func latestWindow(windows []Window, match func(Window) bool) (Window, bool) {
-	var best Window
-	found := false
+// bindingLongWindow returns the all-model allowance window (weekly, monthly)
+// with the least left, using the latest observation of each window.
+func bindingLongWindow(windows []Window) (Window, bool) {
+	latest := map[string]Window{}
+	var names []string
 	for _, w := range windows {
-		if !match(w) {
+		if !w.Long || w.Model != "" {
 			continue
 		}
-		if !found || w.ObservedAt.After(best.ObservedAt) {
+		prev, seen := latest[w.Name]
+		if !seen {
+			names = append(names, w.Name)
+		}
+		if !seen || w.ObservedAt.After(prev.ObservedAt) {
+			latest[w.Name] = w
+		}
+	}
+	var best Window
+	found := false
+	for _, name := range names {
+		w := latest[name]
+		used := w.UsedPercent
+		if w.Full {
+			used = 100
+		}
+		bestUsed := best.UsedPercent
+		if best.Full {
+			bestUsed = 100
+		}
+		if !found || used > bestUsed || (used == bestUsed && w.ResetAt.Before(best.ResetAt)) {
 			best, found = w, true
 		}
 	}
@@ -398,8 +426,7 @@ func (f *forecaster) buildPools() {
 		p.accounts = append(p.accounts, st)
 	}
 	for _, p := range f.pools {
-		// Continuity is checked for at least a day, even without known resets.
-		latest := f.now.Add(minSimHorizon)
+		p.horizon = f.now.Add(simHorizon)
 		for _, st := range p.accounts {
 			if st.simExcluded {
 				continue
@@ -411,28 +438,20 @@ func (f *forecaster) buildPools() {
 				p.demand += st.pace / 100 * st.capacity * f.cfg.SafetyFactor
 				p.confidence = math.Min(p.confidence, st.paceConfidence)
 			}
-			if !st.long.ResetAt.IsZero() {
-				if st.long.ResetAt.After(latest) {
-					latest = st.long.ResetAt
-				}
-				if p.nextReset.IsZero() || st.long.ResetAt.Before(p.nextReset) {
-					p.nextReset = st.long.ResetAt
-				}
+			if !st.long.ResetAt.IsZero() && (p.nextReset.IsZero() || st.long.ResetAt.Before(p.nextReset)) {
+				p.nextReset = st.long.ResetAt
 			}
 		}
-		if latest.Sub(f.now) > maxSimHorizon {
-			latest = f.now.Add(maxSimHorizon)
-		}
-		p.horizon = latest
 		if !p.demandKnown {
 			continue
 		}
-		waste, shortfall := f.simulate(p, nil)
-		p.shortfallBase = shortfall
-		horizon := f.now.Add(time.Duration(f.cfg.SurplusHorizonHours * float64(time.Hour)))
+		sim := f.simulate(p, nil)
+		p.shortfallBase = sim.shortfall
+		p.wasteUnits = sim.waste
+		p.surplusUnits = math.Max(0, sim.waste*p.confidence)
 		for _, st := range p.accounts {
-			st.wasteUnits = waste[st.acct.ID]
-			if st.blocked != "" || st.acct.ServingOnCredits || st.long.ResetAt.IsZero() || st.long.ResetAt.After(horizon) {
+			st.wasteUnits = sim.firstWaste[st.acct.ID]
+			if st.blocked != "" || st.acct.ServingOnCredits || st.long.ResetAt.IsZero() {
 				continue
 			}
 			st.surplusUnits = math.Max(0, st.wasteUnits*p.confidence)
@@ -440,10 +459,20 @@ func (f *forecaster) buildPools() {
 	}
 }
 
+// simResult is one pool simulation.
+type simResult struct {
+	// firstWaste is each account's unused allowance at its current reset.
+	firstWaste map[string]float64
+	// waste is all allowance left unused at resets within the surplus horizon,
+	// including refilled windows.
+	waste     float64
+	shortfall float64
+}
+
 // simulate drains pool demand from the earliest-resetting available account,
-// the order the deadline router uses, and returns each account's unused
-// allowance at its first reset plus the demand that could not be served.
-func (f *forecaster) simulate(p *poolState, extra map[string]float64) (map[string]float64, float64) {
+// the order the deadline router uses, and reports the allowance left unused
+// at resets plus the demand that could not be served.
+func (f *forecaster) simulate(p *poolState, extra map[string]float64) simResult {
 	type simAccount struct {
 		id          string
 		r, capacity float64
@@ -465,6 +494,8 @@ func (f *forecaster) simulate(p *poolState, extra map[string]float64) (map[strin
 		accts = append(accts, &simAccount{id: st.acct.ID, r: r, capacity: st.capacity, reset: st.long.ResetAt, period: period, availableAt: st.simAvailableAt})
 	}
 	waste := map[string]float64{}
+	total := 0.0
+	surplusHorizon := f.now.Add(time.Duration(f.cfg.SurplusHorizonHours * float64(time.Hour)))
 	shortfall := 0.0
 	for _, a := range accts {
 		if a.r < 0 {
@@ -519,12 +550,15 @@ func (f *forecaster) simulate(p *poolState, extra map[string]float64) (map[strin
 					waste[a.id] = a.r
 					a.wasted = true
 				}
+				if !a.reset.After(surplusHorizon) {
+					total += a.r
+				}
 				a.r = a.capacity
 				a.reset = a.reset.Add(a.period)
 			}
 		}
 	}
-	return waste, shortfall
+	return simResult{firstWaste: waste, waste: total, shortfall: shortfall}
 }
 
 // fits reports whether extra spend keeps the pool able to serve forecast
@@ -546,8 +580,7 @@ func (f *forecaster) fits(provider string, extra map[string]float64) bool {
 	if !p.demandKnown {
 		return true
 	}
-	_, shortfall := f.simulate(p, extra)
-	return shortfall <= p.shortfallBase+1e-9
+	return f.simulate(p, extra).shortfall <= p.shortfallBase+1e-9
 }
 
 func clamp(v, lo, hi float64) float64 {

@@ -28,8 +28,10 @@ func (f *forecaster) accountView(st *accountState) AccountForecast {
 		}
 		v.ObservedAt = &observed
 		v.ObservationAgeSeconds = int(st.age.Seconds())
-		if st.paceKnown && !reset.IsZero() {
-			leftover := round(math.Max(0, 100-st.used-st.pace*reset.Sub(f.now).Hours()), 2)
+		// The pool simulation's leftover at this account's reset, after the
+		// router drains demand from the earliest-resetting accounts.
+		if pool := f.pools[st.acct.Provider]; pool != nil && pool.demandKnown && !reset.IsZero() {
+			leftover := round(st.wasteUnits/st.capacity*100, 2)
 			v.ProjectedLeftoverPercent = &leftover
 		}
 	}
@@ -76,15 +78,33 @@ func (f *forecaster) providerSummaries() []ProviderSummary {
 		if st.blocked == "" {
 			p.UsableAccounts++
 		}
-		p.UsableSurplusUnits += st.surplusUnits
+		if st.metered {
+			w := AllowanceWindow{Period: allowancePeriod(st.long), Usable: st.blocked == "", LeftPercent: round(math.Max(0, 100-st.used), 1)}
+			if !st.long.ResetAt.IsZero() {
+				at := st.long.ResetAt
+				w.ResetAt = &at
+			}
+			p.Allowance = append(p.Allowance, w)
+		}
 	}
 	sort.Strings(names)
 	out := make([]ProviderSummary, 0, len(names))
 	for _, name := range names {
 		p := byProvider[name]
-		p.UsableSurplusUnits = round(p.UsableSurplusUnits, 2)
+		sort.SliceStable(p.Allowance, func(i, j int) bool {
+			a, b := p.Allowance[i].ResetAt, p.Allowance[j].ResetAt
+			if (a == nil) != (b == nil) {
+				return a != nil
+			}
+			return a != nil && a.Before(*b)
+		})
 		if pool := f.pools[name]; pool != nil {
+			p.UsableSurplusUnits = round(pool.surplusUnits, 2)
 			p.Confidence = round(pool.confidence, 2)
+			if pool.demandKnown && len(pool.accounts) > 0 {
+				unused := round(pool.wasteUnits/pool.accounts[0].capacity*100, 0)
+				p.ProjectedUnusedPercent = &unused
+			}
 			if !pool.nextReset.IsZero() {
 				at := pool.nextReset
 				p.NextResetAt = &at
@@ -97,7 +117,7 @@ func (f *forecaster) providerSummaries() []ProviderSummary {
 			case p.UsableSurplusUnits > 0:
 				p.State = "surplus"
 			case pool.shortfallBase > 0:
-				p.State, p.Note = "tight", "forecast demand exceeds capacity before the next reset"
+				p.State, p.Note = "tight", "forecast demand exceeds the allowance before the next refill"
 			default:
 				p.State = "normal"
 			}
@@ -107,4 +127,12 @@ func (f *forecaster) providerSummaries() []ProviderSummary {
 		out = append(out, *p)
 	}
 	return out
+}
+
+// allowancePeriod names a long window by its length.
+func allowancePeriod(w Window) string {
+	if w.DurationSeconds >= 20*24*3600 {
+		return "monthly"
+	}
+	return "weekly"
 }

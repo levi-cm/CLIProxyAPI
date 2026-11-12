@@ -146,13 +146,9 @@ func (s *scheduler) classify(o *offer) {
 		return
 	}
 	effort := o.defaultEffort()
-	if !o.override {
-		for _, st := range s.surplusAccounts(o) {
-			if st.surplusUnits >= s.f.slotCost(o, st, effort, ModeStandard, s.input) {
-				o.state, o.reason = OfferSurplus, ""
-				return
-			}
-		}
+	if s.tasks(o, effort, ModeStandard, s.surplusSpend(o)) >= 1 {
+		o.state, o.reason = OfferSurplus, ""
+		return
 	}
 	for _, st := range eligible {
 		if !st.metered {
@@ -167,41 +163,80 @@ func (s *scheduler) classify(o *offer) {
 	o.state, o.reason = OfferTight, "projected_shortfall_before_reset"
 }
 
-// surplusAccounts lists eligible metered accounts with usable surplus whose
-// short windows are not near their limit, largest surplus first.
-func (s *scheduler) surplusAccounts(o *offer) []*accountState {
+// spendable lists the eligible metered accounts that spend their own
+// allowance, in router order (earliest reset first).
+func (s *scheduler) spendable(o *offer) []*accountState {
 	var out []*accountState
 	for _, st := range s.routerOrder(o) {
-		if st.metered && st.surplusUnits > 0 && !s.f.eligible(st, o.model).caution {
+		if st.metered && !st.acct.ServingOnCredits {
 			out = append(out, st)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].surplusUnits > out[j].surplusUnits })
 	return out
 }
 
-// surplusChoice spends allowance projected to expire: the highest allowed
-// effort and, when configured and affordable, fast or priority mode.
-func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
-	accounts := s.surplusAccounts(o)
-	if o.override || len(accounts) == 0 {
-		return modelChoice{}, false
+// surplusSpend is the extra spend the eligible accounts can take now out of
+// allowance the pool would otherwise leave unused at its weekly (or monthly)
+// resets: at most the projected waste, and never so much that it causes a
+// shortfall before a refill or breaches a reserve. Short windows only matter
+// through eligibility.
+func (s *scheduler) surplusSpend(o *offer) map[*accountState]float64 {
+	pool := s.f.pools[o.provider]
+	if o.override || pool == nil || pool.surplusUnits <= 0 {
+		return nil
 	}
-	best := accounts[0]
-	total, capacity := 0.0, 0.0
-	until, stale := time.Time{}, false
+	accounts := s.spendable(o)
+	room := s.headroom(accounts)
+	left := pool.surplusUnits
+	out := map[*accountState]float64{}
 	for _, st := range accounts {
-		total += st.surplusUnits
-		capacity += st.capacity
-		stale = stale || st.stale
-		if until.IsZero() || st.long.ResetAt.Before(until) {
-			until = st.long.ResetAt
+		if take := math.Min(room[st], left); take > 0 {
+			out[st] = take
+			left -= take
 		}
 	}
+	return out
+}
+
+// spendDeadline is the earliest allowance reset among accounts that receive
+// spend: the time by which that allowance must be used.
+func spendDeadline(spend map[*accountState]float64) time.Time {
+	var until time.Time
+	for st, units := range spend {
+		reset := st.long.ResetAt
+		if units > 0 && !reset.IsZero() && (until.IsZero() || reset.Before(until)) {
+			until = reset
+		}
+	}
+	return until
+}
+
+// surplusChoice spends allowance projected to expire: the highest allowed
+// effort and, when configured and no account is near a short-window limit,
+// fast or priority mode.
+func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
+	spend := s.surplusSpend(o)
+	var first *accountState
+	stale, caution := false, false
+	for _, st := range s.spendable(o) {
+		if spend[st] <= 0 {
+			continue
+		}
+		if first == nil {
+			first = st
+		}
+		stale = stale || st.stale
+		caution = caution || s.f.eligible(st, o.model).caution
+	}
+	if first == nil {
+		return modelChoice{}, false
+	}
+	pool := s.f.pools[o.provider]
+	until := spendDeadline(spend)
 	for i := len(o.efforts) - 1; i >= 0; i-- {
 		effort := o.efforts[i]
 		var modes []string
-		if s.f.cfg.FastMode == "auto" {
+		if s.f.cfg.FastMode == "auto" && !caution {
 			for _, m := range o.modes {
 				if m != ModeStandard {
 					modes = append(modes, m)
@@ -210,21 +245,15 @@ func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
 		}
 		modes = append(modes, ModeStandard)
 		for _, mode := range modes {
-			cost := s.f.slotCost(o, best, effort, mode, s.input)
-			if cost > best.surplusUnits || !s.f.fits(best.acct.Provider, map[string]float64{best.acct.ID: cost}) {
-				continue
-			}
-			// Spend only surplus that also sits above each account's reserve.
-			spend := map[*accountState]float64{}
-			for _, st := range accounts {
-				spend[st] = math.Min(st.surplusUnits, s.room(st))
-			}
 			budget := s.tasks(o, effort, mode, spend)
 			if budget < 1 {
 				continue
 			}
-			reason := fmt.Sprintf("about %.0f%% of the allowance on %d account(s) is projected unused at reset; spend it", total/capacity*100, len(accounts))
-			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: cost, budget: budget, until: until, stale: stale, reason: reason}, true
+			reason := fmt.Sprintf("about %.0f%% of one account's allowance is projected to expire unused at upcoming resets; spend it", pool.wasteUnits/first.capacity*100)
+			if !until.IsZero() {
+				reason += " before " + until.UTC().Format("Jan 2 15:04 MST")
+			}
+			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: s.f.slotCost(o, first, effort, mode, s.input), budget: budget, until: until, stale: stale, reason: reason}, true
 		}
 	}
 	return modelChoice{}, false
@@ -308,12 +337,12 @@ func (s *scheduler) defaultChoice(o *offer, conserve bool) (modelChoice, bool) {
 		}
 	}
 	effort := o.defaultEffort()
-	kind, reason := KindDefault, "forecast capacity covers demand until the next reset"
+	kind, reason := KindDefault, "the allowance covers forecast demand until it resets"
 	switch {
 	case o.state == OfferUnmetered:
 		return modelChoice{offer: o, kind: KindUnmetered, effort: effort, mode: ModeStandard, budget: -1, reason: "provider reports no quota telemetry; budget unknown"}, true
 	case conserve:
-		effort, kind, reason = o.efforts[0], KindConserve, "pool is projected short before its next reset; lowest effort, few subagents"
+		effort, kind, reason = o.efforts[0], KindConserve, "pool is projected short before its next refill; lowest effort, few subagents"
 	}
 	cost := s.f.slotCost(o, metered[0], effort, ModeStandard, s.input)
 	var spend map[*accountState]float64
@@ -341,8 +370,10 @@ func (s *scheduler) defaultChoice(o *offer, conserve bool) (modelChoice, bool) {
 	if metered[0].paceBasis == PaceUnknown && !conserve {
 		reason = "usage pace unknown, so only account reserves are checked"
 	}
-	var until time.Time
-	if pool := s.f.pools[o.provider]; pool != nil {
+	// The budget is spendable until the allowance it comes from resets; a
+	// short pool lasts until its next refill.
+	until := spendDeadline(spend)
+	if pool := s.f.pools[o.provider]; conserve && pool != nil {
 		until = pool.nextReset
 	}
 	return modelChoice{offer: o, kind: kind, effort: effort, mode: ModeStandard, cost: cost, budget: budget, until: until, stale: stale, reason: reason}, true

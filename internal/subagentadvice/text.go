@@ -21,6 +21,11 @@ var postureText = map[string]string{
 func (a Advice) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s | reuse until %s (%s)\n", postureText[a.Posture], a.ValidUntil.UTC().Format(time.RFC3339), a.RefreshReason)
+	for _, p := range a.Providers {
+		if line := allowanceText(p, a.GeneratedAt); line != "" {
+			fmt.Fprintln(&b, line)
+		}
+	}
 	for _, m := range a.Models {
 		names := make([]string, 0, len(m.Harnesses))
 		for name := range m.Harnesses {
@@ -39,13 +44,53 @@ func (a Advice) Text() string {
 	return b.String()
 }
 
+// allowanceText summarizes a provider's weekly or monthly allowances: what is
+// left and when it expires, when used-up accounts refill, and how much is
+// projected to expire unused.
+func allowanceText(p ProviderSummary, now time.Time) string {
+	if len(p.Allowance) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(p.Allowance))
+	for _, w := range p.Allowance {
+		reset := "reset unknown"
+		if w.ResetAt != nil {
+			reset = "resets in " + roughDuration(w.ResetAt.Sub(now))
+		}
+		switch {
+		case w.LeftPercent <= 0 && w.ResetAt != nil:
+			parts = append(parts, "used up, refills in "+roughDuration(w.ResetAt.Sub(now)))
+		case !w.Usable:
+			parts = append(parts, fmt.Sprintf("%.0f%% left but unavailable, %s", w.LeftPercent, reset))
+		default:
+			parts = append(parts, fmt.Sprintf("%.0f%% left, %s", w.LeftPercent, reset))
+		}
+	}
+	line := fmt.Sprintf("%s %s: %s", p.Provider, p.Allowance[0].Period, strings.Join(parts, "; "))
+	if p.ProjectedUnusedPercent != nil && *p.ProjectedUnusedPercent >= 1 {
+		line += fmt.Sprintf(" | projected unused at resets: %.0f%% of one account", *p.ProjectedUnusedPercent)
+	}
+	return line
+}
+
 func budgetText(m ModelAdvice, now time.Time) string {
 	if m.BudgetTasks == nil {
+		if m.Basis == KindConserve {
+			return "budget unknown (paid credits)"
+		}
 		return "budget unknown"
 	}
 	text := fmt.Sprintf("~%s subagent tasks", roughCount(*m.BudgetTasks))
 	if m.BudgetUntil != nil {
-		text += fmt.Sprintf(" before reset in %s", roughDuration(m.BudgetUntil.Sub(now)))
+		in := roughDuration(m.BudgetUntil.Sub(now))
+		switch m.Basis {
+		case KindSurplus:
+			text += " of allowance that expires unused; use within " + in
+		case KindConserve:
+			text += " until the next refill in " + in
+		default:
+			text += " before the allowance resets in " + in
+		}
 	}
 	return text
 }
@@ -66,5 +111,9 @@ func roughDuration(d time.Duration) string {
 	if d < 48*time.Hour {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
+	hours := int(d.Hours())
+	if hours%24 == 0 {
+		return fmt.Sprintf("%dd", hours/24)
+	}
+	return fmt.Sprintf("%dd%dh", hours/24, hours%24)
 }
