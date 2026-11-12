@@ -91,6 +91,7 @@ func (f *forecaster) providerSummaries() []ProviderSummary {
 	out := make([]ProviderSummary, 0, len(names))
 	for _, name := range names {
 		p := byProvider[name]
+		p.Combined = f.combined(name)
 		sort.SliceStable(p.Allowance, func(i, j int) bool {
 			a, b := p.Allowance[i].ResetAt, p.Allowance[j].ResetAt
 			if (a == nil) != (b == nil) {
@@ -101,10 +102,6 @@ func (f *forecaster) providerSummaries() []ProviderSummary {
 		if pool := f.pools[name]; pool != nil {
 			p.UsableSurplusUnits = round(pool.surplusUnits, 2)
 			p.Confidence = round(pool.confidence, 2)
-			if pool.demandKnown && len(pool.accounts) > 0 {
-				unused := round(pool.wasteUnits/pool.accounts[0].capacity*100, 0)
-				p.ProjectedUnusedPercent = &unused
-			}
 			if !pool.nextReset.IsZero() {
 				at := pool.nextReset
 				p.NextResetAt = &at
@@ -135,4 +132,40 @@ func allowancePeriod(w Window) string {
 		return "monthly"
 	}
 	return "weekly"
+}
+
+// combined sums a provider's metered accounts into one allowance, weighting
+// each account by its capacity.
+func (f *forecaster) combined(provider string) *CombinedAllowance {
+	var accounts []*accountState
+	total := 0.0
+	for _, st := range f.accounts {
+		if st.acct.Provider == provider && st.metered {
+			accounts = append(accounts, st)
+			total += st.capacity
+		}
+	}
+	if len(accounts) == 0 || total <= 0 {
+		return nil
+	}
+	c := &CombinedAllowance{Period: allowancePeriod(accounts[0].long), Accounts: len(accounts), Refills: []Refill{}}
+	left := 0.0
+	for _, st := range accounts {
+		if st.blocked == "" && !st.acct.ServingOnCredits {
+			left += math.Max(0, 100-st.used) * st.capacity
+		}
+		if allowancePeriod(st.long) != c.Period {
+			c.Period = "weekly/monthly"
+		}
+		if add := st.used * st.capacity / total; !st.long.ResetAt.IsZero() && add >= 0.5 {
+			c.Refills = append(c.Refills, Refill{At: st.long.ResetAt, AddPercent: round(add, 0)})
+		}
+	}
+	c.LeftPercent = round(left/total, 0)
+	sort.SliceStable(c.Refills, func(i, j int) bool { return c.Refills[i].At.Before(c.Refills[j].At) })
+	if pool := f.pools[provider]; pool != nil && pool.demandKnown {
+		unused := round(pool.wasteUnits/total*100, 0)
+		c.ProjectedUnusedPercent = &unused
+	}
+	return c
 }

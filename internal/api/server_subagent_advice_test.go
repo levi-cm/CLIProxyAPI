@@ -264,14 +264,14 @@ func TestUsageSplitSkillReadsAdviceWithoutKey(t *testing.T) {
 		t.Fatalf("advise.sh failed: %v\n%s", err, stderr)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 5 || lines[4] != "warning: deepseek-4.1 unavailable: model_not_available" || !strings.HasPrefix(lines[0], "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome | reuse until ") {
+	if len(lines) != 6 || lines[5] != "warning: deepseek-4.1 unavailable: model_not_available" || !strings.HasPrefix(lines[0], "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome | reuse until ") {
 		t.Fatalf("advice = %q", out)
 	}
-	if !strings.HasPrefix(lines[1], "claude weekly: 60% left, resets in 9h; 50% left, resets in 3d23h | projected unused at resets: ") {
-		t.Fatalf("allowance line = %q", lines[1])
+	if !strings.HasPrefix(lines[1], "claude weekly, all 2 accounts as one: ") || lines[2] != "claude accounts: 60% left, resets in 9h; 50% left, resets in 3d23h" {
+		t.Fatalf("allowance lines = %q", lines[1:3])
 	}
-	if !strings.HasPrefix(lines[2], "claude-opus-5-5 effort=xhigh mode=fast | ~") || !strings.Contains(lines[2], " subagent tasks of allowance that expires unused; use within 9h | claude-code: opus") || lines[3] != "gpt-6.1-sol effort=high mode=standard | budget unknown | codex: gpt-6.1-sol, opencode: gpt-6.1-sol" {
-		t.Fatalf("subagent lines = %q", lines[2:])
+	if !strings.HasPrefix(lines[3], "claude-opus-5-5 effort=xhigh mode=fast | ~") || !strings.Contains(lines[3], " subagent tasks of allowance that expires unused; use within 9h | claude-code: opus") || lines[4] != "gpt-6.1-sol effort=high mode=standard | budget unknown | codex: gpt-6.1-sol, opencode: gpt-6.1-sol" {
+		t.Fatalf("subagent lines = %q", lines[3:])
 	}
 	if strings.Contains(strings.ToLower(out), "fable") {
 		t.Fatalf("fable advised: %s", out)

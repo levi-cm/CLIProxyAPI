@@ -44,9 +44,9 @@ func (a Advice) Text() string {
 	return b.String()
 }
 
-// allowanceText summarizes a provider's weekly or monthly allowances: what is
-// left and when it expires, when used-up accounts refill, and how much is
-// projected to expire unused.
+// allowanceText summarizes a provider's weekly or monthly allowances: first
+// all accounts combined into one, then each account: what is left and when it
+// resets, and when used-up accounts refill.
 func allowanceText(p ProviderSummary, now time.Time) string {
 	if len(p.Allowance) == 0 {
 		return ""
@@ -66,9 +66,26 @@ func allowanceText(p ProviderSummary, now time.Time) string {
 			parts = append(parts, fmt.Sprintf("%.0f%% left, %s", w.LeftPercent, reset))
 		}
 	}
-	line := fmt.Sprintf("%s %s: %s", p.Provider, p.Allowance[0].Period, strings.Join(parts, "; "))
-	if p.ProjectedUnusedPercent != nil && *p.ProjectedUnusedPercent >= 1 {
-		line += fmt.Sprintf(" | projected unused at resets: %.0f%% of one account", *p.ProjectedUnusedPercent)
+	line := fmt.Sprintf("%s accounts: %s", p.Provider, strings.Join(parts, "; "))
+	if c := p.Combined; c != nil {
+		line = combinedText(p.Provider, *c, now) + "\n" + line
+	}
+	return line
+}
+
+// combinedText reads a provider's accounts as one: what is left now, what
+// the upcoming resets add back, and what would expire unused.
+func combinedText(provider string, c CombinedAllowance, now time.Time) string {
+	line := fmt.Sprintf("%s %s, all %d accounts as one: %.0f%% left now", provider, c.Period, c.Accounts, c.LeftPercent)
+	if len(c.Refills) > 0 {
+		refills := make([]string, 0, len(c.Refills))
+		for _, r := range c.Refills {
+			refills = append(refills, fmt.Sprintf("+%.0f%% in %s", r.AddPercent, roughDuration(r.At.Sub(now))))
+		}
+		line += "; refills " + strings.Join(refills, ", ")
+	}
+	if c.ProjectedUnusedPercent != nil {
+		line += fmt.Sprintf("; projected to expire unused: %.0f%%", *c.ProjectedUnusedPercent)
 	}
 	return line
 }

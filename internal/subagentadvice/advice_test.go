@@ -699,24 +699,27 @@ func TestTextIsShortAndComplete(t *testing.T) {
 	a := mustAdvise(t, svc, Request{})
 	text := a.Text()
 	lines := strings.Split(strings.TrimSpace(text), "\n")
-	if len(lines) != 6 || len(text) > 900 {
-		t.Fatalf("text should be one posture line, one allowance line per metered provider and one line per model:\n%s", text)
+	if len(lines) != 8 || len(text) > 1200 {
+		t.Fatalf("text should be one posture line, a combined and a per-account line per metered provider, and one line per model:\n%s", text)
 	}
 	if !strings.HasPrefix(lines[0], "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome | reuse until 2026-11-12T12:15:00Z (") {
 		t.Fatalf("posture line = %q", lines[0])
 	}
 	budget := roughCount(*by(a, opus).BudgetTasks)
-	if lines[1] != "claude weekly: 60% left, resets in 10h; 80% left, resets in 5d; 90% left, resets in 6d | projected unused at resets: 106% of one account" {
-		t.Fatalf("claude allowance line = %q", lines[1])
+	want := []string{
+		"claude weekly, all 3 accounts as one: 77% left now; refills +13% in 10h, +7% in 5d, +3% in 6d; projected to expire unused: 35%",
+		"claude accounts: 60% left, resets in 10h; 80% left, resets in 5d; 90% left, resets in 6d",
+		"codex weekly, all 2 accounts as one: 80% left now; refills +15% in 4d, +5% in 6d6h; projected to expire unused: 0%",
+		"codex accounts: 70% left, resets in 4d; 90% left, resets in 6d6h",
+		"claude-opus-5-5 effort=xhigh mode=fast | ~" + budget + " subagent tasks of allowance that expires unused; use within 10h | claude-code: opus, opencode: claude-opus-5-5",
 	}
-	if lines[2] != "codex weekly: 70% left, resets in 4d; 90% left, resets in 6d6h" {
-		t.Fatalf("codex allowance line = %q", lines[2])
+	for i, line := range want {
+		if lines[i+1] != line {
+			t.Fatalf("line %d = %q, want %q", i+1, lines[i+1], line)
+		}
 	}
-	if lines[3] != "claude-opus-5-5 effort=xhigh mode=fast | ~"+budget+" subagent tasks of allowance that expires unused; use within 10h | claude-code: opus, opencode: claude-opus-5-5" {
-		t.Fatalf("opus line = %q", lines[3])
-	}
-	if !strings.Contains(lines[4], "before the allowance resets in 4d") || !strings.Contains(lines[5], "budget unknown") {
-		t.Fatalf("model lines = %q / %q", lines[4], lines[5])
+	if !strings.Contains(lines[6], "before the allowance resets in 4d") || !strings.Contains(lines[7], "budget unknown") {
+		t.Fatalf("model lines = %q / %q", lines[6], lines[7])
 	}
 	src.mu.Lock()
 	src.inv.Accounts = nil
@@ -952,7 +955,8 @@ func TestWeeklyAllowanceDrivesAdvice(t *testing.T) {
 		t.Fatalf("budget = %d\n%s", *o.BudgetTasks, adv.Text())
 	}
 	text := adv.Text()
-	if !strings.Contains(text, "claude weekly: used up, refills in 4h; used up, refills in 17h; 45% left, resets in 5d14h | projected unused at resets: ") ||
+	if !strings.Contains(text, "claude weekly, all 3 accounts as one: 15% left now; refills +33% in 4h, +33% in 17h, +18% in 5d14h; projected to expire unused: 58%\n") ||
+		!strings.Contains(text, "claude accounts: used up, refills in 4h; used up, refills in 17h; 45% left, resets in 5d14h\n") ||
 		!strings.Contains(text, "use within 5d14h") {
 		t.Fatalf("text = %s", text)
 	}

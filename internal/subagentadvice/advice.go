@@ -88,12 +88,31 @@ type ProviderSummary struct {
 	UsableSurplusUnits float64    `json:"usable_surplus_units"`
 	Confidence         float64    `json:"confidence"`
 	Note               string     `json:"note,omitempty"`
+	// Combined treats all metered accounts of the provider as one account.
+	Combined *CombinedAllowance `json:"combined,omitempty"`
 	// Allowance lists each metered account's weekly (or monthly) allowance,
 	// earliest reset first, without identifying accounts.
 	Allowance []AllowanceWindow `json:"allowance,omitempty"`
+}
+
+// CombinedAllowance is a provider's allowance as if all its metered accounts
+// were one account; percentages are of their combined capacity.
+type CombinedAllowance struct {
+	Period   string `json:"period"`
+	Accounts int    `json:"accounts"`
+	// LeftPercent is what usable accounts hold now.
+	LeftPercent float64 `json:"left_percent"`
+	// Refills are the upcoming resets and what each adds back.
+	Refills []Refill `json:"refills"`
 	// ProjectedUnusedPercent is the allowance projected to expire unused at
-	// resets within the surplus horizon, in percent of one account.
+	// resets within the surplus horizon; nil when the pace is unknown.
 	ProjectedUnusedPercent *float64 `json:"projected_unused_percent,omitempty"`
+}
+
+// Refill is one account reset in a combined allowance.
+type Refill struct {
+	At         time.Time `json:"at"`
+	AddPercent float64   `json:"add_percent"`
 }
 
 // AllowanceWindow is one account's long allowance window.
