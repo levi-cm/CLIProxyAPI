@@ -320,6 +320,7 @@ func (b *Builder) Build() (*Service, error) {
 		api.WithAccountPolicySettingsValidator(service.validateAccountPolicySettings),
 		api.WithAccountPolicyUsage(service.accountPolicyUsageSink),
 		api.WithAccountPolicyHistory(service.accountPolicyHistoryArchive),
+		api.WithSubagentHistory(service.accountPolicyHistoryReader),
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {

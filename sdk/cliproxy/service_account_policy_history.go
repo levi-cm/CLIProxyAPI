@@ -27,6 +27,14 @@ func (s *Service) accountPolicyHistoryArchive() *accountpolicyledger.Archive {
 	return a
 }
 
+// accountPolicyHistoryReader returns the archive without seeding it, for
+// read-only consumers such as the keyless subagent advisor.
+func (s *Service) accountPolicyHistoryReader() *accountpolicyledger.Archive {
+	s.accountPolicyMu.Lock()
+	defer s.accountPolicyMu.Unlock()
+	return s.accountPolicyHistory
+}
+
 func (s *Service) startAccountPolicyHistory() {
 	if s.accountPolicy == nil {
 		return

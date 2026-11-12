@@ -1,11 +1,12 @@
 // Package subagentadvice forecasts provider quota and turns it into
-// deterministic, read-only subagent advice for orchestrators: how many
-// subagents to run and with which model, reasoning effort and mode. It owns
+// deterministic, read-only subagent advice for orchestrators: how freely to
+// use subagents and with which model, reasoning effort and mode. It owns
 // capability rules and forecasting; it reserves nothing and runs nothing.
 package subagentadvice
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"sort"
 	"strings"
@@ -311,6 +312,9 @@ func (cfg Config) Validate() error {
 			return fmt.Errorf("never-advise has invalid pattern %q", pattern)
 		}
 	}
+	if err := r.validateNumbers(); err != nil {
+		return err
+	}
 	if r.SafetyFactor < 1 {
 		return fmt.Errorf("safety-factor must be at least 1")
 	}
@@ -356,6 +360,83 @@ func (cfg Config) Validate() error {
 		for _, mode := range m.Modes {
 			if mode != ModeStandard && mode != ModeFast && mode != ModePriority {
 				return fmt.Errorf("models[%d] (%s) has unknown mode %q", i, m.Name, mode)
+			}
+		}
+	}
+	return nil
+}
+
+// validateNumbers rejects non-finite or out-of-range numbers, which would
+// otherwise reach the forecast and break JSON encoding or budget division.
+func (r Config) validateNumbers() error {
+	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+	nonNegative := func(name string, v float64) error {
+		if !finite(v) || v < 0 {
+			return fmt.Errorf("subagent-advisor %s must be a finite non-negative number", name)
+		}
+		return nil
+	}
+	price := func(name string, p *Price) error {
+		if p == nil {
+			return nil
+		}
+		for _, v := range []float64{p.Input, p.Output, p.CacheRead} {
+			if !finite(v) || v < 0 {
+				return fmt.Errorf("subagent-advisor %s must use finite non-negative prices", name)
+			}
+		}
+		if p.Input+p.Output <= 0 {
+			return fmt.Errorf("subagent-advisor %s needs a positive input or output price", name)
+		}
+		return nil
+	}
+	checks := map[string]float64{
+		"surplus-horizon-hours": r.SurplusHorizonHours, "safety-factor": r.SafetyFactor, "reserve-percent": r.ReservePercent,
+		"short-window-caution-percent": r.ShortWindowCautionPercent, "short-window-block-percent": r.ShortWindowBlockPercent,
+		"unmetered-subagent-percent": r.UnmeteredSubagentPercent, "in-flight-request-percent": r.InFlightRequestPercent,
+	}
+	for name, v := range checks {
+		if err := nonNegative(name, v); err != nil {
+			return err
+		}
+	}
+	if r.UnmeteredSubagentPercent <= 0 {
+		return fmt.Errorf("subagent-advisor unmetered-subagent-percent must be positive")
+	}
+	if r.TaskInputTokens < 0 || r.TaskOutputTokens <= 0 || r.StaleAfterSeconds < 0 || r.ExpiredAfterSeconds < 0 {
+		return fmt.Errorf("subagent-advisor task tokens and observation ages must not be negative (task-output-tokens must be positive)")
+	}
+	for id, v := range r.AccountCapacityUnits {
+		if err := nonNegative("account-capacity-units."+id, v); err != nil {
+			return err
+		}
+	}
+	for name, p := range r.Providers {
+		if err := nonNegative("providers."+name+".capacity-units", p.CapacityUnits); err != nil {
+			return err
+		}
+		for plan, v := range p.PlanCapacityUnits {
+			if err := nonNegative("providers."+name+".plan-capacity-units."+plan, v); err != nil {
+				return err
+			}
+		}
+		if err := price("providers."+name+".default-price", p.DefaultPrice); err != nil {
+			return err
+		}
+	}
+	for glob, p := range r.Prices {
+		p := p
+		if err := price("prices."+glob, &p); err != nil {
+			return err
+		}
+	}
+	for _, m := range r.Models {
+		if err := price("models."+m.Name+".price", m.Price); err != nil {
+			return err
+		}
+		for mode, v := range m.ModeCostMultiplier {
+			if !finite(v) || v <= 0 {
+				return fmt.Errorf("subagent-advisor models.%s.mode-cost-multiplier.%s must be a finite positive number", m.Name, mode)
 			}
 		}
 	}

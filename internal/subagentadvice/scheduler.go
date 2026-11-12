@@ -214,32 +214,57 @@ func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
 			if cost > best.surplusUnits || !s.f.fits(best.acct.Provider, map[string]float64{best.acct.ID: cost}) {
 				continue
 			}
+			// Spend only surplus that also sits above each account's reserve.
+			spend := map[*accountState]float64{}
+			for _, st := range accounts {
+				spend[st] = math.Min(st.surplusUnits, s.room(st))
+			}
+			budget := s.tasks(o, effort, mode, spend)
+			if budget < 1 {
+				continue
+			}
 			reason := fmt.Sprintf("about %.0f%% of the allowance on %d account(s) is projected unused at reset; spend it", total/capacity*100, len(accounts))
-			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: cost, budget: math.Floor(total / cost), until: until, stale: stale, reason: reason}, true
+			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: cost, budget: budget, until: until, stale: stale, reason: reason}, true
 		}
 	}
 	return modelChoice{}, false
 }
 
-// headroom is the extra spend, in units, the provider can absorb on these
+// room is the spend an account can take without breaching its reserve.
+func (s *scheduler) room(st *accountState) float64 {
+	pool := s.f.pools[st.acct.Provider]
+	return math.Max(0, st.remainingUnits-st.reserveUnits(s.f.cfg, pool != nil && pool.demandKnown))
+}
+
+// tasks counts the subagent tasks a per-account spend pays for, pricing each
+// account's share with that account's own task cost.
+func (s *scheduler) tasks(o *offer, effort, mode string, spend map[*accountState]float64) float64 {
+	n := 0.0
+	for st, units := range spend {
+		cost := s.f.slotCost(o, st, effort, mode, s.input)
+		if units > 0 && cost > 0 && !math.IsInf(cost, 0) && !math.IsNaN(cost) {
+			n += math.Floor(units / cost)
+		}
+	}
+	return n
+}
+
+// headroom spreads the largest extra spend the provider can absorb on these
 // accounts (router order) without breaching reserves or creating a new
-// shortfall before its resets.
-func (s *scheduler) headroom(accounts []*accountState) float64 {
+// shortfall before its resets, and returns each account's share.
+func (s *scheduler) headroom(accounts []*accountState) map[*accountState]float64 {
 	if len(accounts) == 0 {
-		return 0
+		return nil
 	}
 	provider := accounts[0].acct.Provider
-	pool := s.f.pools[provider]
-	demandKnown := pool != nil && pool.demandKnown
 	hard := 0.0
 	for _, st := range accounts {
-		hard += math.Max(0, st.remainingUnits-st.reserveUnits(s.f.cfg, demandKnown))
+		hard += s.room(st)
 	}
 	spread := func(x float64) map[string]float64 {
 		out := map[string]float64{}
 		for _, st := range accounts {
-			room := math.Max(0, st.remainingUnits-st.reserveUnits(s.f.cfg, demandKnown))
-			take := math.Min(room, x)
+			take := math.Min(s.room(st), x)
 			if take > 0 {
 				out[st.acct.ID] = take
 				x -= take
@@ -249,17 +274,25 @@ func (s *scheduler) headroom(accounts []*accountState) float64 {
 	}
 	lo, hi := 0.0, hard
 	if s.f.fits(provider, spread(hi)) {
-		return hi
-	}
-	for i := 0; i < 40 && hi-lo > hard*1e-4; i++ {
-		mid := (lo + hi) / 2
-		if s.f.fits(provider, spread(mid)) {
-			lo = mid
-		} else {
-			hi = mid
+		lo = hi
+	} else {
+		for i := 0; i < 40 && hi-lo > hard*1e-4; i++ {
+			mid := (lo + hi) / 2
+			if s.f.fits(provider, spread(mid)) {
+				lo = mid
+			} else {
+				hi = mid
+			}
 		}
 	}
-	return lo
+	byID := spread(lo)
+	out := make(map[*accountState]float64, len(byID))
+	for _, st := range accounts {
+		if units := byID[st.acct.ID]; units > 0 {
+			out[st] = units
+		}
+	}
+	return out
 }
 
 // defaultChoice advises the default effort in standard mode with the budget
@@ -283,17 +316,26 @@ func (s *scheduler) defaultChoice(o *offer, conserve bool) (modelChoice, bool) {
 		effort, kind, reason = o.efforts[0], KindConserve, "pool is projected short before its next reset; lowest effort, few subagents"
 	}
 	cost := s.f.slotCost(o, metered[0], effort, ModeStandard, s.input)
-	units := 0.0
+	var spend map[*accountState]float64
 	if conserve {
-		// The pool is short anyway; only hard capacity left matters.
+		// The pool is short anyway; only capacity above the reserves matters.
+		spend = map[*accountState]float64{}
 		for _, st := range metered {
-			units += st.remainingUnits
+			spend[st] = s.room(st)
 		}
 	} else {
-		units = s.headroom(metered)
+		spend = s.headroom(metered)
 	}
-	budget := math.Floor(units / cost)
+	budget := s.tasks(o, effort, ModeStandard, spend)
 	if budget < 1 {
+		// Accounts past their allowance may still serve on credits; their
+		// budget is the credit balance, which is not estimated here.
+		for _, st := range metered {
+			if st.acct.ServingOnCredits {
+				return modelChoice{offer: o, kind: KindConserve, effort: o.efforts[0], mode: ModeStandard, cost: cost, budget: -1, stale: stale,
+					reason: "allowance exhausted; accounts serve on paid credits, budget unknown"}, true
+			}
+		}
 		return modelChoice{}, false
 	}
 	if metered[0].paceBasis == PaceUnknown && !conserve {
@@ -392,97 +434,151 @@ func summarize(d decision) string {
 
 // resolveOffers turns capability rules into offers. contextTokens is the
 // largest single prompt a subagent needs; zero skips the context fit check.
+// Each rule resolves to its first candidate model that some account can
+// serve now; otherwise the first candidate explains why it is unavailable.
 func (f *forecaster) resolveOffers(contextTokens int) []*offer {
 	discovered := map[string]DiscoveredModel{}
 	for _, m := range f.inv.Models {
-		discovered[strings.ToLower(m.ID)] = m
+		discovered[discoveredKey(m.Provider, m.ID)] = m
 	}
 	var offers []*offer
 	for _, c := range f.cfg.Models {
 		if c.Disabled {
 			continue
 		}
-		o := &offer{cap: c, state: OfferUnavailable, modes: []string{ModeStandard}}
-		offers = append(offers, o)
 		if p, ok := f.cfg.Providers[c.Provider]; ok && p.Disabled {
-			o.reason = "provider_disabled"
+			offers = append(offers, &offer{cap: c, state: OfferUnavailable, modes: []string{ModeStandard}, reason: "provider_disabled"})
 			continue
 		}
-		// Candidate IDs come from the accounts actually serving them. Models
-		// on the never-advise list are skipped even when a rule matches them.
-		excluded := false
-		for _, pattern := range c.Match {
-			var ids []string
-			seen := map[string]bool{}
-			for _, st := range f.accounts {
-				if c.Provider != "" && st.acct.Provider != c.Provider {
-					continue
-				}
-				for _, id := range st.acct.Models {
-					if seen[id] || !matchModel([]string{pattern}, id) {
-						continue
-					}
-					seen[id] = true
-					if matchModel(f.cfg.NeverAdvise, id) {
-						excluded = true
-						continue
-					}
-					ids = append(ids, id)
-				}
-			}
-			sort.Strings(ids)
-			if len(ids) > 0 {
-				o.model = ids[0]
-				break
-			}
-		}
-		if o.model == "" {
-			o.reason = "model_not_available"
+		candidates, excluded := f.candidates(c)
+		if len(candidates) == 0 {
+			o := &offer{cap: c, state: OfferUnavailable, modes: []string{ModeStandard}, reason: "model_not_available"}
 			if excluded {
 				o.reason = "never_advised"
 			}
+			offers = append(offers, o)
 			continue
 		}
-		for _, st := range f.accounts {
-			if contains(st.acct.Models, o.model) && (c.Provider == "" || st.acct.Provider == c.Provider) {
-				if o.provider == "" {
-					o.provider = st.acct.Provider
-				}
-				if st.acct.Provider == o.provider {
-					o.accounts = append(o.accounts, st)
-				}
+		var chosen *offer
+		for _, id := range candidates {
+			o := f.buildOffer(c, id, contextTokens, discovered)
+			if o.state == "" && f.anyEligible(o) {
+				chosen = o
+				break
+			}
+			if chosen == nil || (chosen.state != "" && o.state == "") {
+				chosen = o
 			}
 		}
-		info, known := discovered[strings.ToLower(o.model)]
-		o.efforts = append([]string(nil), c.Efforts...)
-		o.capabilitySource = "configured"
-		if known && len(info.Levels) > 0 {
-			levels := map[string]bool{}
-			for _, l := range info.Levels {
-				levels[normalizeEffort(l)] = true
-			}
-			var allowed []string
-			for _, e := range c.Efforts {
-				if levels[e] {
-					allowed = append(allowed, e)
-				}
-			}
-			o.efforts = allowed
-			o.capabilitySource = "registry+configured"
-		}
-		if len(o.efforts) == 0 {
-			o.reason = "no_supported_effort"
-			continue
-		}
-		o.modes = append([]string(nil), c.Modes...)
-		if contextTokens > 0 && known && info.ContextTokens > 0 && contextTokens+c.MaxOutputTokens > info.ContextTokens {
-			o.reason = "context_too_small"
-			continue
-		}
-		_, o.override = f.inv.RoutingOverrides[o.provider]
-		o.state = ""
+		offers = append(offers, chosen)
 	}
 	return offers
+}
+
+func discoveredKey(provider, id string) string {
+	return normalizeProvider(provider) + "\x00" + strings.ToLower(id)
+}
+
+// candidates lists the model IDs a rule matches, pattern by pattern, skipping
+// models on the never-advise list.
+func (f *forecaster) candidates(c ModelCapability) ([]string, bool) {
+	var out []string
+	excluded := false
+	seen := map[string]bool{}
+	for _, pattern := range c.Match {
+		var ids []string
+		for _, st := range f.accounts {
+			if c.Provider != "" && st.acct.Provider != c.Provider {
+				continue
+			}
+			for _, id := range st.acct.Models {
+				if seen[id] || !matchModel([]string{pattern}, id) {
+					continue
+				}
+				if f.neverAdvised(st.acct, id) {
+					excluded = true
+					continue
+				}
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		sort.Strings(ids)
+		out = append(out, ids...)
+	}
+	return out, excluded
+}
+
+// neverAdvised checks the visible ID, the ID without a routing prefix and the
+// canonical model behind an alias against the never-advise list.
+func (f *forecaster) neverAdvised(a *Account, id string) bool {
+	names := []string{id}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		names = append(names, id[i+1:])
+	}
+	if canonical := a.Canonical[id]; canonical != "" {
+		names = append(names, canonical)
+	}
+	for _, name := range names {
+		if matchModel(f.cfg.NeverAdvise, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *forecaster) anyEligible(o *offer) bool {
+	for _, st := range o.accounts {
+		if f.eligible(st, o.model).ok {
+			return true
+		}
+	}
+	return false
+}
+
+// buildOffer resolves one candidate model. Its state is empty when usable,
+// otherwise OfferUnavailable with a reason.
+func (f *forecaster) buildOffer(c ModelCapability, id string, contextTokens int, discovered map[string]DiscoveredModel) *offer {
+	o := &offer{cap: c, model: id, state: OfferUnavailable, modes: []string{ModeStandard}}
+	for _, st := range f.accounts {
+		if contains(st.acct.Models, id) && (c.Provider == "" || st.acct.Provider == c.Provider) {
+			if o.provider == "" {
+				o.provider = st.acct.Provider
+			}
+			if st.acct.Provider == o.provider {
+				o.accounts = append(o.accounts, st)
+			}
+		}
+	}
+	info, known := discovered[discoveredKey(o.provider, id)]
+	o.efforts = append([]string(nil), c.Efforts...)
+	o.capabilitySource = "configured"
+	if known && len(info.Levels) > 0 {
+		levels := map[string]bool{}
+		for _, l := range info.Levels {
+			levels[normalizeEffort(l)] = true
+		}
+		var allowed []string
+		for _, e := range c.Efforts {
+			if levels[e] {
+				allowed = append(allowed, e)
+			}
+		}
+		o.efforts = allowed
+		o.capabilitySource = "registry+configured"
+	}
+	if len(o.efforts) == 0 {
+		o.reason = "no_supported_effort"
+		return o
+	}
+	o.modes = append([]string(nil), c.Modes...)
+	if contextTokens > 0 && known && info.ContextTokens > 0 && contextTokens+c.MaxOutputTokens > info.ContextTokens {
+		o.reason = "context_too_small"
+		return o
+	}
+	_, o.override = f.inv.RoutingOverrides[o.provider]
+	o.state = ""
+	return o
 }
 
 func effortMult(effort string) float64 {

@@ -87,7 +87,8 @@ func (r *subagentInventory) Inventory(ctx context.Context) (subagentadvice.Inven
 			}
 		}
 	}
-	modelProviders := map[string]string{}
+	type providerModel struct{ provider, id string }
+	modelSet := map[providerModel]bool{}
 	for _, a := range auths {
 		if a == nil || strings.TrimSpace(a.ID) == "" {
 			continue
@@ -99,9 +100,13 @@ func (r *subagentInventory) Inventory(ctx context.Context) (subagentadvice.Inven
 				continue
 			}
 			acct.Models = append(acct.Models, m.ID)
-			if _, ok := modelProviders[m.ID]; !ok {
-				modelProviders[m.ID] = provider
+			if canonical := strings.TrimSpace(m.MetadataModelID); canonical != "" && canonical != m.ID {
+				if acct.Canonical == nil {
+					acct.Canonical = map[string]string{}
+				}
+				acct.Canonical[m.ID] = canonical
 			}
+			modelSet[providerModel{provider, m.ID}] = true
 		}
 		sort.Strings(acct.Models)
 		r.blockState(a, &acct, now)
@@ -123,14 +128,21 @@ func (r *subagentInventory) Inventory(ctx context.Context) (subagentadvice.Inven
 		}
 		inv.Accounts = append(inv.Accounts, acct)
 	}
-	ids = ids[:0]
-	for id := range modelProviders {
-		ids = append(ids, id)
+	// Metadata is kept per provider: two providers may register the same ID
+	// with different context limits or reasoning levels.
+	pairs := make([]providerModel, 0, len(modelSet))
+	for pm := range modelSet {
+		pairs = append(pairs, pm)
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		info := reg.GetModelInfo(id, modelProviders[id])
-		dm := subagentadvice.DiscoveredModel{ID: id, Provider: modelProviders[id]}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].provider != pairs[j].provider {
+			return pairs[i].provider < pairs[j].provider
+		}
+		return pairs[i].id < pairs[j].id
+	})
+	for _, pm := range pairs {
+		info := reg.GetModelInfo(pm.id, pm.provider)
+		dm := subagentadvice.DiscoveredModel{ID: pm.id, Provider: pm.provider}
 		if info != nil {
 			if info.Thinking != nil {
 				dm.Levels = append([]string(nil), info.Thinking.Levels...)
@@ -219,8 +231,19 @@ func claudeWindows(a *auth.Auth, limits claudeLimitSource) []subagentadvice.Wind
 		for i := range out {
 			if out[i].Name == name {
 				replaced = true
-				if state.Observed.After(out[i].ObservedAt) && state.Full {
-					out[i].Full, out[i].ResetAt, out[i].ObservedAt = true, state.Reset, state.Observed
+				// The selector keeps a window full until its reset. A late
+				// header from a stream that began earlier carries a newer
+				// timestamp but older utilization, so only a header for a
+				// later window (a later reset) may reopen it.
+				laterWindow := !state.Reset.IsZero() && out[i].ResetAt.After(state.Reset.Add(2*time.Minute))
+				if state.Full && !laterWindow {
+					out[i].Full, out[i].UsedPercent = true, 100
+					if !state.Reset.IsZero() {
+						out[i].ResetAt = state.Reset
+					}
+					if state.Observed.After(out[i].ObservedAt) {
+						out[i].ObservedAt = state.Observed
+					}
 				}
 			}
 		}
@@ -427,11 +450,10 @@ func queryInt(c *gin.Context, name string) (int, bool) {
 	return v, true
 }
 
-// registerSubagentAdviceRoutes mounts the read-only advice endpoints. They
-// reserve nothing, run nothing and identify accounts only by hashed
-// references, so they are served without a key, on the engine itself rather
-// than the authenticated /v1/account-policy group.
-func (s *Server) registerSubagentAdviceRoutes() {
+// registerSubagentAdviceRoutes mounts the advice endpoint without a key: it is
+// read-only and publishes only model advice and coarse provider readiness. The
+// per-account forecast is diagnostic detail and stays behind inference auth.
+func (s *Server) registerSubagentAdviceRoutes(authenticated *gin.RouterGroup) {
 	s.engine.GET(subagentAdvicePath, func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		if s.subagentAdvisor == nil {
@@ -459,7 +481,7 @@ func (s *Server) registerSubagentAdviceRoutes() {
 		}
 		c.JSON(http.StatusOK, advice)
 	})
-	s.engine.GET(subagentForecastPath, func(c *gin.Context) {
+	authenticated.GET(strings.TrimPrefix(subagentForecastPath, "/v1/account-policy"), func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		if s.subagentAdvisor == nil {
 			subagentAdviceFailure(c, &subagentadvice.Error{Code: "unavailable", Message: "Subagent advisor unavailable.", Status: http.StatusServiceUnavailable})
@@ -489,6 +511,12 @@ func (s *Server) startSubagentSampler() {
 	s.subagentOnce.Do(func() {
 		ctx := s.subagentCtx
 		go func() {
+			sample := func() {
+				if err := s.subagentAdvisor.Sample(ctx); err != nil {
+					log.WithField("component", "subagent-advisor").Debug("quota sample skipped")
+				}
+			}
+			sample()
 			ticker := time.NewTicker(subagentSampleInterval)
 			defer ticker.Stop()
 			for {
@@ -496,9 +524,7 @@ func (s *Server) startSubagentSampler() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if err := s.subagentAdvisor.Sample(ctx); err != nil {
-						log.WithField("component", "subagent-advisor").Debug("quota sample skipped")
-					}
+					sample()
 				}
 			}
 		}()

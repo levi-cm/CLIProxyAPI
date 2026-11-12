@@ -18,6 +18,7 @@ import (
 
 type serverOptionConfig struct {
 	accountPolicyHistory   func() *accountpolicyledger.Archive
+	subagentHistory        func() *accountpolicyledger.Archive
 	extraMiddleware        []gin.HandlerFunc
 	engineConfigurator     func(*gin.Engine)
 	routerConfigurator     func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)

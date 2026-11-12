@@ -228,7 +228,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.policyIntegration = &accountpolicyapi.Handler{Service: optionState.accountPolicy, History: optionState.accountPolicyHistory}
-	s.subagentAdvisor = subagentadvice.New(cfg.SubagentAdvisor, newSubagentInventory(authManager, optionState.accountPolicy, optionState.accountPolicyHistory))
+	s.subagentAdvisor = subagentadvice.New(cfg.SubagentAdvisor, newSubagentInventory(authManager, optionState.accountPolicy, optionState.subagentHistory))
 	s.subagentCtx, s.subagentStop = context.WithCancel(context.Background())
 	s.mgmt.SetAccountPolicy(optionState.accountPolicy)
 	s.mgmt.SetAccountPolicySettingsValidator(optionState.accountPolicyValidator)

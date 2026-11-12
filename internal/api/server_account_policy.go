@@ -66,3 +66,9 @@ func (s *Server) serveAccountPolicyPanel(c *gin.Context) {
 func WithAccountPolicyHistory(source func() *accountpolicyledger.Archive) ServerOption {
 	return func(c *serverOptionConfig) { c.accountPolicyHistory = source }
 }
+
+// WithSubagentHistory supplies a side-effect-free history accessor for the
+// keyless subagent advisor. Without it the advisor forecasts without history.
+func WithSubagentHistory(source func() *accountpolicyledger.Archive) ServerOption {
+	return func(c *serverOptionConfig) { c.subagentHistory = source }
+}

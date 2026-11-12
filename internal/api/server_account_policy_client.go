@@ -27,7 +27,7 @@ func (s *Server) registerAccountPolicyClientRoutes(service *accountpolicy.Servic
 	if s.policyIntegration != nil {
 		s.policyIntegration.Register(group, true)
 	}
-	s.registerSubagentAdviceRoutes()
+	s.registerSubagentAdviceRoutes(group)
 	group.GET("/usage", func(c *gin.Context) {
 		report, err := s.accountPolicyClientReport(service, c.GetString("userApiKey"), c.Query("session_id"))
 		if err != nil {

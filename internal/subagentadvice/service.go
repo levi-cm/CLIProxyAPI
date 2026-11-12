@@ -18,6 +18,7 @@ const (
 // recent quota samples used to measure usage pace; it reserves nothing.
 type Service struct {
 	mu      sync.Mutex
+	compute sync.Mutex // one inventory collection at a time bounds keyless load
 	cfg     Config
 	source  InventorySource
 	now     func() time.Time
@@ -103,20 +104,24 @@ func (s *Service) prepare(ctx context.Context) (*forecaster, Inventory, error) {
 	if !cfg.Active() {
 		return nil, Inventory{}, errorf(503, "subagent_advisor_disabled", "The subagent advisor is disabled.")
 	}
+	s.compute.Lock()
 	inv, err := s.inventory(ctx)
+	s.compute.Unlock()
 	if err != nil {
 		return nil, Inventory{}, err
 	}
+	// Requests only read samples; the background sampler records them.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
-	s.recordSamplesLocked(inv, now)
 	return newForecaster(s.cfg, now, inv, s.samplesCopyLocked()), inv, nil
 }
 
 // Sample records quota observations so usage pace is measurable between requests.
 func (s *Service) Sample(ctx context.Context) error {
+	s.compute.Lock()
 	inv, err := s.inventory(ctx)
+	s.compute.Unlock()
 	if err != nil {
 		return err
 	}

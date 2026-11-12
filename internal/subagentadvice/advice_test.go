@@ -725,6 +725,15 @@ func TestConfigValidation(t *testing.T) {
 		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"ultra"}}}},
 		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"high"}, Modes: []string{"turbo"}}}},
 		{Models: []ModelCapability{{Name: "x", Match: []string{"["}, Efforts: []string{"high"}}}},
+		{SafetyFactor: math.NaN()},
+		{SurplusHorizonHours: math.Inf(1)},
+		{Providers: map[string]ProviderConfig{"claude": {CapacityUnits: math.Inf(1)}}},
+		{AccountCapacityUnits: map[string]float64{"a": math.NaN()}},
+		{TaskInputTokens: -1},
+		{TaskOutputTokens: -5},
+		{Prices: map[string]Price{"x*": {}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"high"}, Price: &Price{Input: -1, Output: 2}}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"high"}, ModeCostMultiplier: map[string]float64{"fast": 0}}}},
 	}
 	for i, cfg := range bad {
 		if cfg.Validate() == nil {
@@ -766,4 +775,105 @@ func TestPlanCapacityOverrideUsesPriceEstimates(t *testing.T) {
 func hasCode(err error, code string) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Code == code
+}
+
+func TestPrefixedAndAliasedFableIsNeverAdvised(t *testing.T) {
+	acct := claudeAcct("claude-a", 40, 10*time.Hour, 0)
+	acct.Models = []string{opus, "best", "team/claude-fable-5-2"}
+	acct.Canonical = map[string]string{"best": "claude-fable-5-2"}
+	cfg := Config{Models: []ModelCapability{
+		{Name: "prefixed", Match: []string{"team/claude-fable-*"}, Provider: "claude", Efforts: []string{"high"}},
+		{Name: "alias", Match: []string{"best"}, Provider: "claude", Efforts: []string{"high"}},
+		{Name: "opus", Match: []string{opus}, Provider: "claude", Efforts: []string{"xhigh"}},
+	}}
+	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	a := mustAdvise(t, svc, Request{})
+	if len(a.Models) != 1 || a.Models[0].Model != opus {
+		t.Fatalf("fable advised through a prefix or alias: %+v", a.Models)
+	}
+}
+
+func TestSurplusBudgetStaysAboveReserves(t *testing.T) {
+	inv := surplusFleet()
+	// 60% of 13000 left; a 50% reserve leaves 1300 units: 270 fast xhigh tasks.
+	inv.Accounts[0].ReservePercent = 50
+	svc, _, _ := newTestService(t, Config{}, inv)
+	o := by(mustAdvise(t, svc, Request{}), opus)
+	if o == nil || o.Basis != KindSurplus || o.BudgetTasks == nil || *o.BudgetTasks != 270 {
+		t.Fatalf("surplus budget ignored the reserve: %+v", o)
+	}
+}
+
+func TestConserveBudgetStaysAboveReserves(t *testing.T) {
+	inv := Inventory{Accounts: []Account{claudeAcct("claude-a", 95, 72*time.Hour, 2)}, Models: discovered()}
+	// 650 units left, 520 reserved: 130 units at 2.4 per task.
+	inv.Accounts[0].ReservePercent = 4
+	svc, _, _ := newTestService(t, Config{}, inv)
+	o := by(mustAdvise(t, svc, Request{}), opus)
+	if o == nil || o.Basis != KindConserve || o.BudgetTasks == nil || *o.BudgetTasks != 54 {
+		t.Fatalf("conserve budget ignored the reserve: %+v", o)
+	}
+}
+
+func TestCreditFundedAccountsStayAdvised(t *testing.T) {
+	acct := codexAcct("codex-a", 100, 96*time.Hour, 0)
+	acct.ServingOnCredits = true
+	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	a := mustAdvise(t, svc, Request{})
+	s := by(a, sol)
+	if a.Posture != PostureConserve || s == nil || s.Basis != KindConserve || s.BudgetTasks != nil {
+		t.Fatalf("credit-funded account advice = %s %+v", a.Posture, a.Models)
+	}
+}
+
+func TestMixedPricingBudgetUsesEachAccountsCost(t *testing.T) {
+	a := codexAcct("codex-a", 99, 150*time.Hour, 0)
+	b := codexAcct("codex-b", 0, 160*time.Hour, 0)
+	b.Plan = "plus"
+	cfg := Config{Providers: map[string]ProviderConfig{"codex": {PlanCapacityUnits: map[string]float64{"pro": 5000}}}}
+	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{a, b}, Models: discovered()})
+	// codex-a: 50 units at 1.35 per task = 37; codex-b (pool minimum, 2% per task) = 50.
+	s := by(mustAdvise(t, svc, Request{}), sol)
+	if s == nil || s.BudgetTasks == nil || *s.BudgetTasks != 87 {
+		t.Fatalf("mixed pricing budget = %+v", s)
+	}
+}
+
+func TestUnavailableFirstMatchFallsThrough(t *testing.T) {
+	acct := Account{ID: "opencode", Provider: "opencode-go", Models: []string{"opencode-go/deepseek-v4.1", deepseek},
+		ModelBlocks: map[string]Block{"opencode-go/deepseek-v4.1": {Reason: "model_cooldown", Until: t0.Add(time.Hour)}}}
+	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	if d := by(mustAdvise(t, svc, Request{}), deepseek); d == nil {
+		t.Fatal("a cooled-down first match hid the healthy alternative")
+	}
+}
+
+func TestDiscoveredMetadataIsPerProvider(t *testing.T) {
+	inv := normalFleet()
+	inv.Models = append(inv.Models, DiscoveredModel{ID: sol, Provider: "other", ContextTokens: 1000})
+	svc, _, _ := newTestService(t, Config{}, inv)
+	if s := by(mustAdvise(t, svc, Request{ContextTokens: 100000}), sol); s == nil {
+		t.Fatal("another provider's metadata for the same ID rejected codex")
+	}
+}
+
+// Requests only read: pace samples are recorded by the background sampler.
+func TestAdviceRequestsRecordNothing(t *testing.T) {
+	svc, _, _ := newTestService(t, Config{}, surplusFleet())
+	mustAdvise(t, svc, Request{})
+	if _, err := svc.Forecast(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	svc.mu.Lock()
+	n := len(svc.samples)
+	svc.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a request recorded %d sample series", n)
+	}
+	if err := svc.Sample(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(svc.samples) == 0 {
+		t.Fatal("the sampler recorded nothing")
+	}
 }

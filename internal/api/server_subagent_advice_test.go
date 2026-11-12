@@ -135,7 +135,11 @@ func TestSubagentAdviceIsKeylessAndReadOnly(t *testing.T) {
 			}
 		}
 	}
-	if w := fx.get(t, http.MethodGet, subagentForecastPath, ""); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "claude-b\"") || !strings.Contains(w.Body.String(), `"capability":"claude-opus-5.5"`) {
+	// The per-account forecast is diagnostic detail and needs inference auth.
+	if w := fx.get(t, http.MethodGet, subagentForecastPath, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless forecast: %d %s", w.Code, w.Body.String())
+	}
+	if w := fx.get(t, http.MethodGet, subagentForecastPath, "caller-a"); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "claude-b\"") || !strings.Contains(w.Body.String(), `"capability":"claude-opus-5.5"`) {
 		t.Fatalf("forecast: %d %s", w.Code, w.Body.String())
 	}
 	if w := fx.get(t, http.MethodGet, subagentAdvicePath+"?context_tokens=abc", ""); w.Code != http.StatusBadRequest {
@@ -274,5 +278,38 @@ func TestUsageSplitSkillReadsAdviceWithoutKey(t *testing.T) {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 || out != "" || !strings.Contains(stderr, "do not start extra subagents") {
 		t.Fatalf("unreachable: %v %q %q", err, out, stderr)
+	}
+}
+
+type fakeClaudeLimits map[string]auth.ClaudeLimitWindowState
+
+func (f fakeClaudeLimits) ClaudeLimitWindows(string, uint64) map[string]auth.ClaudeLimitWindowState {
+	return f
+}
+
+// A stream that started before the 5h window filled can finish later with a
+// newer timestamp but older utilization; the selector's full window wins until
+// a header reports a later window.
+func TestClaudeWindowsKeepSelectorFullWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	reset5h := now.Add(3 * time.Hour)
+	a := &auth.Auth{ID: "c", Provider: "claude", Quota: auth.QuotaState{ObservedAt: now, Signals: claudeSignals(0.5, now.Add(96*time.Hour), now)}}
+	limits := fakeClaudeLimits{"5h": {Full: true, Reset: reset5h, Observed: now.Add(-time.Minute)}}
+	find := func(ws []subagentadvice.Window) subagentadvice.Window {
+		for _, w := range ws {
+			if w.Name == "5h" {
+				return w
+			}
+		}
+		t.Fatalf("no 5h window in %+v", ws)
+		return subagentadvice.Window{}
+	}
+	if w := find(claudeWindows(a, limits)); !w.Full || !w.ResetAt.Equal(reset5h) {
+		t.Fatalf("late header reopened the full window: %+v", w)
+	}
+	// A header for the next window (later reset) supersedes the old state.
+	a.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Reset"] = strconv.FormatInt(now.Add(8*time.Hour).Unix(), 10)
+	if w := find(claudeWindows(a, limits)); w.Full {
+		t.Fatalf("a later window stayed full: %+v", w)
 	}
 }

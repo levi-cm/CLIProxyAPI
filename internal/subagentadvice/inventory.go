@@ -38,6 +38,9 @@ type Account struct {
 	Plan     string
 	// Models are the client-visible model IDs this account serves.
 	Models []string
+	// Canonical maps a visible model ID to the canonical model behind it
+	// (prefixes and aliases), so exclusions cannot be bypassed by renaming.
+	Canonical map[string]string
 	// Blocked is empty when the account can serve requests now; otherwise it
 	// names the reason (disabled, auth_error, cooldown, hold, policy_ineligible...).
 	Blocked string
