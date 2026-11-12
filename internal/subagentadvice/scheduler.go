@@ -485,6 +485,16 @@ func (f *forecaster) candidates(c ModelCapability) ([]string, bool) {
 	var out []string
 	excluded := false
 	seen := map[string]bool{}
+	// One public ID may route to different models on different accounts (a
+	// shared alias); if any of them is never advised, the ID is never advised.
+	banned := map[string]bool{}
+	for _, st := range f.accounts {
+		for _, id := range st.acct.Models {
+			if f.neverAdvised(st.acct, id) {
+				banned[id] = true
+			}
+		}
+	}
 	for _, pattern := range c.Match {
 		var ids []string
 		for _, st := range f.accounts {
@@ -495,7 +505,7 @@ func (f *forecaster) candidates(c ModelCapability) ([]string, bool) {
 				if seen[id] || !matchModel([]string{pattern}, id) {
 					continue
 				}
-				if f.neverAdvised(st.acct, id) {
+				if banned[id] {
 					excluded = true
 					continue
 				}

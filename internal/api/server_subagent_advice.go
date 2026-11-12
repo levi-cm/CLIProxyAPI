@@ -345,7 +345,7 @@ func (r *subagentInventory) ledgerUsage(ctx context.Context, now time.Time) map[
 	}
 	r.mu.Unlock()
 	collect := func(from time.Time) (map[string][]subagentadvice.ModelUsage, error) {
-		totals, err := a.SummaryContext(ctx, accountpolicyledger.Query{From: from, To: now, Limit: 100}, "day")
+		totals, err := a.SummaryContext(ctx, accountpolicyledger.Query{From: from, To: now, Limit: 100, ReadOnly: true}, "day")
 		if err != nil {
 			return nil, err
 		}
@@ -410,7 +410,7 @@ func (r *subagentInventory) allowanceHistory(ctx context.Context, id string, now
 	}
 	r.mu.Unlock()
 	var samples []subagentadvice.Sample
-	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-24 * time.Hour), To: now}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
+	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-24 * time.Hour), To: now, ReadOnly: true}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

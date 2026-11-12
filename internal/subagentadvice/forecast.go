@@ -370,6 +370,11 @@ func (f *forecaster) eligible(st *accountState, model string) eligibility {
 		if !f.windowRelevant(w) {
 			continue
 		}
+		if !scoped && a.ServingOnCredits {
+			// The policy authorized credits past the ordinary allowance windows;
+			// cooldowns and model-scoped windows still block.
+			continue
+		}
 		if w.Full || w.UsedPercent >= f.cfg.ShortWindowBlockPercent {
 			return eligibility{reason: "window_full_" + w.Name, until: w.ResetAt}
 		}

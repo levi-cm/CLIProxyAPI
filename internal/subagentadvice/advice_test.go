@@ -877,3 +877,33 @@ func TestAdviceRequestsRecordNothing(t *testing.T) {
 		t.Fatal("the sampler recorded nothing")
 	}
 }
+
+func TestSharedAliasRoutingToFableIsNeverAdvised(t *testing.T) {
+	// "best" is Opus on a cooled-down account and Fable on a healthy one.
+	a := claudeAcct("claude-a", 40, 72*time.Hour, 0)
+	a.Models, a.Canonical = []string{"best"}, map[string]string{"best": opus}
+	a.Blocked, a.BlockedUntil = "cooldown", t0.Add(time.Hour)
+	b := claudeAcct("claude-b", 40, 72*time.Hour, 0)
+	b.Models, b.Canonical = []string{"best"}, map[string]string{"best": "claude-fable-5-2"}
+	cfg := Config{Models: []ModelCapability{{Name: "best", Match: []string{"best"}, Provider: "claude", Efforts: []string{"high"}}}}
+	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{a, b}, Models: discovered()})
+	if adv := mustAdvise(t, svc, Request{}); len(adv.Models) != 0 {
+		t.Fatalf("a shared alias that routes to Fable was advised: %+v", adv.Models)
+	}
+}
+
+func TestCreditsCoverFullOrdinaryWindows(t *testing.T) {
+	acct := codexAcct("codex-a", 100, 96*time.Hour, 0)
+	acct.ServingOnCredits = true
+	acct.Windows = append(acct.Windows, Window{Name: "5h", UsedPercent: 100, Full: true, ResetAt: t0.Add(2 * time.Hour), DurationSeconds: 18000, ObservedAt: t0.Add(-time.Minute)})
+	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	if s := by(mustAdvise(t, svc, Request{}), sol); s == nil || s.Basis != KindConserve || s.BudgetTasks != nil {
+		t.Fatalf("credit-funded account with a full 5h window = %+v", s)
+	}
+	// Without credits the same full window blocks.
+	acct.ServingOnCredits = false
+	svc, _, _ = newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	if s := by(mustAdvise(t, svc, Request{}), sol); s != nil {
+		t.Fatalf("full window without credits was advised: %+v", s)
+	}
+}
