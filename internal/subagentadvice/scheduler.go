@@ -6,13 +6,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 // Offer states.
 const (
-	OfferSurplus     = "surplus"
-	OfferNormal      = "normal"
-	OfferTight       = "tight"
+	OfferMetered     = "metered"
 	OfferUnmetered   = "unmetered"
 	OfferUnavailable = "unavailable"
 )
@@ -20,9 +20,11 @@ const (
 var effortCostMultiplier = map[string]float64{"none": 0.2, "minimal": 0.3, "low": 0.5, "medium": 0.75, "high": 1, "xhigh": 1.5, "max": 2.5}
 
 type offer struct {
-	cap              ModelCapability
-	model            string
-	provider         string
+	cap      ModelCapability
+	model    string
+	provider string
+	// ladder is the capability's ladder, limited to supported efforts.
+	ladder           []Step
 	efforts          []string
 	modes            []string
 	capabilitySource string
@@ -33,28 +35,65 @@ type offer struct {
 	override         bool
 }
 
-// Spending postures tell the orchestrator how freely to use subagents. They
-// never cap the subagent count; the orchestrator decides that from its work.
+// Postures tell every orchestrator how the shared fleet stands. Room is
+// shared by all orchestrators; it is advice, never a reservation or cap.
 const (
-	PostureSpendFreely = "spend_freely"
-	PostureNormal      = "normal"
+	PostureRoom        = "room"
+	PostureHold        = "hold"
 	PostureConserve    = "conserve"
+	PostureUnknown     = "unknown"
 	PostureUnavailable = "unavailable"
 )
 
 // modelChoice is the advice for one capability.
 type modelChoice struct {
-	offer  *offer
-	kind   string
-	effort string
-	mode   string
-	cost   float64   // one task, in the reference account's units
-	budget float64   // tasks the evidence supports; negative means unknown
-	until  time.Time // when the budget ends (next relevant reset)
-	// credits marks a budget that includes credits above the floors.
-	credits bool
-	stale   bool
-	reason  string
+	offer *offer
+	kind  string
+	step  int
+	// room is the extra agents the provider can take; -1 when unknown.
+	room   int
+	stale  bool
+	reason string
+}
+
+func (c modelChoice) effort() string { return c.offer.ladder[c.step].Effort }
+func (c modelChoice) mode() string   { return c.offer.ladder[c.step].Mode }
+
+// Per-agent rate bases.
+const (
+	PerAgentMeasured     = "measured"
+	PerAgentLastMeasured = "last_measured"
+	PerAgentTaskEstimate = "task_estimate"
+)
+
+// Fleet rate states.
+const (
+	RateRoom     = "room"
+	RateHold     = "hold"
+	RateConserve = "conserve"
+)
+
+// fleetRate is a provider pool's usage rate against the rate that would use
+// every account's remaining allowance by its reset. Rates are percentage
+// points of one account per hour.
+type fleetRate struct {
+	provider      string
+	accounts      int
+	needAllowance float64
+	needCredits   float64
+	need          float64
+	target        float64
+	recent        float64
+	recentBasis   string
+	agents        int
+	perAgent      float64
+	perAgentBasis string
+	room          int
+	state         string
+	// expiring is allowance (percent of one account) that would still
+	// expire unused within the fast horizon with the fleet at the target.
+	expiring      float64
+	timeSensitive bool
 }
 
 type decision struct {
@@ -64,6 +103,10 @@ type decision struct {
 	warnings   []string
 	retryAfter time.Time
 	summary    string
+	rates      map[string]*fleetRate
+	openCode   *OpenCodeUsage
+	activity   fleetactivity.Snapshot
+	room       int
 }
 
 type scheduler struct {
@@ -112,13 +155,6 @@ func (s *scheduler) routerOrder(o *offer) []*accountState {
 	return out
 }
 
-func (o *offer) defaultEffort() string {
-	if contains(o.efforts, o.cap.DefaultEffort) {
-		return o.cap.DefaultEffort
-	}
-	return o.efforts[0]
-}
-
 // classify sets each offer's state from current evidence.
 func (s *scheduler) classify(o *offer) {
 	if o.reason != "" && o.state == OfferUnavailable {
@@ -139,155 +175,13 @@ func (s *scheduler) classify(o *offer) {
 		}
 		return
 	}
-	metered := false
 	for _, st := range eligible {
-		metered = metered || st.metered
-	}
-	if !metered {
-		o.state, o.reason = OfferUnmetered, "no_quota_telemetry"
-		return
-	}
-	effort := o.defaultEffort()
-	if s.tasks(o, effort, ModeStandard, s.surplusSpend(o).spend) >= 1 {
-		o.state, o.reason = OfferSurplus, ""
-		return
-	}
-	for _, st := range eligible {
-		if !st.metered {
-			o.state, o.reason = OfferUnmetered, "metered_accounts_tight"
-			return
-		}
-		if s.f.fits(st.acct.Provider, map[string]float64{st.acct.ID: s.f.slotCost(o, st, effort, ModeStandard, s.input)}) {
-			o.state, o.reason = OfferNormal, ""
+		if st.metered {
+			o.state, o.reason = OfferMetered, ""
 			return
 		}
 	}
-	o.state, o.reason = OfferTight, "projected_shortfall_before_reset"
-}
-
-// spendable lists the eligible metered accounts that can take extra spend:
-// their own allowance, or credits above the floor once it is exhausted. The
-// order is the router's (earliest reset first).
-func (s *scheduler) spendable(o *offer) []*accountState {
-	var out []*accountState
-	for _, st := range s.routerOrder(o) {
-		if st.metered && (!st.acct.ServingOnCredits || st.spendsCredits()) {
-			out = append(out, st)
-		}
-	}
-	return out
-}
-
-// surplusPlan is extra spend that would otherwise be lost or left idle.
-type surplusPlan struct {
-	spend map[*accountState]float64
-	// until is when the expiring allowance part must be used; zero when the
-	// plan only spends credits.
-	until time.Time
-	// allowance and credits are the plan's parts in capacity units.
-	allowance, credits float64
-}
-
-// surplusSpend plans extra spend for the eligible accounts: allowance the
-// pool would otherwise leave unused at its weekly (or monthly) resets (at
-// most the projected waste, never causing a shortfall before a refill or
-// breaching a reserve), plus every credit above the protected floors, which
-// routing draws once an account's allowance is exhausted. Short windows only
-// matter through eligibility.
-func (s *scheduler) surplusSpend(o *offer) surplusPlan {
-	plan := surplusPlan{spend: map[*accountState]float64{}}
-	pool := s.f.pools[o.provider]
-	if o.override || pool == nil {
-		return plan
-	}
-	accounts := s.spendable(o)
-	if pool.surplusUnits > 0 {
-		room := s.headroom(accounts)
-		left := pool.surplusUnits
-		for _, st := range accounts {
-			if take := math.Min(room[st], left); take > 0 {
-				plan.spend[st] = take
-				plan.allowance += take
-				left -= take
-			}
-		}
-		plan.until = spendDeadline(plan.spend)
-	}
-	for _, st := range accounts {
-		if st.spendsCredits() {
-			plan.spend[st] += st.creditUnits
-			plan.credits += st.creditUnits
-		}
-	}
-	return plan
-}
-
-// spendDeadline is the earliest allowance reset among accounts that receive
-// spend: the time by which that allowance must be used.
-func spendDeadline(spend map[*accountState]float64) time.Time {
-	var until time.Time
-	for st, units := range spend {
-		reset := st.long.ResetAt
-		if units > 0 && !reset.IsZero() && (until.IsZero() || reset.Before(until)) {
-			until = reset
-		}
-	}
-	return until
-}
-
-// surplusChoice spends allowance projected to expire and credits above the
-// floors: the highest allowed effort and, when configured and no account is
-// near a short-window limit, fast or priority mode.
-func (s *scheduler) surplusChoice(o *offer) (modelChoice, bool) {
-	plan := s.surplusSpend(o)
-	var first *accountState
-	stale, caution := false, false
-	for _, st := range s.spendable(o) {
-		if plan.spend[st] <= 0 {
-			continue
-		}
-		if first == nil {
-			first = st
-		}
-		stale = stale || st.stale
-		caution = caution || s.f.eligible(st, o.model).caution
-	}
-	if first == nil {
-		return modelChoice{}, false
-	}
-	pool := s.f.pools[o.provider]
-	var parts []string
-	if plan.allowance > 0 {
-		part := fmt.Sprintf("about %.0f%% of one account's allowance is projected to expire unused at upcoming resets", pool.wasteUnits/first.capacity*100)
-		if !plan.until.IsZero() {
-			part += " (use it before " + plan.until.UTC().Format("Jan 2 15:04 MST") + ")"
-		}
-		parts = append(parts, part)
-	}
-	if plan.credits > 0 {
-		parts = append(parts, "credits above the protected floors are meant to be spent; routing draws them once the allowance is exhausted")
-	}
-	reason := strings.Join(parts, "; ")
-	for i := len(o.efforts) - 1; i >= 0; i-- {
-		effort := o.efforts[i]
-		var modes []string
-		if s.f.cfg.FastMode == "auto" && !caution {
-			for _, m := range o.modes {
-				if m != ModeStandard {
-					modes = append(modes, m)
-				}
-			}
-		}
-		modes = append(modes, ModeStandard)
-		for _, mode := range modes {
-			budget := s.tasks(o, effort, mode, plan.spend)
-			if budget < 1 {
-				continue
-			}
-			return modelChoice{offer: o, kind: KindSurplus, effort: effort, mode: mode, cost: s.f.slotCost(o, first, effort, mode, s.input), budget: budget, until: plan.until, credits: plan.credits > 0, stale: stale, reason: reason}, true
-		}
-	}
-	return modelChoice{}, false
+	o.state, o.reason = OfferUnmetered, "no_quota_telemetry"
 }
 
 // room is the spend an account can take without breaching its reserve.
@@ -296,144 +190,214 @@ func (s *scheduler) room(st *accountState) float64 {
 	return math.Max(0, st.remainingUnits-st.reserveUnits(s.f.cfg, pool != nil && pool.demandKnown))
 }
 
-// tasks counts the subagent tasks a per-account spend pays for, pricing each
-// account's share with that account's own task cost.
-func (s *scheduler) tasks(o *offer, effort, mode string, spend map[*accountState]float64) float64 {
-	n := 0.0
-	for st, units := range spend {
-		cost := s.f.slotCost(o, st, effort, mode, s.input)
-		if units > 0 && cost > 0 && !math.IsInf(cost, 0) && !math.IsNaN(cost) {
-			n += math.Floor(units / cost)
-		}
+// countsTowardNeed reports whether an account's allowance can still be used
+// before it resets: usable now, or blocked only until before its reset.
+func countsTowardNeed(st *accountState) bool {
+	if st.blocked == "" {
+		return true
 	}
-	return n
+	return !st.blockedUntil.IsZero() && (st.long.ResetAt.IsZero() || st.blockedUntil.Before(st.long.ResetAt))
 }
 
-// headroom spreads the largest extra spend the provider can absorb on these
-// accounts (router order) without breaching reserves or creating a new
-// shortfall before its resets, and returns each account's share.
-func (s *scheduler) headroom(accounts []*accountState) map[*accountState]float64 {
-	if len(accounts) == 0 {
+// taskRate turns the per-task cost estimate at the ladder's first step into
+// a per-agent rate (percent of one account per hour).
+func (s *scheduler) taskRate(o *offer, st *accountState) float64 {
+	cfg := s.f.cfg
+	hours := cfg.TaskMinutes / 60
+	if o == nil || st == nil || len(o.ladder) == 0 {
+		return cfg.UnmeteredSubagentPercent / hours
+	}
+	cost := s.f.slotCost(o, st, o.ladder[0].Effort, ModeStandard, s.input)
+	return cost / st.capacity * 100 / hours
+}
+
+// fleetRate compares the pool's recent use with the rate that would use
+// every account's remaining allowance (and credits above the floors) by its
+// reset, and turns the gap into room for more agents.
+func (s *scheduler) fleetRate(provider string, o *offer, agents int, lastPerAgent float64) *fleetRate {
+	pool := s.f.pools[provider]
+	if pool == nil || len(pool.accounts) == 0 {
 		return nil
 	}
-	provider := accounts[0].acct.Provider
-	hard := 0.0
-	for _, st := range accounts {
-		hard += s.room(st)
+	cfg := s.f.cfg
+	ref := 0.0
+	for _, st := range pool.accounts {
+		ref += st.capacity
 	}
-	spread := func(x float64) map[string]float64 {
-		out := map[string]float64{}
-		for _, st := range accounts {
-			take := math.Min(s.room(st), x)
-			if take > 0 {
-				out[st.acct.ID] = take
-				x -= take
-			}
+	ref /= float64(len(pool.accounts))
+	pct := func(units float64) float64 { return units / ref * 100 }
+	r := &fleetRate{provider: provider, agents: agents}
+	type allowance struct {
+		reset   time.Time
+		hours   float64
+		percent float64
+	}
+	var list []allowance
+	recentKnown, observed := false, false
+	for _, st := range pool.accounts {
+		if st.recentBasis != "" {
+			r.recent += st.recent * st.capacity / ref
+			recentKnown = true
+			observed = observed || st.recentBasis == PaceObserved
 		}
-		return out
-	}
-	lo, hi := 0.0, hard
-	if s.f.fits(provider, spread(hi)) {
-		lo = hi
-	} else {
-		for i := 0; i < 40 && hi-lo > hard*1e-4; i++ {
-			mid := (lo + hi) / 2
-			if s.f.fits(provider, spread(mid)) {
-				lo = mid
-			} else {
-				hi = mid
-			}
+		if !countsTowardNeed(st) {
+			continue
 		}
-	}
-	byID := spread(lo)
-	out := make(map[*accountState]float64, len(byID))
-	for _, st := range accounts {
-		if units := byID[st.acct.ID]; units > 0 {
-			out[st] = units
+		r.accounts++
+		if st.spendsCredits() {
+			// Credits do not expire; spread them over the surplus horizon.
+			r.needCredits += pct(st.creditUnits) / cfg.SurplusHorizonHours
 		}
+		left := pct(s.room(st))
+		if left <= 0 {
+			continue
+		}
+		hours := cfg.SurplusHorizonHours
+		if !st.long.ResetAt.IsZero() {
+			hours = math.Max(1, st.long.ResetAt.Sub(s.f.now).Hours())
+		}
+		r.needAllowance += left / hours
+		list = append(list, allowance{reset: st.long.ResetAt, hours: hours, percent: left})
 	}
-	return out
-}
+	r.need = r.needAllowance + r.needCredits
+	r.target = r.need * cfg.TargetFraction
 
-// defaultChoice advises the default effort in standard mode with the budget
-// the forecast leaves before the provider's resets. Conserve advice uses the
-// lowest effort and the hard capacity left above the account floors.
-func (s *scheduler) defaultChoice(o *offer, conserve bool) (modelChoice, bool) {
-	var metered []*accountState
-	stale := false
-	for _, st := range s.routerOrder(o) {
-		if st.metered {
-			metered = append(metered, st)
-			stale = stale || st.stale
+	// Allowance that expires unused soon even at the target: the router
+	// drains the earliest-resetting account first.
+	sort.SliceStable(list, func(i, j int) bool { return list[i].hours < list[j].hours })
+	drain, used := r.needAllowance*cfg.TargetFraction, 0.0
+	for _, a := range list {
+		take := math.Min(a.percent, math.Max(0, drain*a.hours-used))
+		used += take
+		if !a.reset.IsZero() && a.hours <= cfg.FastHorizonHours {
+			r.expiring += a.percent - take
 		}
 	}
-	effort := o.defaultEffort()
-	kind, reason := KindDefault, "the allowance covers forecast demand until it resets"
+	r.timeSensitive = r.expiring > cfg.FastMinPercent
+
+	var first *accountState
+	if o != nil {
+		if order := s.routerOrder(o); len(order) > 0 {
+			first = order[0]
+		}
+	}
+	if first == nil {
+		first = pool.accounts[0]
+	}
+	r.recentBasis = PaceLedger
+	if observed {
+		r.recentBasis = PaceObserved
+	}
 	switch {
-	case o.state == OfferUnmetered:
-		return modelChoice{offer: o, kind: KindUnmetered, effort: effort, mode: ModeStandard, budget: -1, reason: "provider reports no quota telemetry; budget unknown"}, true
-	case conserve:
-		effort, kind, reason = o.efforts[0], KindConserve, "pool is projected short before its next refill; lowest effort, few subagents"
+	case recentKnown && r.recent > 0:
+		r.perAgent, r.perAgentBasis = r.recent/float64(max(1, agents)), PerAgentMeasured
+	case lastPerAgent > 0:
+		// An idle fleet keeps the per-agent rate it last showed.
+		r.perAgent, r.perAgentBasis = lastPerAgent, PerAgentLastMeasured
+	default:
+		r.perAgent, r.perAgentBasis = s.taskRate(o, first), PerAgentTaskEstimate
 	}
-	cost := s.f.slotCost(o, metered[0], effort, ModeStandard, s.input)
-	var spend map[*accountState]float64
-	if conserve {
-		// The pool is short anyway; only capacity above the reserves matters.
-		spend = map[*accountState]float64{}
-		for _, st := range metered {
-			spend[st] = s.room(st)
+	if !recentKnown {
+		// Without any usage evidence, assume each working agent burns the
+		// per-agent rate.
+		r.recent, r.recentBasis = float64(agents)*r.perAgent, "estimated"
+	}
+	switch {
+	case r.need <= 0 || r.recent >= r.need:
+		r.state = RateConserve
+	case r.recent >= r.target || r.perAgent <= 0:
+		r.state = RateHold
+	default:
+		r.room = int(math.Floor((r.target - r.recent) / r.perAgent))
+		r.state = RateRoom
+		if r.room < 1 {
+			r.room, r.state = 0, RateHold
 		}
-	} else {
-		spend = s.headroom(metered)
 	}
-	budget := s.tasks(o, effort, ModeStandard, spend)
-	if budget < 1 {
-		// Accounts past their allowance may still serve on credits; their
-		// budget is the credit balance, which is not estimated here.
-		for _, st := range metered {
-			if st.acct.ServingOnCredits {
-				return modelChoice{offer: o, kind: KindConserve, effort: o.efforts[0], mode: ModeStandard, cost: cost, budget: -1, stale: stale,
-					reason: "allowance exhausted; accounts serve on paid credits, budget unknown"}, true
-			}
-		}
-		return modelChoice{}, false
-	}
-	if metered[0].paceBasis == PaceUnknown && !conserve {
-		reason = "usage pace unknown, so only account reserves are checked"
-	}
-	// The budget is spendable until the allowance it comes from resets; a
-	// short pool lasts until its next refill.
-	until := spendDeadline(spend)
-	if pool := s.f.pools[o.provider]; conserve && pool != nil {
-		until = pool.nextReset
-	}
-	return modelChoice{offer: o, kind: kind, effort: effort, mode: ModeStandard, cost: cost, budget: budget, until: until, stale: stale, reason: reason}, true
+	return r
 }
 
-var kindRank = map[string]int{KindSurplus: 0, KindDefault: 1, KindUnmetered: 2, KindConserve: 3}
+// pickStep starts at the ladder's first step and climbs while the fleet runs
+// well under its target. The fast/priority top step is only for allowance
+// that would still expire unused soon with the fleet at the target.
+func (s *scheduler) pickStep(o *offer, r *fleetRate) (int, string) {
+	cfg := s.f.cfg
+	if r == nil || r.state == RateConserve || o.override {
+		return 0, ""
+	}
+	topStandard := 0
+	for i, step := range o.ladder {
+		if step.Mode == ModeStandard {
+			topStandard = i
+		}
+	}
+	steps, why := 0, ""
+	if r.target > 0 {
+		ratio := r.recent / r.target
+		switch {
+		case ratio < cfg.StepUpTwoBelow:
+			steps, why = 2, fmt.Sprintf("the fleet runs at %.0f%% of its target", ratio*100)
+		case ratio < cfg.StepUpOneBelow:
+			steps, why = 1, fmt.Sprintf("the fleet runs at %.0f%% of its target", ratio*100)
+		}
+	}
+	step := min(steps, topStandard)
+	top := len(o.ladder) - 1
+	if r.timeSensitive && o.ladder[top].Mode != ModeStandard && cfg.FastMode == "auto" && !s.caution(o) {
+		return top, fmt.Sprintf("about %.0f%% of one account's allowance would still expire unused within %s at the target rate", r.expiring, roughDuration(time.Duration(cfg.FastHorizonHours*float64(time.Hour))))
+	}
+	if step == 0 {
+		why = ""
+	}
+	return step, why
+}
 
-// decide advises every usable capability, in preference order: expiring
-// allowance first, then normal capacity, unmetered providers, and conserve
-// options last. It never limits how many subagents run.
-func decide(f *forecaster, req Request) decision {
+// caution reports whether the account the router would use next is close to
+// a short-window limit, which rules out fast and priority mode.
+func (s *scheduler) caution(o *offer) bool {
+	order := s.routerOrder(o)
+	return len(order) > 0 && s.f.eligible(order[0], o.model).caution
+}
+
+var kindRank = map[string]int{KindRoom: 0, KindHold: 1, KindUnmetered: 2, KindConserve: 3}
+
+// decide advises every usable capability from the fleet's shared rate. It
+// reserves nothing; the room it reports is shared by all orchestrators.
+func decide(f *forecaster, req Request, activity fleetactivity.Snapshot, openCode *OpenCodeUsage, lastPerAgent map[string]float64) decision {
 	s := newScheduler(f, req.ContextTokens)
-	d := decision{}
+	d := decision{rates: map[string]*fleetRate{}, openCode: openCode, activity: activity}
+	firstOffer := map[string]*offer{}
+	for _, o := range s.offers {
+		if o.state == OfferMetered && firstOffer[o.provider] == nil {
+			firstOffer[o.provider] = o
+		}
+	}
+	for provider := range f.pools {
+		d.rates[provider] = s.fleetRate(provider, firstOffer[provider], activity.Providers[provider].Agents, lastPerAgent[provider])
+	}
+	if openCode != nil && !openCode.Reachable {
+		d.warnings = append(d.warnings, "OpenCode Go usage tracker unreachable; its budget is unknown")
+	}
+	roomed := map[string]bool{}
 	for _, o := range s.offers {
 		var c modelChoice
 		ok := false
 		switch o.state {
-		case OfferSurplus:
-			if c, ok = s.surplusChoice(o); !ok {
-				c, ok = s.defaultChoice(o, false)
-			}
-		case OfferNormal, OfferUnmetered:
-			c, ok = s.defaultChoice(o, false)
-		case OfferTight:
-			c, ok = s.defaultChoice(o, true)
+		case OfferMetered:
+			c, ok = s.meteredChoice(o, d.rates[o.provider])
+		case OfferUnmetered:
+			c, ok = s.unmeteredChoice(o, openCode, &d)
 		}
 		if ok {
 			d.choices = append(d.choices, c)
+			if c.room > 0 && !roomed[o.provider] {
+				roomed[o.provider] = true
+				d.room += c.room
+			}
 			continue
+		}
+		if o.state == OfferUnmetered {
+			continue // avoided; the warning explains why
 		}
 		label := o.cap.Name
 		if o.model != "" {
@@ -447,11 +411,6 @@ func decide(f *forecaster, req Request) decision {
 		if !o.nextAvailable.IsZero() && o.nextAvailable.After(f.now) && (d.retryAfter.IsZero() || o.nextAvailable.Before(d.retryAfter)) {
 			d.retryAfter = o.nextAvailable
 		}
-		if o.state == OfferTight || o.state == OfferNormal || o.state == OfferSurplus {
-			if pool := f.pools[o.provider]; pool != nil && pool.nextReset.After(f.now) && (d.retryAfter.IsZero() || pool.nextReset.Before(d.retryAfter)) {
-				d.retryAfter = pool.nextReset
-			}
-		}
 	}
 	sort.SliceStable(d.choices, func(i, j int) bool { return kindRank[d.choices[i].kind] < kindRank[d.choices[j].kind] })
 	kinds := map[string]bool{}
@@ -463,12 +422,14 @@ func decide(f *forecaster, req Request) decision {
 	switch {
 	case len(d.choices) == 0:
 		d.posture, d.status = PostureUnavailable, StatusUnavailable
-	case kinds[KindSurplus]:
-		d.posture = PostureSpendFreely
-	case kinds[KindDefault] || kinds[KindUnmetered]:
-		d.posture = PostureNormal
-	default:
+	case kinds[KindRoom]:
+		d.posture = PostureRoom
+	case kinds[KindHold]:
+		d.posture = PostureHold
+	case kinds[KindConserve]:
 		d.posture = PostureConserve
+	default:
+		d.posture = PostureUnknown
 	}
 	if d.status == "" {
 		d.status = StatusReady
@@ -481,6 +442,52 @@ func decide(f *forecaster, req Request) decision {
 	}
 	d.summary = summarize(d)
 	return d
+}
+
+func (s *scheduler) meteredChoice(o *offer, r *fleetRate) (modelChoice, bool) {
+	if r == nil {
+		return modelChoice{}, false
+	}
+	stale := false
+	for _, st := range s.routerOrder(o) {
+		stale = stale || (st.metered && st.stale)
+	}
+	step, why := s.pickStep(o, r)
+	c := modelChoice{offer: o, step: step, stale: stale}
+	switch r.state {
+	case RateRoom:
+		c.kind, c.room, c.reason = KindRoom, r.room, "the fleet runs below its target rate"
+	case RateHold:
+		c.kind, c.reason = KindHold, "the fleet already uses its target rate"
+	default:
+		c.kind, c.reason = KindConserve, "the fleet uses allowance faster than it lasts until the resets"
+	}
+	switch r.perAgentBasis {
+	case PerAgentTaskEstimate:
+		c.reason += "; per-agent rate estimated from task size (no measured usage)"
+	case PerAgentLastMeasured:
+		c.reason += "; per-agent rate from the last measured fleet use"
+	}
+	if why != "" {
+		c.reason += "; " + why
+	}
+	return c, true
+}
+
+func (s *scheduler) unmeteredChoice(o *offer, u *OpenCodeUsage, d *decision) (modelChoice, bool) {
+	c := modelChoice{offer: o, kind: KindUnmetered, room: -1, reason: "provider reports no quota telemetry; budget unknown"}
+	if o.provider != OpenCodeProvider || u == nil || !u.Reachable {
+		return c, true
+	}
+	if u.AvoidUntil != nil {
+		msg := "OpenCode Go: avoid until " + u.AvoidUntil.UTC().Format("Jan 2 15:04 MST") + " (" + u.AvoidWhy + ")"
+		if !contains(d.warnings, msg) {
+			d.warnings = append(d.warnings, msg)
+		}
+		return modelChoice{}, false
+	}
+	c.reason = "OpenCode Go quota from the usage tracker; room unknown"
+	return c, true
 }
 
 func summarize(d decision) string {
@@ -623,27 +630,34 @@ func (f *forecaster) buildOffer(c ModelCapability, id string, contextTokens int,
 		}
 	}
 	info, known := discovered[discoveredKey(o.provider, id)]
-	o.efforts = append([]string(nil), c.Efforts...)
+	o.ladder = append([]Step(nil), c.Ladder...)
 	o.capabilitySource = "configured"
 	if known && len(info.Levels) > 0 {
 		levels := map[string]bool{}
 		for _, l := range info.Levels {
 			levels[normalizeEffort(l)] = true
 		}
-		var allowed []string
-		for _, e := range c.Efforts {
-			if levels[e] {
-				allowed = append(allowed, e)
+		var allowed []Step
+		for _, step := range c.Ladder {
+			if levels[step.Effort] {
+				allowed = append(allowed, step)
 			}
 		}
-		o.efforts = allowed
+		o.ladder = allowed
 		o.capabilitySource = "registry+configured"
 	}
-	if len(o.efforts) == 0 {
+	if len(o.ladder) == 0 {
 		o.reason = "no_supported_effort"
 		return o
 	}
-	o.modes = append([]string(nil), c.Modes...)
+	for _, step := range o.ladder {
+		if !contains(o.efforts, step.Effort) {
+			o.efforts = append(o.efforts, step.Effort)
+		}
+		if !contains(o.modes, step.Mode) {
+			o.modes = append(o.modes, step.Mode)
+		}
+	}
 	if contextTokens > 0 && known && info.ContextTokens > 0 && contextTokens+c.MaxOutputTokens > info.ContextTokens {
 		o.reason = "context_too_small"
 		return o

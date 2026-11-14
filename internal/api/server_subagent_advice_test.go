@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicyledger"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/subagentadvice"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -99,6 +100,9 @@ func newAdviceFixture(t *testing.T) *adviceFixture {
 		}
 	}
 	s.subagentAdvisor = subagentadvice.New(cfg.SubagentAdvisor, historyInventory{inner: newSubagentInventory(m, nil, nil), history: history})
+	// Other tests in this package send requests through the process-wide
+	// tracker; the fixture counts its own fleet.
+	s.subagentAdvisor.SetActivity(fleetactivity.New())
 	return &adviceFixture{server: s}
 }
 
@@ -149,7 +153,7 @@ func TestSubagentAdviceIsKeylessAndReadOnly(t *testing.T) {
 	if w := fx.get(t, http.MethodGet, subagentAdvicePath+"?format=xml", ""); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown format accepted: %d", w.Code)
 	}
-	if w := fx.get(t, http.MethodGet, subagentAdvicePath+"?format=text", ""); w.Code != http.StatusOK || !strings.HasPrefix(w.Body.String(), "spend freely: ") || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
+	if w := fx.get(t, http.MethodGet, subagentAdvicePath+"?format=text", ""); w.Code != http.StatusOK || !strings.HasPrefix(w.Body.String(), "room for ~") || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
 		t.Fatalf("text format: %d %q", w.Code, w.Body.String())
 	}
 	if w := fx.get(t, http.MethodGet, subagentAdvicePath+"?context_tokens=-1", ""); w.Code != http.StatusBadRequest {
@@ -171,22 +175,27 @@ func TestSubagentAdviceIsKeylessAndReadOnly(t *testing.T) {
 	}
 }
 
-func TestSubagentAdviceUsesSurplusAndNeverFable(t *testing.T) {
+func TestSubagentAdviceSharesFleetRoomAndNeverFable(t *testing.T) {
 	fx := newAdviceFixture(t)
 	w := fx.get(t, http.MethodGet, subagentAdvicePath, "")
 	var a subagentadvice.Advice
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &a) != nil {
 		t.Fatalf("advice: %d %s", w.Code, w.Body.String())
 	}
-	if a.Status != subagentadvice.StatusReady || a.Posture != subagentadvice.PostureSpendFreely || len(a.Models) != 2 {
+	if a.Status != subagentadvice.StatusReady || a.Posture != subagentadvice.PostureRoom || a.SchemaVersion != 2 || len(a.Models) != 2 {
 		t.Fatalf("advice = %s %s %+v", a.Status, a.Posture, a.Models)
 	}
 	opus, sol := a.Models[0], a.Models[1]
-	if opus.Model != "claude-opus-5-5" || opus.ReasoningEffort != "xhigh" || opus.Mode != subagentadvice.ModeFast || opus.Basis != subagentadvice.KindSurplus || opus.Harnesses["claude-code"] != "opus" || opus.BudgetTasks == nil || *opus.BudgetTasks < 100 {
+	// An idle fleet climbs the ladder but never reaches fast mode without
+	// allowance that expires unused soon.
+	if opus.Model != "claude-opus-5-5" || opus.ReasoningEffort != "xhigh" || opus.Mode != subagentadvice.ModeStandard || opus.Basis != subagentadvice.KindRoom || opus.Harnesses["claude-code"] != "opus" || opus.RoomAgents == nil || *opus.RoomAgents < 1 {
 		t.Fatalf("opus = %+v", opus)
 	}
-	if sol.Model != "gpt-6.1-sol" || sol.ReasoningEffort != "high" || sol.Harnesses["codex"] != "gpt-6.1-sol" || sol.BudgetTasks != nil {
+	if sol.Model != "gpt-6.1-sol" || sol.ReasoningEffort != "medium" || sol.Basis != subagentadvice.KindUnmetered || sol.Harnesses["codex"] != "gpt-6.1-sol" || sol.RoomAgents != nil {
 		t.Fatalf("sol = %+v", sol)
+	}
+	if a.RoomAgents != *opus.RoomAgents {
+		t.Fatalf("room = %d, opus %d", a.RoomAgents, *opus.RoomAgents)
 	}
 	for _, limit := range []string{"max_parallel", `"count"`} {
 		if strings.Contains(w.Body.String(), limit) {
@@ -264,14 +273,17 @@ func TestUsageSplitSkillReadsAdviceWithoutKey(t *testing.T) {
 		t.Fatalf("advise.sh failed: %v\n%s", err, stderr)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 6 || lines[5] != "warning: deepseek-4.1 unavailable: model_not_available" || !strings.HasPrefix(lines[0], "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome | reuse until ") {
+	if len(lines) != 8 || lines[7] != "warning: deepseek-4.1 unavailable: model_not_available" || !strings.HasPrefix(lines[0], "room for ~") || !strings.Contains(lines[0], "more agents across all orchestrators (0 working now); start at most that many | reuse until ") {
 		t.Fatalf("advice = %q", out)
 	}
 	if !strings.HasPrefix(lines[1], "claude weekly, all 2 accounts as one: ") || lines[2] != "claude accounts: 60% left, resets in 9h; 50% left, resets in 3d23h" {
 		t.Fatalf("allowance lines = %q", lines[1:3])
 	}
-	if !strings.HasPrefix(lines[3], "claude-opus-5-5 effort=xhigh mode=fast | ~") || !strings.Contains(lines[3], " subagent tasks of allowance that expires unused; use within 9h | claude-code: opus") || lines[4] != "gpt-6.1-sol effort=high mode=standard | budget unknown | codex: gpt-6.1-sol, opencode: gpt-6.1-sol" {
-		t.Fatalf("subagent lines = %q", lines[3:])
+	if !strings.HasPrefix(lines[3], "claude fleet: 0 agents working, recent 0.0%/h of one account; target ") {
+		t.Fatalf("fleet line = %q", lines[3])
+	}
+	if !strings.HasPrefix(lines[4], "claude-opus-5-5 effort=xhigh mode=standard | extra high, step 2 of 3 | room for ~") || !strings.HasSuffix(lines[4], " | claude-code: opus, opencode: claude-opus-5-5") || lines[5] != "gpt-6.1-sol effort=medium mode=standard | medium, step 1 of 4 | budget unknown | codex: gpt-6.1-sol, opencode: gpt-6.1-sol" || lines[6] != "agents working (last 10m): none" {
+		t.Fatalf("subagent lines = %q", lines[4:])
 	}
 	if strings.Contains(strings.ToLower(out), "fable") {
 		t.Fatalf("fable advised: %s", out)

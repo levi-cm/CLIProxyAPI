@@ -4,26 +4,28 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-)
 
-var postureText = map[string]string{
-	PostureSpendFreely: "spend freely: allowance would expire unused, so many parallel subagents and fast mode are welcome",
-	PostureNormal:      "normal: use as many subagents as the work needs",
-	PostureConserve:    "conserve: quota is short before reset; few subagents, low effort",
-	PostureUnavailable: "unavailable: start no new subagents",
-}
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
+)
 
 // Text renders the advice as a few short lines for agents with small
 // context budgets. It carries everything an orchestrator needs to act.
 func (a Advice) Text() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s | reuse until %s (%s)\n", postureText[a.Posture], a.ValidUntil.UTC().Format(time.RFC3339), a.RefreshReason)
+	fmt.Fprintf(&b, "%s | reuse until %s (%s)\n", postureLine(a), a.ValidUntil.UTC().Format(time.RFC3339), a.RefreshReason)
 	for _, p := range a.Providers {
 		if line := allowanceText(p, a.GeneratedAt); line != "" {
 			fmt.Fprintln(&b, line)
+		}
+		if p.Fleet != nil {
+			fmt.Fprintln(&b, fleetText(p.Provider, *p.Fleet))
+		}
+		if p.OpenCode != nil {
+			if line := openCodeText(*p.OpenCode, a.GeneratedAt); line != "" {
+				fmt.Fprintln(&b, line)
+			}
 		}
 	}
 	for _, m := range a.Models {
@@ -36,12 +38,155 @@ func (a Advice) Text() string {
 		for _, name := range names {
 			hints = append(hints, name+": "+m.Harnesses[name])
 		}
-		fmt.Fprintf(&b, "%s effort=%s mode=%s | %s | %s\n", m.Model, m.ReasoningEffort, m.Mode, budgetText(m, a.GeneratedAt), strings.Join(hints, ", "))
+		fmt.Fprintf(&b, "%s effort=%s mode=%s | %s | %s | %s\n", m.Model, m.ReasoningEffort, m.Mode, stepText(m), roomText(m), strings.Join(hints, ", "))
+	}
+	if line := agentsText(a.Fleet); line != "" {
+		fmt.Fprintln(&b, line)
 	}
 	for _, w := range a.Warnings {
 		fmt.Fprintf(&b, "warning: %s\n", w)
 	}
 	return b.String()
+}
+
+// postureLine is the first line: what every orchestrator should do now.
+func postureLine(a Advice) string {
+	working := a.Fleet.Agents
+	switch a.Posture {
+	case PostureRoom:
+		return fmt.Sprintf("room for ~%d more %s across all orchestrators (%d working now); start at most that many", a.RoomAgents, plural(a.RoomAgents, "agent"), working)
+	case PostureHold:
+		return fmt.Sprintf("hold: %d %s working already use the target rate; start no new agents", working, plural(working, "agent"))
+	case PostureConserve:
+		return fmt.Sprintf("conserve: quota runs out before it resets at this rate; start no new agents, lowest effort (%d working now)", working)
+	case PostureUnknown:
+		return fmt.Sprintf("budget unknown: no quota telemetry; start few agents (%d working now)", working)
+	}
+	return "unavailable: start no new subagents"
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
+// effortName is the human name of an effort; the machine value stays in
+// effort= because harnesses take it as is.
+func effortName(effort string) string {
+	if effort == "xhigh" {
+		return "extra high"
+	}
+	return effort
+}
+
+func stepText(m ModelAdvice) string {
+	text := effortName(m.ReasoningEffort)
+	if m.Mode != ModeStandard {
+		text += " + " + m.Mode
+	}
+	if m.Steps > 1 {
+		text += fmt.Sprintf(", step %d of %d", m.Step, m.Steps)
+	}
+	return text
+}
+
+func roomText(m ModelAdvice) string {
+	switch {
+	case m.Basis == KindHold:
+		return "hold: no new agents"
+	case m.Basis == KindConserve:
+		return "conserve: no new agents"
+	case m.RoomAgents == nil:
+		if strings.Contains(m.Reason, "usage tracker") {
+			return "room unknown (quota per tracker above)"
+		}
+		return "budget unknown"
+	}
+	return fmt.Sprintf("room for ~%d more", *m.RoomAgents)
+}
+
+// fleetText compares the pool's recent use with its target rate.
+func fleetText(provider string, r FleetRate) string {
+	line := fmt.Sprintf("%s fleet: %d %s working, recent %s/h", provider, r.Agents, plural(r.Agents, "agent"), rate(r.RecentPercentPerHour))
+	if r.RecentBasis == "estimated" {
+		line += " (estimated)"
+	}
+	line += fmt.Sprintf(" of one account; target %s/h (%.0f%% of the %s/h that uses every account by its reset", rate(r.TargetPercentPerHour), fraction(r), rate(r.NeedPercentPerHour))
+	if r.CreditsPercentPerHour > 0 {
+		line += fmt.Sprintf(", incl. %s/h of credits", rate(r.CreditsPercentPerHour))
+	}
+	line += fmt.Sprintf("); ~%s/h per agent", rate(r.PerAgentPercentPerHour))
+	switch r.PerAgentBasis {
+	case PerAgentTaskEstimate:
+		line += " (estimated from task size)"
+	case PerAgentLastMeasured:
+		line += " (last measured)"
+	}
+	switch r.State {
+	case RateRoom:
+		line += fmt.Sprintf(" -> room for ~%d more", r.RoomAgents)
+	case RateHold:
+		line += " -> hold"
+	default:
+		line += " -> conserve"
+	}
+	if r.TimeSensitive {
+		line += fmt.Sprintf("; %.0f%% of one account expires unused within a day even at the target", r.ExpiringSoonPercent)
+	}
+	return line
+}
+
+func fraction(r FleetRate) float64 {
+	if r.NeedPercentPerHour <= 0 {
+		return 0
+	}
+	return r.TargetPercentPerHour / r.NeedPercentPerHour * 100
+}
+
+func rate(v float64) string {
+	if v != 0 && math.Abs(v) < 0.1 {
+		return fmt.Sprintf("%.2f%%", v)
+	}
+	return fmt.Sprintf("%.1f%%", v)
+}
+
+// openCodeText shows OpenCode Go's windows, or when to come back.
+func openCodeText(u OpenCodeUsage, now time.Time) string {
+	if !u.Reachable {
+		return ""
+	}
+	if u.AvoidUntil != nil {
+		return "OpenCode Go: avoid until " + u.AvoidUntil.UTC().Format("Jan 2 15:04 MST") + " (" + u.AvoidWhy + ")"
+	}
+	parts := make([]string, 0, len(u.Windows))
+	for _, w := range u.Windows {
+		part := fmt.Sprintf("%s %.0f%% left", w.Window, w.LeftPercent)
+		if w.ResetAt != nil {
+			part += ", resets in " + roughDuration(w.ResetAt.Sub(now))
+		}
+		if !w.Fresh {
+			part += " (stale)"
+		}
+		parts = append(parts, part)
+	}
+	return "OpenCode Go: " + strings.Join(parts, "; ")
+}
+
+// agentsText lists who is working, by provider and client device.
+func agentsText(s fleetactivity.Snapshot) string {
+	if s.Agents == 0 {
+		return fmt.Sprintf("agents working (last %s): none", roughDuration(time.Duration(s.WindowSeconds)*time.Second))
+	}
+	var providers, devices []string
+	for _, name := range fleetactivity.SortedNames(s.Providers) {
+		providers = append(providers, fmt.Sprintf("%s %d", name, s.Providers[name].Agents))
+	}
+	for _, name := range fleetactivity.SortedNames(s.Devices) {
+		devices = append(devices, fmt.Sprintf("%s %d", name, s.Devices[name].Agents))
+	}
+	return fmt.Sprintf("agents working (last %s): %d (%d requests in flight); %s; devices %s", roughDuration(time.Duration(s.WindowSeconds)*time.Second), s.Agents, s.InFlight, strings.Join(providers, ", "), strings.Join(devices, ", "))
 }
 
 // allowanceText summarizes a provider's weekly or monthly allowances: first
@@ -118,43 +263,6 @@ func roughCredits(v float64) string {
 		return strings.TrimSuffix(fmt.Sprintf("%.1f", v/1000), ".0") + "k"
 	}
 	return fmt.Sprintf("%.0f", v)
-}
-
-func budgetText(m ModelAdvice, now time.Time) string {
-	if m.BudgetTasks == nil {
-		if m.Basis == KindConserve {
-			return "budget unknown (paid credits)"
-		}
-		return "budget unknown"
-	}
-	text := fmt.Sprintf("~%s subagent tasks", roughCount(*m.BudgetTasks))
-	if m.IncludesCredits {
-		if m.BudgetUntil != nil {
-			return text + " of expiring allowance (use within " + roughDuration(m.BudgetUntil.Sub(now)) + ") and credits above the floors"
-		}
-		return text + " of credits above the floors"
-	}
-	if m.BudgetUntil != nil {
-		in := roughDuration(m.BudgetUntil.Sub(now))
-		switch m.Basis {
-		case KindSurplus:
-			text += " of allowance that expires unused; use within " + in
-		case KindConserve:
-			text += " until the next refill in " + in
-		default:
-			text += " before the allowance resets in " + in
-		}
-	}
-	return text
-}
-
-// roughCount keeps two significant digits so budgets read as estimates.
-func roughCount(n int) string {
-	if n < 100 {
-		return strconv.Itoa(n)
-	}
-	scale := int(math.Pow(10, math.Floor(math.Log10(float64(n)))-1))
-	return strconv.Itoa(n / scale * scale)
 }
 
 func roughDuration(d time.Duration) string {

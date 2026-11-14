@@ -3,8 +3,11 @@ package subagentadvice
 import (
 	"context"
 	"math"
+	"net/http"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 const (
@@ -15,19 +18,73 @@ const (
 )
 
 // Service computes subagent advice from live inventory. Its only state is the
-// recent quota samples used to measure usage pace; it reserves nothing.
+// recent quota samples used to measure usage pace and the last OpenCode Go
+// tracker reading; it reserves nothing.
 type Service struct {
-	mu      sync.Mutex
-	compute sync.Mutex // one inventory collection at a time bounds keyless load
-	cfg     Config
-	source  InventorySource
-	now     func() time.Time
-	samples map[string][]Sample
+	mu       sync.Mutex
+	compute  sync.Mutex // one inventory collection at a time bounds keyless load
+	cfg      Config
+	source   InventorySource
+	now      func() time.Time
+	samples  map[string][]Sample
+	activity *fleetactivity.Tracker
+	openCode openCodeReading
+	client   *http.Client
+	fetching sync.Mutex // one tracker fetch at a time
+	// perAgent remembers each provider's last measured per-agent rate, the
+	// fallback while the fleet is idle.
+	perAgent map[string]measuredRate
 }
 
-// New creates a service. cfg is resolved over the defaults.
+type measuredRate struct {
+	rate float64
+	at   time.Time
+}
+
+// perAgentMemory is how long a measured per-agent rate stays a fallback.
+const perAgentMemory = 24 * time.Hour
+
+// New creates a service. cfg is resolved over the defaults. Fleet activity
+// comes from the process-wide tracker.
 func New(cfg Config, source InventorySource) *Service {
-	return &Service{cfg: cfg.Resolve(), source: source, now: time.Now, samples: map[string][]Sample{}}
+	return &Service{cfg: cfg.Resolve(), source: source, now: time.Now, samples: map[string][]Sample{}, activity: fleetactivity.Default(), client: &http.Client{}, perAgent: map[string]measuredRate{}}
+}
+
+// SetActivity replaces the fleet activity tracker (tests).
+func (s *Service) SetActivity(t *fleetactivity.Tracker) {
+	s.mu.Lock()
+	s.activity = t
+	s.mu.Unlock()
+}
+
+// SetHTTPClient replaces the client used for the OpenCode Go tracker (tests).
+func (s *Service) SetHTTPClient(c *http.Client) {
+	s.mu.Lock()
+	s.client = c
+	s.mu.Unlock()
+}
+
+// SampleOpenCode refreshes the OpenCode Go reading from the usage tracker. It
+// returns at once when a fetch is already running or no URL is configured.
+func (s *Service) SampleOpenCode(ctx context.Context) error {
+	s.mu.Lock()
+	url, client := s.cfg.OpenCodeUsageURL, s.client
+	s.mu.Unlock()
+	if url == "" || !s.fetching.TryLock() {
+		return nil
+	}
+	defer s.fetching.Unlock()
+	s.mu.Lock()
+	now := s.now().UTC()
+	s.mu.Unlock()
+	reading, err := fetchOpenCode(ctx, client, url, now)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.openCode = reading
+	s.mu.Unlock()
+	return nil
 }
 
 // SetConfig applies a reloaded configuration.
@@ -117,6 +174,36 @@ func (s *Service) prepare(ctx context.Context) (*forecaster, Inventory, error) {
 	return newForecaster(s.cfg, now, inv, s.samplesCopyLocked()), inv, nil
 }
 
+func (s *Service) lastPerAgent(now time.Time) map[string]float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]float64{}
+	for provider, m := range s.perAgent {
+		if now.Sub(m.at) <= perAgentMemory {
+			out[provider] = m.rate
+		}
+	}
+	return out
+}
+
+func (s *Service) rememberPerAgent(d decision, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for provider, r := range d.rates {
+		if r != nil && r.perAgentBasis == PerAgentMeasured {
+			s.perAgent[provider] = measuredRate{rate: r.perAgent, at: now}
+		}
+	}
+}
+
+// fleetState returns the current fleet activity and OpenCode Go usage.
+func (s *Service) fleetState(f *forecaster) (fleetactivity.Snapshot, *OpenCodeUsage) {
+	s.mu.Lock()
+	activity, reading := s.activity, s.openCode
+	s.mu.Unlock()
+	return activity.Snapshot(time.Duration(f.cfg.AgentWindowSeconds) * time.Second), openCodeUsage(f.cfg, reading, f.now)
+}
+
 // Sample records quota observations so usage pace is measurable between requests.
 func (s *Service) Sample(ctx context.Context) error {
 	s.compute.Lock()
@@ -141,19 +228,23 @@ func (s *Service) Advise(ctx context.Context, req Request) (Advice, error) {
 	if err != nil {
 		return Advice{}, err
 	}
-	d := decide(f, req)
+	activity, openCode := s.fleetState(f)
+	d := decide(f, req, activity, openCode, s.lastPerAgent(f.now))
+	s.rememberPerAgent(d, f.now)
 	refresh, reason := refreshAfter(f, d)
 	out := Advice{
 		Schema:        Schema,
 		SchemaVersion: SchemaVersion,
 		Status:        d.status,
 		Posture:       d.posture,
+		RoomAgents:    d.room,
+		Fleet:         d.activity,
 		GeneratedAt:   f.now,
 		Models:        []ModelAdvice{},
 		Summary:       d.summary,
 		Warnings:      append([]string{}, d.warnings...),
 		Freshness:     f.freshness(inv),
-		Providers:     f.providerSummaries(),
+		Providers:     d.providerSummaries(f),
 	}
 	for _, c := range d.choices {
 		out.Models = append(out.Models, modelAdvice(c))
@@ -181,69 +272,61 @@ func modelAdvice(c modelChoice) ModelAdvice {
 		Capability:       c.offer.cap.Name,
 		Provider:         c.offer.provider,
 		Model:            c.offer.model,
-		ReasoningEffort:  c.effort,
-		Mode:             c.mode,
+		ReasoningEffort:  c.effort(),
+		Mode:             c.mode(),
 		Basis:            c.kind,
+		Step:             c.step + 1,
+		Steps:            len(c.offer.ladder),
 		Harnesses:        harnesses,
 		CapabilitySource: c.offer.capabilitySource,
 		Reason:           c.reason,
-		IncludesCredits:  c.credits,
 	}
-	if c.budget >= 0 {
-		tasks := int(math.Min(c.budget, math.MaxInt32))
-		m.BudgetTasks = &tasks
-	}
-	if !c.until.IsZero() {
-		until := c.until
-		m.BudgetUntil = &until
+	if c.room >= 0 && c.kind != KindUnmetered {
+		room := c.room
+		m.RoomAgents = &room
 	}
 	return m
 }
 
-// Refresh intervals by situation, clamped to the configured bounds.
-const (
-	surplusRefresh = 15 * time.Minute
-	cautionRefresh = 10 * time.Minute
-)
+// providerSummaries adds each pool's fleet rate and the OpenCode Go usage to
+// the forecaster's provider summaries.
+func (d decision) providerSummaries(f *forecaster) []ProviderSummary {
+	out := f.providerSummaries()
+	for i := range out {
+		if r := d.rates[out[i].Provider]; r != nil {
+			out[i].Fleet = r.view()
+		}
+		if out[i].Provider == OpenCodeProvider {
+			out[i].OpenCode = d.openCode
+		}
+	}
+	return out
+}
 
-// refreshAfter picks how long the advice stays good. Advice only changes when
-// quota moves meaningfully or a known event happens, so comfortable pools are
-// re-checked rarely and the next reset or recovery always ends the interval.
+func (r *fleetRate) view() *FleetRate {
+	return &FleetRate{
+		State: r.state, Accounts: r.accounts,
+		NeedPercentPerHour: round(r.need, 3), CreditsPercentPerHour: round(r.needCredits, 3), TargetPercentPerHour: round(r.target, 3),
+		RecentPercentPerHour: round(r.recent, 3), RecentBasis: r.recentBasis, Agents: r.agents,
+		PerAgentPercentPerHour: round(r.perAgent, 3), PerAgentBasis: r.perAgentBasis, RoomAgents: r.room,
+		ExpiringSoonPercent: round(r.expiring, 1), TimeSensitive: r.timeSensitive,
+	}
+}
+
+// refreshAfter is the reuse window: advice describes a shared, moving fleet,
+// so every orchestrator asks again after reuse-seconds, sooner when a known
+// event (a reset or recovery) changes the answer first.
 func refreshAfter(f *forecaster, d decision) (time.Duration, string) {
 	minWait := time.Duration(f.cfg.MinRefreshSeconds) * time.Second
 	maxWait := time.Duration(f.cfg.MaxRefreshSeconds) * time.Second
-	wait, reason := maxWait, "quota is comfortable and nothing is due to change soon"
+	wait, reason := time.Duration(f.cfg.ReuseSeconds)*time.Second, "the fleet moves; ask again after the reuse window"
 	consider := func(candidate time.Duration, why string) {
 		if candidate < wait {
 			wait, reason = candidate, why
 		}
 	}
-	kinds := map[string]bool{}
-	stale := false
-	for _, c := range d.choices {
-		kinds[c.kind] = true
-		stale = stale || c.stale
-	}
-	if d.status == StatusUnavailable {
-		reason = "nothing is available and no recovery time is known"
-		if !d.retryAfter.IsZero() {
-			reason = "nothing is available; the earliest recovery is further out"
-			consider(d.retryAfter.Sub(f.now), "nothing is available until the earliest account recovers")
-		}
-	}
-	if kinds[KindSurplus] {
-		consider(surplusRefresh, "spending allowance that would otherwise expire; the budget shrinks as it is used")
-	}
-	// With nothing to run, only a recovery or reset can change the answer.
-	tight := kinds[KindConserve]
-	for _, p := range f.pools {
-		tight = tight || (len(d.choices) > 0 && p.demandKnown && p.shortfallBase > 0)
-	}
-	if tight {
-		consider(cautionRefresh, "capacity is tight before the next refill")
-	}
-	if stale {
-		consider(cautionRefresh, "advice relies on stale quota observations")
+	if d.status == StatusUnavailable && !d.retryAfter.IsZero() {
+		consider(d.retryAfter.Sub(f.now), "nothing is available until the earliest account recovers")
 	}
 	if at, why := f.nextChange(); !at.IsZero() {
 		consider(at.Sub(f.now), why)

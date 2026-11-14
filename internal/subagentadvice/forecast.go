@@ -50,6 +50,10 @@ type accountState struct {
 	paceKnown      bool
 	paceBasis      string
 	paceConfidence float64
+	// recent is the consumption over the short pace span (3h), the fleet's
+	// actual rate now, in percentage points per hour.
+	recent      float64
+	recentBasis string
 
 	inFlightUnits  float64
 	remainingUnits float64
@@ -284,6 +288,9 @@ func (f *forecaster) estimatePace(st *accountState) {
 		current := Sample{At: st.long.ObservedAt, UsedPercent: st.used, ResetAt: st.long.ResetAt}
 		long, longSpan, okLong := paceFrom(samples, current, f.now, paceLongSpan)
 		short, _, okShort := paceFrom(samples, current, f.now, paceShortSpan)
+		if okShort {
+			st.recent, st.recentBasis = short, PaceObserved
+		}
 		if okLong || okShort {
 			st.pace = math.Max(long, short)
 			st.paceKnown, st.paceBasis = true, PaceObserved
@@ -293,11 +300,16 @@ func (f *forecaster) estimatePace(st *accountState) {
 			}
 		}
 	}
-	if !st.paceKnown && st.capacityKnown && st.acct.Usage != nil {
+	if st.capacityKnown && st.acct.Usage != nil {
 		perHour24 := f.usageCost(st.acct.Provider, st.acct.Usage.Last24h) / 24
 		perHour3 := f.usageCost(st.acct.Provider, st.acct.Usage.Last3h) / 3
-		st.pace = math.Max(perHour24, perHour3) / st.capacity * 100
-		st.paceKnown, st.paceBasis, st.paceConfidence = true, PaceLedger, 0.5
+		if st.recentBasis == "" {
+			st.recent, st.recentBasis = perHour3/st.capacity*100, PaceLedger
+		}
+		if !st.paceKnown {
+			st.pace = math.Max(perHour24, perHour3) / st.capacity * 100
+			st.paceKnown, st.paceBasis, st.paceConfidence = true, PaceLedger, 0.5
+		}
 	}
 	if st.paceKnown && st.stale {
 		st.paceConfidence *= 0.5
@@ -570,28 +582,6 @@ func (f *forecaster) simulate(p *poolState, extra map[string]float64) simResult 
 		}
 	}
 	return simResult{firstWaste: waste, waste: total, shortfall: shortfall}
-}
-
-// fits reports whether extra spend keeps the pool able to serve forecast
-// demand until resets, and respects operator reserves.
-func (f *forecaster) fits(provider string, extra map[string]float64) bool {
-	p := f.pools[provider]
-	if p == nil {
-		return true
-	}
-	for _, st := range p.accounts {
-		spend := extra[st.acct.ID]
-		if spend <= 0 {
-			continue
-		}
-		if st.remainingUnits-spend < st.reserveUnits(f.cfg, p.demandKnown) {
-			return false
-		}
-	}
-	if !p.demandKnown {
-		return true
-	}
-	return f.simulate(p, extra).shortfall <= p.shortfallBase+1e-9
 }
 
 func clamp(v, lo, hi float64) float64 {

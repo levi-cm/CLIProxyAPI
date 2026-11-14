@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -33,6 +34,9 @@ type policyRequestLease struct {
 	refreshPending  bool
 	clientKey       policyClientKey
 	clientSelection policyClientSelection
+	// activity feeds the fleet-wide agent count for subagent advice; it is
+	// independent of the per-account ActiveRequests accounting.
+	activity *fleetactivity.Request
 }
 
 type policyRequestDemand struct {
@@ -145,12 +149,39 @@ func finishPolicyAttempt(opts cliproxyexecutor.Options) {
 	}
 }
 
-func beginPolicyAttempt(ctx context.Context, opts cliproxyexecutor.Options, authID string) error {
+func beginPolicyAttempt(ctx context.Context, opts cliproxyexecutor.Options, authID, provider string) error {
 	if lease, ok := opts.Metadata[policyRequestLeaseMetadataKey].(*policyRequestLease); ok {
 		lease.selectAuth(authID)
+		lease.mu.Lock()
+		activity := lease.activity
+		lease.mu.Unlock()
+		activity.Provider(provider)
 		return ctx.Err()
 	}
 	return nil
+}
+
+// trackActivity counts the request in the fleet activity tracker under the
+// session the harness sent (or the derived conversation identity) and the
+// caller's irreversible scope. Call it after session enrichment.
+func (l *policyRequestLease) trackActivity(opts cliproxyexecutor.Options) {
+	if l == nil {
+		return
+	}
+	caller, _ := opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey].(string)
+	sessionID, _ := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if sessionID == "" {
+		sessionID, _ = opts.Metadata[cliproxyexecutor.DerivedSessionIDMetadataKey].(string)
+	}
+	activity := fleetactivity.Default().Begin(caller, sessionID)
+	l.mu.Lock()
+	if l.released || l.activity != nil {
+		l.mu.Unlock()
+		activity.End()
+		return
+	}
+	l.activity = activity
+	l.mu.Unlock()
 }
 
 func (l *policyRequestLease) release() {
@@ -170,6 +201,7 @@ func (l *policyRequestLease) release() {
 		return
 	}
 	l.released = true
+	l.activity.End()
 	refreshPending = l.refreshPending
 	refreshID = l.authID
 	l.manager.policyRuntimeMu.Lock()

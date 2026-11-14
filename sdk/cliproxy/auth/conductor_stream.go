@@ -426,7 +426,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errBudget
 			}
 		}
-		if errLease := beginPolicyAttempt(ctx, opts, auth.ID); errLease != nil {
+		if errLease := beginPolicyAttempt(ctx, opts, auth.ID, auth.Provider); errLease != nil {
 			return nil, errLease
 		}
 		ctx = newUpstreamAttemptContext(ctx)

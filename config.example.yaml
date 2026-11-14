@@ -59,17 +59,27 @@ account-policy:
 # figures are estimates for forecasting, not billing.
 # subagent-advisor:
 #   enabled: true
-#   min-refresh-seconds: 120      # advice validity bounds; within them the interval
-#   max-refresh-seconds: 3600     # follows the situation and the next reset or recovery
+#   min-refresh-seconds: 120      # bounds for how long advice is reused
+#   max-refresh-seconds: 3600
+#   reuse-seconds: 300            # orchestrators reuse advice this long (sooner at a reset)
+#   agent-window-seconds: 600     # a session that sent a request this recently is working
+#   target-fraction: 0.8          # fleet target = this x the rate that uses every account by its reset
+#   step-up-one-below: 0.6        # climb the effort ladder one step below this share of the target
+#   step-up-two-below: 0.3        # and two steps below this one
+#   fast-horizon-hours: 24        # fast/priority only when allowance resetting this soon
+#   fast-min-percent: 50          # would still expire unused at the target by more than this
+#   task-minutes: 30              # per-task estimate -> per-agent rate when nothing is measured
+#   opencode-go-usage-url: ""     # usage tracker JSON (opencode.windows[]); empty = unknown
+#   opencode-go-avoid-percent: 5  # avoid OpenCode Go while a fresh window has this little left
 #   never-advise: ["claude-fable-*"]  # model globs never recommended; [] allows all
 #   task-input-tokens: 300000     # estimated total input of one subagent task
 #   task-output-tokens: 40000     # estimated total output at high effort
-#   surplus-horizon-hours: 72     # only resets within this horizon count as surplus
+#   surplus-horizon-hours: 192    # resets within this horizon count; credits spread over it
 #   safety-factor: 1.25           # multiplies forecast demand for continuity checks
 #   reserve-percent: 5            # per-account floor when usage pace is unknown
 #   stale-after-seconds: 900      # older quota observations lower confidence
 #   expired-after-seconds: 21600  # older observations are not used as quota
-#   short-window-caution-percent: 85  # no surplus/fast advice above this 5h usage
+#   short-window-caution-percent: 85  # no fast/priority advice above this 5h usage
 #   short-window-block-percent: 97
 #   fast-mode: auto               # or off
 #   providers:
@@ -78,9 +88,10 @@ account-policy:
 #     opencode-go: {}
 #   account-capacity-units: {}    # credential ID -> capacity override
 #   models:                       # preference order; replaces the default list when set
-#     - {name: claude-opus-5.5, match: [claude-opus-5-5], provider: claude, efforts: [xhigh], modes: [standard, fast], price: {input: 4, output: 20, cache-read: 0.2}, harnesses: {claude-code: opus, opencode: ""}}
-#     - {name: gpt-6.1-sol, match: [gpt-6.1-sol], provider: codex, efforts: [high, xhigh], default-effort: high, modes: [standard, priority], harnesses: {codex: "", opencode: ""}}
-#     - {name: deepseek-4.1, match: ["opencode-go/deepseek-v4.1*", "deepseek-v4.1*"], provider: opencode-go, efforts: [high, max], harnesses: {opencode: ""}}
+#     # ladder: cheapest step first; advice starts there and climbs only with slack
+#     - {name: claude-opus-5.5, match: [claude-opus-5-5], provider: claude, ladder: [{effort: high}, {effort: xhigh}, {effort: xhigh, mode: fast}], price: {input: 4, output: 20, cache-read: 0.2}, harnesses: {claude-code: opus, opencode: ""}}
+#     - {name: gpt-6.1-sol, match: [gpt-6.1-sol], provider: codex, ladder: [{effort: medium}, {effort: high}, {effort: xhigh}, {effort: xhigh, mode: priority}], harnesses: {codex: "", opencode: ""}}
+#     - {name: deepseek-4.1, match: ["opencode-go/deepseek-v4.1*", "deepseek-v4.1*"], provider: opencode-go, ladder: [{effort: high}], harnesses: {opencode: ""}}
 #   # A harness model of "" means the resolved CLIProxyAPI model ID.
 
 # Optional model catalog sources: http(s) URLs or absolute local file paths.

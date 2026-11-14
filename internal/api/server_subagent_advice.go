@@ -556,6 +556,13 @@ func (s *Server) startSubagentSampler() {
 				if err := s.subagentAdvisor.Sample(ctx); err != nil {
 					log.WithField("component", "subagent-advisor").Debug("quota sample skipped")
 				}
+				// The tracker fetch has no timeout, so it runs on its own; a
+				// hung fetch only lets the OpenCode Go reading go stale.
+				go func() {
+					if err := s.subagentAdvisor.SampleOpenCode(ctx); err != nil {
+						log.WithField("component", "subagent-advisor").WithError(err).Debug("opencode go usage sample skipped")
+					}
+				}()
 			}
 			sample()
 			ticker := time.NewTicker(subagentSampleInterval)
