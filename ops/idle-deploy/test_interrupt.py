@@ -31,7 +31,7 @@ class Control:
 def release_dir(tmp):
     d=Path(tmp);(d/'config.yaml').write_text('fixture: true\n')
     for name in ('.env','env.before'):(d/name).write_text('CLI_PROXY_IMAGE=old\n')
-    atomic(d/'rehearsal.json',{'complete_cycles':{'cycles':[]}})
+    atomic(d/'rehearsal.json',{'complete_cycles':{'cycles':[]},'compose_path':{'candidate_running':True}})
     state=d/'state';(state/'history').mkdir(parents=True)
     for name in ('owner.lock','history/writer.lock','redemption.lock'):(state/name).touch()
     atomic(state/'conversation-bindings.json',{'records':[]})

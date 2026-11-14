@@ -10,6 +10,58 @@ allows a short interruption; it does not make the existing router capable of a
 zero-downtime listener handoff. Existing requests, SSE streams and WebSocket
 connections must finish before the serving writer can stop.
 
+## Never cut over by hand
+
+On 2026-11-14 a manual `docker compose up -d --no-deps cli-proxy-api` recreated
+the router and left it in State `created` (exit 0, nothing listening on 8317)
+for about 20 minutes. Cause: earlier cutovers left the retired original
+(`cli-proxy-api-rollback-TOKEN`) with the live compose labels; compose treated it
+as an extra replica, removed it, recreated the service container and skipped the
+start. Every agent routes its model traffic through this proxy, so the agent that
+ran the command lost its connection and nobody rolled back.
+
+Rules that follow from it:
+
+- Every cutover goes through this runner. Never run `docker compose up`,
+  `restart`, `stop` or `rm` against the production service for a deploy.
+- The runner is a detached systemd unit with an independent watchdog. It never
+  depends on the launching agent, which will lose its connection mid-cutover.
+- After switching, the runner starts the container and requires, within about
+  60 seconds after admission reopens, State `running`, `/healthz` 200 and an
+  authenticated `/v1/models` 200 through the host port (plus commit and refill
+  guards). Otherwise it restores the previous `.env` pin, `config.yaml` and image,
+  starts that, verifies it the same way and keeps retrying until it serves.
+- `status.json` in the report directory is the outcome: `deployed`,
+  `rolled_back`, `original_retained`, `restaging_required`, or the loud
+  `rolling_back` / `rollback_failed_retrying` with an `alert`.
+- No runner container that carries the production compose labels is left
+  behind: the retired original is removed after a verified deploy (its image is
+  the rollback handle), a failed candidate after a verified rollback.
+  Preparation removes stopped runner leftovers and refuses any other labelled
+  container; preflight blocks if one appears.
+
+## Compose-path dry run
+
+Preparation also renders the production compose files (`docker compose config`)
+under a separate project (`cliproxy-dryrun-TOKEN`) on a spare loopback port with
+a credential-free fixture (empty auths and policy state), and runs
+`docker compose up -d` original -> candidate -> original. Each step must exit 0,
+reach State `running` and serve `/healthz`, an authenticated `/v1/models` and the
+subagent-advice text and JSON within 60 seconds. A container left in `created`
+fails at once. A release without this proof cannot be deployed. To run it alone:
+
+```bash
+sudo -n python3 ops/idle-deploy/main.py compose-dryrun --image IMAGE [--config STAGED.yaml]
+```
+
+## Staged configuration
+
+`prepare --config PATH` (a file inside the project) pins a new `config.yaml`.
+Fixture rehearsals start the candidate on it and the original on the live bytes.
+During the cutover it is written in place (same inode) only after the old writer
+stopped and before the candidate starts; any rollback restores the exact previous
+bytes before the original restarts. An operator edit is never overwritten.
+
 ## Prepare, launch, inspect
 
 Run from this isolated checkout, with all artifacts inside the project:
@@ -176,7 +228,8 @@ and Codex verification. The old container must not use host networking.
 - All three writer locks must be free after the old process exits. Readiness
   requires the reviewed source, working authenticated models/history, writable
   authority and mandatory `auto_expiring` settings with the original expiry guard.
-- Config YAML, credentials, bindings and policy journals stay in place. Only the
+- Credentials, bindings and policy journals stay in place. Config YAML changes
+  only when a staged file was pinned during preparation (see above). The
   deployment image variable in `.env` changes in place after readiness. Rollback
   retains current durable state and never restores stale credential/journal copies.
 - Existing binding owners, credential files and raw-history identity/length are
@@ -219,9 +272,11 @@ interfaces and reviews sanitized protocol/ownership evidence. Its JSON verdict
 and private session log are retained.
 
 Failed or inconclusive extended verification is reported explicitly. It never
-causes an immediate restart after clients have been readmitted. The narrow
-pre-admission readiness failure path is the automatic rollback path; a later
-repair or rollback requires another safely drained release.
+causes an immediate restart after clients have been readmitted. Automatic
+rollback happens on any pre-admission readiness failure, and after readmission
+only when the bounded host check (State running, `/healthz`, authenticated
+`/v1/models`) fails for 60 seconds, which means clients are already failing.
+A later repair or rollback requires another safely drained release.
 
 ## Validation
 

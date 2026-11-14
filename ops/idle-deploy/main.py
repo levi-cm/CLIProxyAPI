@@ -136,6 +136,85 @@ def watch_status(idle,evidence,last_block=None,retire_idle_clients=False):
     return status
 
 
+ALERT=('PRODUCTION MAY BE DOWN: the automatic rollback to the previous image is not verified yet; '
+       'an independent systemd unit (cliproxy-idle-watchdog-*) keeps retrying it')
+FINAL=('deployed','rolled_back','original_retained','restaging_required')
+PRE_STOP=(None,'preflight','gating','checkpointed')
+
+
+def outcome(m,phase,**extra):
+    """status.json is the one file operators and agents read for the result."""
+    status={'phase':phase,'final':phase in FINAL,'updated_at':time.time()};status.update(extra)
+    publish(m,'status.json',status);return status
+
+
+def rollback_after(path,m,backend,reason,error,in_rescue):
+    """What serves after admission reopened failed host verification: roll back."""
+    detail=dict(failure_details(error),reason=reason)
+    backend.phase('recovering',post_admission_failure=detail)
+    outcome(m,'rolling_back',alert=ALERT,failure=detail)
+    # Inside the rescue unit, failing makes systemd run recover() again.
+    if in_rescue:raise RuntimeError(reason)
+    try:
+        backend.start_rescue();return False
+    except Exception:
+        pass
+    # No independent unit could be started: keep retrying the original here.
+    while True:
+        try:
+            backend.recover()
+            return settle(path,m,backend)
+        except Exception as retry:
+            outcome(m,'rollback_failed_retrying',alert=ALERT,failure=failure_details(retry))
+            try:backend.phase('recovering')
+            except Exception:pass
+            time.sleep(2)
+
+
+def cleanup(backend,identity,suffix):
+    """Remove a runner container; a cleanup error never hides the verified outcome."""
+    try:
+        removed=backend.remove_runner_container(identity,suffix)
+        return {'removed_runner_containers':[removed] if removed else [],'compose_leftovers':backend.leftovers()}
+    except Exception as error:
+        return {'cleanup_error':type(error).__name__+': '+str(error)[:200],'alert':'remove leftover runner containers before any compose operation'}
+
+
+def settle(path,m,backend,in_rescue=False):
+    """Bounded, verified end of one transaction. True only for a verified deployment.
+
+    After admission reopens, whatever serves must be running and answer /healthz and
+    an authenticated /v1/models through the host port within 60 seconds, or the
+    previous image, .env pin and config.yaml are restored and verified the same way.
+    No compose-labelled runner container is left behind."""
+    if m.get('fixture_repo'):return False
+    transaction=json.loads(backend.journal.read_text()) if backend.journal.exists() else {}
+    phase=transaction.get('phase')
+    if phase=='committed':
+        try:report=backend.host_verify()
+        except Exception as error:return rollback_after(path,m,backend,'deployed image failed host verification',error,in_rescue)
+        tidy=cleanup(backend,m['old_id'],'-rollback-')
+        transaction=json.loads(backend.journal.read_text());publish(m,'deployment.json',transaction)
+        outcome(m,'deployed',image=m['candidate_image_id'],commit=m['candidate_commit'],host_verification=report,
+                interruption_seconds=transaction.get('interruption_seconds'),config_staged=bool(m.get('config_after_sha256')),
+                rollback_image=m['old_image_id'],rollback_commit=m['old_commit'],**tidy)
+        return True
+    if phase=='rolled_back':
+        try:report=backend.host_verify(m['old_id'],m['old_commit'])
+        except Exception as error:return rollback_after(path,m,backend,'restored original failed host verification',error,in_rescue)
+        tidy=cleanup(backend,m['candidate_id'],'-failed-')
+        publish(m,'deployment.json',transaction)
+        outcome(m,'rolled_back',image=m['old_image_id'],commit=m['old_commit'],host_verification=report,
+                failure=transaction.get('last_failure') or transaction.get('post_admission_failure'),**tidy)
+        return False
+    if phase=='original_retained' or phase in PRE_STOP:
+        # Nothing was stopped: the original kept serving.
+        outcome(m,'original_retained',image=m['old_image_id'],transaction_phase=phase)
+        return False
+    outcome(m,'rollback_failed_retrying',alert=ALERT,transaction_phase=phase)
+    return False
+
+
 def watch(path,immediate=False):
     if os.geteuid()!=0:raise RuntimeError('root is required for namespace observation and admission exclusion')
     m=json.loads(path.read_text());lock=WATCHER_LOCK
@@ -158,7 +237,9 @@ def watch(path,immediate=False):
                     backend.release_redemption()
                     transaction=json.loads(backend.journal.read_text()) if backend.journal.exists() else {}
                     if transaction.get('phase')=='committed':
-                        backend.ungate();capture.close();publish(m,'deployment.json',transaction);codex_verify(path,m);return
+                        backend.ungate();capture.close();publish(m,'deployment.json',transaction)
+                        if settle(path,m,backend):codex_verify(path,m)
+                        return
                     last_block=failure_details(error)
                     publish(m,'failure.json',dict(last_block,transaction_phase=transaction.get('phase'),attempt=transaction.get('attempt')))
                     print(json.dumps({'deployment_blocked':last_block}),flush=True)
@@ -167,25 +248,37 @@ def watch(path,immediate=False):
                     publish(m,'status.json',status)
                     # If a transaction stopped the original, recovery ended the release.
                     if transaction.get('phase') in ('rolled_back','recovering') or (transaction.get('phase')=='original_retained' and not transaction.get('ungated_at')):
-                        publish(m,'deployment.json',transaction);return
+                        publish(m,'deployment.json',transaction);settle(path,m,backend);return
                     if last_block.get('requires_restage'):
-                        status['phase']='restaging_required';publish(m,'status.json',status);return
+                        status['phase']='restaging_required';status['final']=True;publish(m,'status.json',status);return
                     if inspect(m['old_id'])['State']['Pid']!=m['old_pid']:raise RuntimeError('original process changed; restaging required')
                     time.sleep(2);continue
                 capture.close();transaction=json.loads(backend.journal.read_text());publish(m,'deployment.json',transaction)
-                codex_verify(path,m);return
+                if settle(path,m,backend):codex_verify(path,m)
+                return
             publish(m,'status.json',{'phase':'expired','reason':'seven-day wait limit reached'})
         finally:capture.close()
 
 
 def rescue(path):
-    m=json.loads(path.read_text());backend=Backend(path)
+    m=json.loads(path.read_text())
+    try:_rescue(path,m)
+    except BaseException as error:
+        # Loud and durable; systemd restarts this unit (Restart=on-failure, no start limit).
+        try:outcome(m,'rollback_failed_retrying',alert=ALERT,failure=failure_details(error))
+        except Exception:pass
+        raise
+
+
+def _rescue(path,m):
+    backend=Backend(path)
     # Serialize the irreversible commit decision. A committed release is never
     # stopped by a watchdog, even if its timer raced admission reopening.
     with (path.parent/'commit.lock').open('a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         transaction=json.loads(backend.journal.read_text()) if backend.journal.exists() else {}
-        if transaction.get('phase') in TERMINAL_OUTCOMES:backend.ungate();return
+        if transaction.get('phase') in TERMINAL_OUTCOMES:
+            backend.ungate();settle(path,m,backend,in_rescue=True);return
         rescue_started=time.monotonic()
         (path.parent/'rescue-requested').touch(mode=0o600)
         unit=m.get('watcher_unit','cliproxy-idle-deploy-'+m['token'])
@@ -213,18 +306,23 @@ def rescue(path):
                 finally:
                     if host:host.close()
     publish(m,'deployment.json',json.loads(backend.journal.read_text()))
+    settle(path,m,backend,in_rescue=True)
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['prepare','launch','watch','rescue','probe','status','fixture-worker']);p.add_argument('--release');p.add_argument('--image');p.add_argument('--commit');p.add_argument('--all-interfaces',action='store_true');p.add_argument('--now',action='store_true',help='explicitly skip the five-minute delay, retaining drain and recovery gates');p.add_argument('--retire-idle-clients',action='store_true',help='pin idle socket retirement after five quiet minutes and zero active requests');p.add_argument('--outage-budget',type=int,default=40,help='seconds; above 40 (max 90) only the interrupting cutover can deploy the release');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['prepare','launch','watch','rescue','probe','status','fixture-worker','compose-dryrun']);p.add_argument('--config',help='staged config.yaml (inside the project) applied only while no writer runs; restored on rollback');p.add_argument('--release');p.add_argument('--image');p.add_argument('--commit');p.add_argument('--all-interfaces',action='store_true');p.add_argument('--now',action='store_true',help='explicitly skip the five-minute delay, retaining drain and recovery gates');p.add_argument('--retire-idle-clients',action='store_true',help='pin idle socket retirement after five quiet minutes and zero active requests');p.add_argument('--outage-budget',type=int,default=40,help='seconds; above 40 (max 90) only the interrupting cutover can deploy the release');a=p.parse_args()
     if a.outage_budget!=40 and a.command!='prepare':p.error('--outage-budget must be pinned during prepare')
     if a.retire_idle_clients and a.command!='prepare':p.error('--retire-idle-clients must be pinned during prepare')
     if a.now and a.command not in ('launch','watch'):p.error('--now is only valid with launch or watch')
+    if a.config and a.command not in ('prepare','compose-dryrun'):p.error('--config must be pinned during prepare')
     if a.command=='probe':print(json.dumps(probe(a.commit,a.all_interfaces)));return
+    if a.command=='compose-dryrun':
+        from prepare import compose_dryrun
+        print(json.dumps(compose_dryrun(a.image,a.config)));return
     if a.command=='prepare':
         from prepare import prepare
         from verify import before
-        path=prepare(a.image,a.commit,retire_idle_clients=a.retire_idle_clients,outage_budget=a.outage_budget);m=json.loads(path.read_text());proof=before(path.parent);publish(m,'continuity-preflight.json',proof)
+        path=prepare(a.image,a.commit,retire_idle_clients=a.retire_idle_clients,outage_budget=a.outage_budget,config=a.config);m=json.loads(path.read_text());proof=before(path.parent);publish(m,'continuity-preflight.json',proof)
         print(json.dumps({'release':str(path),'timing':m['timing'],'candidate_commit':m['candidate_commit']}));return
     path=release_path(a.release)
     if a.command=='fixture-worker':

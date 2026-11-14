@@ -7,6 +7,10 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Deployment
 - After verifying changes and receiving the user's explicit go-ahead, prepare and launch the automatic idle deployment using `ops/idle-deploy/README.md`. Keep the idle, active-request, state-preservation, and rollback safeguards enabled.
+- Every deploy is automatic through that runner. Never run a manual `docker compose up`/`restart` (or `stop`/`rm`) against production for a cutover. Config changes that ship with a deploy are staged with `prepare --config`.
+- The runner must start CLIProxy after the deploy and verify it within about 60s: State `running`, `/healthz` 200 and an authenticated `/v1/models` 200. On any failure it rolls back automatically (previous `.env` pin, `config.yaml` and image), verifies that the same way and keeps retrying until it serves. Read the outcome from its `status.json`; never print success without a passing check.
+- All agents route their model traffic through this proxy, so the launching agent will lose its connection during the cutover. The runner is a detached systemd unit with an independent watchdog and must never depend on the launching agent staying alive.
+- Dry runs must exercise the same compose path: the production compose files under a separate project and spare ports (`main.py compose-dryrun`, also part of `prepare`), proving the container reaches State `running` and serves.
 
 ## Commands
 ```bash

@@ -11,7 +11,7 @@ import subprocess
 import time
 import uuid
 
-from common import ROOT,LOCKS,activity,api,atomic,connections,digest,inspect,key,lock_available,owners,preserve_owners,prefix_digest,probe,run,writers
+from common import ROOT,LOCKS,activity,api,atomic,compose_leftovers,connections,digest,host_ready,inspect,key,lock_available,owners,preserve_owners,prefix_digest,probe,run,write_in_place,writers
 from core import validate_timing,TERMINAL_OUTCOMES,DeploymentBlocked
 from gates import Gates
 
@@ -100,12 +100,14 @@ class Backend:
         m=self.m;old=inspect(m['old_id']);candidate=inspect(m['candidate_id'])
         if not old['State']['Running'] or old['Name']!='/'+self.service or old['Image']!=m['old_image_id'] or old['State']['Pid']!=m['old_pid']:raise RuntimeError('serving container changed; restaging required')
         if candidate['State']['Running'] or candidate['Image']!=m['candidate_image_id']:raise RuntimeError('candidate identity/state changed')
+        self.check_compose(old)
         if any(digest(self.repo/n)!=m[n+'_sha256'] for n in ('config.yaml','.env')):raise DeploymentBlocked('configuration_changed',requires_restage=True)
         if digest(self.dir/'rehearsal.json')!=m['rehearsal_sha256']:raise DeploymentBlocked('rehearsal_changed',requires_restage=True)
         age=time.time()-m['prepared_at']
         if age>86400:raise DeploymentBlocked('rehearsal_expired',requires_restage=True,age_seconds=int(age))
         if any(digest(Path(__file__).parent/n)!=sha for n,sha in m['controller_files'].items()):raise DeploymentBlocked('controller_changed',requires_restage=True)
         if not json.loads((self.dir/'rehearsal.json').read_text()).get('complete_cycles'):raise RuntimeError('complete cutover/watchdog rehearsal missing')
+        if not json.loads((self.dir/'rehearsal.json').read_text()).get('compose_path',{}).get('candidate_running'):raise DeploymentBlocked('compose_path_rehearsal_missing',requires_restage=True)
         self.candidate_budget=validate_timing(**m['timing'])
         active=activity()
         if active!=0:raise DeploymentBlocked('active_requests',active_requests=active)
@@ -120,6 +122,13 @@ class Backend:
         self.reset_attempt()
         self.snapshot()
         self.phase('preflight')
+
+    def check_compose(self,old):
+        # Any other container with the serving compose labels (except our own
+        # stopped candidate) would make a later `docker compose up` exit 0
+        # without starting the router.
+        stale=[c['name'] for c in compose_leftovers(old) if c['id']!=self.m['candidate_id']]
+        if stale:raise DeploymentBlocked('stale_compose_containers',requires_restage=True,containers=stale)
 
     def reset_attempt(self):
         # A previous watchdog must be inactive before reusing this release's
@@ -141,7 +150,7 @@ class Backend:
         # A different systemd cgroup survives termination of the primary watcher.
         script=Path(__file__).parent/'main.py'
         try:
-            run(['systemd-run','--quiet','--collect','--unit',self.timer,'--on-active='+str(self.candidate_budget)+'s','--timer-property=AccuracySec=50ms','--timer-property=RandomizedDelaySec=0','--property=Restart=on-failure','--property=RestartSec=1','/usr/bin/python3',script,'rescue','--release',self.path],timeout=4)
+            run(['systemd-run','--quiet','--collect','--unit',self.timer,'--on-active='+str(self.candidate_budget)+'s','--timer-property=AccuracySec=50ms','--timer-property=RandomizedDelaySec=0','--property=Restart=on-failure','--property=RestartSec=1','--property=StartLimitIntervalSec=0','/usr/bin/python3',script,'rescue','--release',self.path],timeout=4)
         except BaseException:
             self.release_redemption();raise
 
@@ -211,7 +220,20 @@ class Backend:
         if old['State']['Running'] or candidate['State']['Running']:raise RuntimeError('writer fence failed')
         run(['docker','rename',self.m['old_id'],self.service+'-rollback-'+self.token],timeout=2)
         run(['docker','rename',self.m['candidate_id'],self.service],timeout=2)
+        self.apply_config()
         self.phase('starting_candidate');run(['docker','start',self.m['candidate_id']],timeout=3)
+
+    def apply_config(self):
+        # A staged config.yaml is written only while no writer runs; recover()
+        # restores the exact original bytes before the original restarts.
+        after=self.m.get('config_after_sha256')
+        if not after:return
+        raw=(self.dir/'config.after').read_bytes()
+        if hashlib.sha256(raw).hexdigest()!=after or digest(self.dir/'config.before')!=self.m['config.yaml_sha256']:raise RuntimeError('staged configuration changed')
+        if digest(self.repo/'config.yaml')!=self.m['config.yaml_sha256']:raise RuntimeError('configuration changed before staging')
+        self.phase('applying_config',config_after_sha256=after)
+        write_in_place(self.repo/'config.yaml',raw)
+        self.phase('config_applied')
 
     def candidate_ready(self):
         deadline=self.started+self.candidate_budget-1
@@ -288,6 +310,10 @@ class Backend:
         journal=json.loads(self.journal.read_text())
         if journal.get('env_after_sha256') and digest(p)==journal['env_after_sha256']:
             with p.open('r+b') as f:f.write(before);f.truncate();f.flush();os.fsync(f.fileno())
+        # Restore only our exact staged config write, never an operator's edit.
+        config=self.repo/'config.yaml'
+        if journal.get('config_after_sha256') and digest(config)==journal['config_after_sha256']:
+            write_in_place(config,(self.dir/'config.before').read_bytes())
         run(['docker','start',old['Id']],timeout=3)
         deadline=time.monotonic()+max(5,self.m['timing']['rollback']*1.5+2,self.m['timing'].get('rollback_wait') or 0)
         while time.monotonic()<deadline:
@@ -299,3 +325,29 @@ class Backend:
                 preserve_owners(before,self.state);self.phase('rolled_back');return
             except (RuntimeError,subprocess.TimeoutExpired):time.sleep(.15)
         raise RuntimeError('original image did not become ready within measured recovery margin')
+
+    def host_verify(self,container=None,commit=None,limit=60):
+        """After admission reopens, what serves must be running and answer through the host port."""
+        return host_ready(container or self.m['candidate_id'],commit or self.m['candidate_commit'],limit)
+
+    def start_rescue(self):
+        # Retries recover() in its own cgroup until the original serves again;
+        # it never depends on the worker (or the agent that launched it).
+        script=Path(__file__).parent/'main.py'
+        run(['systemd-run','--quiet','--collect','--unit',self.timer+'-retry','--property=Restart=on-failure','--property=RestartSec=2','--property=StartLimitIntervalSec=0','/usr/bin/python3',script,'rescue','--release',self.path],timeout=4)
+
+    def remove_runner_container(self,identity,suffix):
+        """Remove one stopped runner container so no compose-labelled leftover remains."""
+        info=inspect(identity,True)
+        if not info:return None
+        name=info['Name'].lstrip('/')
+        if info['State']['Running'] or name!=self.service+suffix+self.token:raise RuntimeError('refusing to remove an unexpected container')
+        logs=run(['docker','logs','--tail','300',info['Id']],timeout=5,check=False)
+        try:
+            target=self.dir/(name+'.log');target.write_bytes(logs);os.chmod(target,0o600)
+        except OSError:pass
+        run(['docker','rm',info['Id']],timeout=10)
+        return name
+
+    def leftovers(self):
+        return [c['name'] for c in compose_leftovers(inspect(self.service))]

@@ -159,6 +159,55 @@ def probe(commit,all_interfaces=True):
     return {'commit':commit,'mandatory_refills':True,'history_healthy':True,'interfaces':len(addresses)}
 
 
+def write_in_place(path,raw):
+    """Replace a bind-mounted file's bytes without changing its inode."""
+    p=Path(path);inode=p.stat().st_ino
+    with p.open('r+b') as f:f.write(raw);f.truncate();f.flush();os.fsync(f.fileno())
+    if p.stat().st_ino!=inode:raise RuntimeError(p.name+' bind inode changed')
+
+
+# Runner-created names: the pre-created candidate, the retired original and a
+# candidate that failed. They carry the live container's compose labels.
+RUNNER_SUFFIXES=('-idle-next-','-rollback-','-failed-')
+
+
+def compose_leftovers(info,listing=None):
+    """Other containers that carry this container's compose project/service labels.
+
+    `docker compose up` treats each one as an extra replica: it removes them,
+    recreates the service container and exits 0 without ever starting it. This is
+    what left production in State "created" on 2026-11-14.
+    """
+    labels=(info.get('Config') or {}).get('Labels') or {}
+    project,service=labels.get('com.docker.compose.project'),labels.get('com.docker.compose.service')
+    if not project or not service:return []
+    if listing is None:
+        listing=run(['docker','ps','-a','--no-trunc','--filter','label=com.docker.compose.project='+project,'--filter','label=com.docker.compose.service='+service,'--format','{{.ID}} {{.Names}} {{.State}}'],timeout=5).decode()
+    found=[]
+    for line in listing.splitlines():
+        fields=line.split()
+        if len(fields)==3 and fields[0]!=info['Id']:found.append({'id':fields[0],'name':fields[1],'state':fields[2]})
+    return found
+
+
+def host_ready(container,commit,limit=60,clock=None,sleep=None,check=None):
+    """The container must be running and answer /healthz plus an authenticated
+    /v1/models (and the commit/refill guards) through the published host port.
+    Fails on timeout; never reports success without a passing probe."""
+    clock=clock or _monotonic;sleep=sleep or _sleep
+    check=check or (lambda: probe(commit,False))
+    deadline=clock()+limit;last='not checked'
+    while clock()<deadline:
+        info=inspect(container,True)
+        if not info or not info['State']['Running']:last='container is not running (state '+((info or {}).get('State',{}).get('Status') or 'missing')+')'
+        else:
+            try:
+                report=check();report['state']='running';return report
+            except Exception as error:last='probe failed: '+type(error).__name__
+        sleep(1)
+    raise RuntimeError('host verification failed within '+str(limit)+'s: '+last)
+
+
 def activity():
     a=json.loads(api('/v8/management/account-policy/dashboard?range=1h',management=True)[2])['activity']
     if not a['available']:raise RuntimeError('request accounting is unavailable')

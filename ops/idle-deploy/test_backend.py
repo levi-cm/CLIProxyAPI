@@ -76,7 +76,7 @@ class RecoveryTests(unittest.TestCase):
                 # Simulate a worker committing just before its death. The durable
                 # terminal state wins over the watchdog's initial observation.
                 atomic(b.journal,{'phase':'committed'});return b''
-            with patch.object(main,'Backend',return_value=b),patch.object(main,'run',side_effect=run),patch.object(main,'publish'),\
+            with patch.object(main,'settle'),patch.object(main,'Backend',return_value=b),patch.object(main,'run',side_effect=run),patch.object(main,'publish'),\
                     patch.object(main,'WATCHER_LOCK',d/'watcher.lock'):
                 main.rescue(path)
             b.recover.assert_not_called();b.ungate.assert_called_once()
@@ -87,7 +87,7 @@ class RecoveryTests(unittest.TestCase):
             b=MagicMock();b.journal=d/'transaction.json';atomic(b.journal,{'phase':'starting_candidate'})
             with (d/'watcher.lock').open('a+') as other:
                 fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                with patch.object(main,'Backend',return_value=b),patch.object(main,'run',return_value=b''),patch.object(main,'publish'),\
+                with patch.object(main,'settle'),patch.object(main,'Backend',return_value=b),patch.object(main,'run',return_value=b''),patch.object(main,'publish'),\
                         patch.object(main,'WATCHER_LOCK',d/'watcher.lock'):
                     main.rescue(path)
             b.recover.assert_called_once();b.ungate.assert_called_once()
@@ -95,7 +95,7 @@ class RecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
             d=Path(tmp);path=d/'release.json';atomic(path,{'token':'test'})
             b=MagicMock();b.journal=d/'transaction.json';atomic(b.journal,{'phase':'committed'})
-            with patch.object(main,'Backend',return_value=b),patch.object(main,'run') as run:
+            with patch.object(main,'settle'),patch.object(main,'Backend',return_value=b),patch.object(main,'run') as run:
                 main.rescue(path)
             run.assert_not_called();b.recover.assert_not_called()
 
@@ -147,7 +147,7 @@ class TerminalRetryTests(unittest.TestCase):
         for phase in ('rolled_back','original_retained'):
             with self.subTest(phase=phase),tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as tmp:
                 d=Path(tmp);path=d/'release.json';atomic(path,{'token':'test'});b=MagicMock();b.journal=d/'transaction.json';atomic(b.journal,{'phase':phase})
-                with patch.object(main,'Backend',return_value=b),patch.object(main,'run') as run:
+                with patch.object(main,'settle'),patch.object(main,'Backend',return_value=b),patch.object(main,'run') as run:
                     main.rescue(path)
                 run.assert_not_called();b.recover.assert_not_called();b.ungate.assert_called_once()
 

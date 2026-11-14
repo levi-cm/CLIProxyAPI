@@ -17,7 +17,7 @@ import time
 from backend import Backend,DrainConnection
 from common import ROOT,acknowledge_controller,acquire_single_flight,connections,digest,inspect,launch_controller,probe,run,writers
 from core import Cutover,DeploymentBlocked,validate_interrupt_timing,validate_timing
-from main import codex_verify,failure_details,publish,release_path
+from main import codex_verify,failure_details,publish,release_path,settle
 
 REDEMPTION_WAIT_SECONDS=120
 KILL_WINDOW_SECONDS=3
@@ -55,6 +55,7 @@ class InterruptBackend(Backend):
             # Identical to Backend.preflight, minus activity, connection and idle evidence.
             if not old['State']['Running'] or old['Name']!='/'+self.service or old['Image']!=m['old_image_id'] or old['State']['Pid']!=m['old_pid']:raise RuntimeError('serving container changed; restaging required')
             if candidate['State']['Running'] or candidate['Image']!=m['candidate_image_id']:raise RuntimeError('candidate identity/state changed')
+            self.check_compose(old)
             if any(digest(self.repo/n)!=m[n+'_sha256'] for n in ('config.yaml','.env')):raise DeploymentBlocked('configuration_changed',requires_restage=True)
             if digest(self.dir/'rehearsal.json')!=m['rehearsal_sha256']:raise DeploymentBlocked('rehearsal_changed',requires_restage=True)
             age=time.time()-m['prepared_at']
@@ -62,6 +63,7 @@ class InterruptBackend(Backend):
             if any(digest(Path(__file__).parent/n)!=sha for n,sha in m['controller_files'].items()):raise DeploymentBlocked('controller_changed',requires_restage=True)
             if 'interrupt.py' not in m['controller_files']:raise DeploymentBlocked('interrupt_controller_unpinned',requires_restage=True)
             if not json.loads((self.dir/'rehearsal.json').read_text()).get('complete_cycles'):raise RuntimeError('complete cutover/watchdog rehearsal missing')
+            if not json.loads((self.dir/'rehearsal.json').read_text()).get('compose_path',{}).get('candidate_running'):raise DeploymentBlocked('compose_path_rehearsal_missing',requires_restage=True)
             t=m['timing']
             if t.get('budget',40)>40:
                 try:self.candidate_budget=validate_interrupt_timing(**t,pre_stop=PRE_STOP_SECONDS)
@@ -138,11 +140,12 @@ def worker(path):
             if transaction.get('phase')!='committed':
                 publish(m,'failure.json',dict(failure_details(error),mode='interrupt',transaction_phase=transaction.get('phase')))
                 if transaction:publish(m,'deployment.json',transaction)
+                settle(path,m,backend)
                 raise
             # As in main.watch: a committed release only needs admission cleanup.
             backend.ungate()
         publish(m,'deployment.json',json.loads(backend.journal.read_text()))
-        codex_verify(path,m)
+        if settle(path,m,backend):codex_verify(path,m)
 
 
 def main():

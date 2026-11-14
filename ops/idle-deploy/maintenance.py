@@ -10,7 +10,7 @@ import time
 from backend import Backend
 from common import ROOT,acknowledge_controller,acquire_single_flight,inspect,launch_controller,run
 from core import Cutover,IdleWindow,DeploymentBlocked
-from main import Capture,codex_verify,publish,release_path
+from main import Capture,codex_verify,publish,release_path,settle
 
 
 class MaintenanceBackend(Backend):
@@ -56,10 +56,15 @@ def worker(path):
                 if time.monotonic()>deadline:raise RuntimeError('fresh traffic observation is unavailable')
             backend=MaintenanceBackend(path,capture.read,idle)
             try:Cutover(backend).run()
+            except Exception:
+                backend.release_redemption()
+                if (json.loads(backend.journal.read_text()) if backend.journal.exists() else {}).get('phase')!='committed':
+                    settle(path,m,backend);raise
+                backend.ungate()
             finally:
                 if backend.journal.exists():publish(m,'deployment.json',json.loads(backend.journal.read_text()))
         finally:capture.close()
-        codex_verify(path,m)
+        if settle(path,m,backend):codex_verify(path,m)
 
 
 def main():
