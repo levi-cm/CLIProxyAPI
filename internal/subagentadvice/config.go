@@ -105,7 +105,9 @@ type Config struct {
 // ProviderConfig describes one provider pool.
 type ProviderConfig struct {
 	// CapacityUnits estimates one account's full long-window allowance in the
-	// provider's cost units (for Claude: Opus 5.5-equivalent USD). Zero means unknown.
+	// provider's cost units (for Claude: Opus 5.5-equivalent USD at the
+	// configured prices). It turns the request ledger into percent of an
+	// account for the usage trend. Zero means unknown.
 	CapacityUnits float64 `yaml:"capacity-units,omitempty" json:"capacity-units,omitempty"`
 	// PlanCapacityUnits overrides CapacityUnits by subscription plan (for example "pro").
 	PlanCapacityUnits map[string]float64 `yaml:"plan-capacity-units,omitempty" json:"plan-capacity-units,omitempty"`
@@ -194,7 +196,10 @@ func DefaultConfig() Config {
 		OpenCodeAvoidPercent:      5,
 		Providers: map[string]ProviderConfig{
 			"claude": {
-				CapacityUnits: 13000,
+				// Calibrated 2026-11-15 against the request ledger: one account's
+				// week ran out after about 1900 priced units, another showed 6%
+				// used after 128. A rough estimate; tune it in config.
+				CapacityUnits: 2000,
 				DefaultPrice:  &Price{Input: 4, Output: 20, CacheRead: 0.2},
 			},
 			"codex":       {CreditsPerAllowance: 12800},

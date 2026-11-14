@@ -97,6 +97,8 @@ func (f *forecaster) poolTrend(provider string) *poolTrend {
 		periods[period] = true
 		t.allowance += 100 / period * weight(st)
 		if c := st.acct.Credits; c != nil && c.Enabled && st.creditUnits > 0 {
+			// The figure the "as one" line shows: percent of the pool's
+			// combined allowance (scaled to accounts below).
 			t.credits += st.creditUnits / ref * 100
 		}
 		perDay, covered, basis, why := f.accountTrend(st)
@@ -119,6 +121,7 @@ func (f *forecaster) poolTrend(provider string) *poolTrend {
 	if len(periods) > 1 {
 		t.periodDays = 0 // mixed weekly and monthly windows
 	}
+	t.credits /= float64(t.accounts)
 	t.budget = t.allowance + t.credits/cfg.CreditSpendDays
 	if !t.known {
 		t.perDay = 0

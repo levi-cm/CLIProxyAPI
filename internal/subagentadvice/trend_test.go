@@ -112,15 +112,16 @@ func TestCreditsRaiseBudgetButNeverPriority(t *testing.T) {
 	svc, _, _ := newTestService(t, Config{}, fleet(true))
 	a := mustAdvise(t, svc, Request{})
 	p := posture(a, "codex")
-	// 106531 credits / 12800 per allowance = 832% of one account, over 7 days.
-	if !near(p.Trend.CreditsPercent, 832, 0.5) || p.Trend.CreditSpendDays != 7 || !near(p.Trend.BudgetPercentPerDay, 200.0/7+832.27/7, 0.1) {
+	// 106531 credits / 12800 per allowance = 416% of the two accounts as
+	// one, over 7 days: 28.6 + 59.4 = 88%/day.
+	if !near(p.Trend.CreditsPercent, 416, 0.5) || p.Trend.CreditSpendDays != 7 || !near(p.Trend.BudgetPercentPerDay, 200.0/7+416.13/7, 0.1) {
 		t.Fatalf("credit budget = %+v", p.Trend)
 	}
 	s := by(a, sol)
 	if p.Posture != PostureUseMore || s.ReasoningEffort != "xhigh" || s.Mode != ModeStandard {
 		t.Fatalf("credits on: %+v %+v", p, s)
 	}
-	if !strings.Contains(a.Text(), "codex trend: last 3 days 16.0%/day of one account; even budget 147%/day (2 accounts x 100%/7 days + 832% credits over 7 days) -> 0.11 of budget: use more, extra high\n") {
+	if !strings.Contains(a.Text(), "codex trend: last 3 days 16.0%/day of one account; even budget 88.0%/day (2 accounts x 100%/7 days + 416% credits over 7 days) -> 0.18 of budget: use more, extra high\n") {
 		t.Fatalf("text = %s", a.Text())
 	}
 	// Without credit spending the budget is the weekly allowance alone.
@@ -131,7 +132,7 @@ func TestCreditsRaiseBudgetButNeverPriority(t *testing.T) {
 	}
 	// The credit spreading period is configurable.
 	svc, _, _ = newTestService(t, Config{CreditSpendDays: 14}, fleet(true))
-	if p := posture(mustAdvise(t, svc, Request{}), "codex"); !near(p.Trend.BudgetPercentPerDay, 200.0/7+832.27/14, 0.1) {
+	if p := posture(mustAdvise(t, svc, Request{}), "codex"); !near(p.Trend.BudgetPercentPerDay, 200.0/7+416.13/14, 0.1) {
 		t.Fatalf("credit-spend-days 14: %+v", p.Trend)
 	}
 }
@@ -144,9 +145,9 @@ func TestLedgerTrend(t *testing.T) {
 		inv.Accounts[i].History = nil
 		inv.Accounts[i].Usage = &UsageHistory{TrendFrom: t0.Add(-72 * time.Hour), TrendTo: t0}
 	}
-	// 12%/day of a 13000-unit account for 3 days = 4680 units = 234M Opus
+	// 12%/day of a 2000-unit account for 3 days = 720 units = 36M Opus
 	// output tokens at 20 per million.
-	inv.Accounts[0].Usage.Trend = []ModelUsage{{Model: opus, OutputTokens: 234_000_000}}
+	inv.Accounts[0].Usage.Trend = []ModelUsage{{Model: opus, OutputTokens: 36_000_000}}
 	svc, _, _ := newTestService(t, Config{}, inv)
 	a := mustAdvise(t, svc, Request{})
 	p := posture(a, "claude")

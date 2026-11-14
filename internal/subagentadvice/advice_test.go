@@ -895,7 +895,7 @@ func TestConfigValidation(t *testing.T) {
 		}
 	}
 	r := Config{Providers: map[string]ProviderConfig{"codex": {PlanCapacityUnits: map[string]float64{"Pro": 500}}}}.Resolve()
-	if r.Providers["codex"].PlanCapacityUnits["pro"] != 500 || r.Providers["claude"].CapacityUnits != 13000 {
+	if r.Providers["codex"].PlanCapacityUnits["pro"] != 500 || r.Providers["claude"].CapacityUnits != 2000 {
 		t.Fatalf("resolve merge = %+v", r.Providers)
 	}
 	d := DefaultConfig().Resolve()

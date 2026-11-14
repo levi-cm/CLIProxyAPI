@@ -90,8 +90,9 @@ type Trend struct {
 	Accounts                     int     `json:"accounts"`
 	PeriodDays                   float64 `json:"period_days"`
 	AllowanceBudgetPercentPerDay float64 `json:"allowance_budget_percent_per_day"`
-	// CreditsPercent is credits above the protected floors, in percent of one
-	// account, spread over CreditSpendDays while routing spends credits.
+	// CreditsPercent is credits above the protected floors in percent of the
+	// pool's combined allowance (the "as one" figure), spread over
+	// CreditSpendDays while routing spends credits.
 	CreditsPercent      float64 `json:"credits_percent,omitempty"`
 	CreditSpendDays     float64 `json:"credit_spend_days,omitempty"`
 	BudgetPercentPerDay float64 `json:"budget_percent_per_day"`

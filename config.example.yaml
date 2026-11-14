@@ -82,7 +82,7 @@ account-policy:
 #   short-window-block-percent: 97
 #   fast-mode: auto               # or off
 #   providers:
-#     claude: {capacity-units: 13000}   # prices the request ledger into percent of an account
+#     claude: {capacity-units: 2000}    # one account's week in priced units; turns the request ledger into percent
 #     codex: {credits-per-allowance: 12800}
 #     opencode-go: {}
 #   account-capacity-units: {}    # credential ID -> capacity override
