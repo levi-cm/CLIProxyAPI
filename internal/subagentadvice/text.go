@@ -6,21 +6,25 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 // Text renders the advice as a few short lines for agents with small
-// context budgets. It carries everything an orchestrator needs to act.
+// context budgets. It carries everything an orchestrator needs to act and
+// never gives a number of agents.
 func (a Advice) Text() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s | reuse until %s (%s)\n", postureLine(a), a.ValidUntil.UTC().Format(time.RFC3339), a.RefreshReason)
+	fmt.Fprintf(&b, "%s | reuse until %s (%s)\n", postureLine(a.Postures), a.ValidUntil.UTC().Format(time.RFC3339), a.RefreshReason)
+	postures := map[string]ProviderPosture{}
+	for _, p := range a.Postures {
+		postures[p.Provider] = p
+		fmt.Fprintf(&b, "%s %s: %s\n", p.Provider, postureName(p.Posture), postureGloss(p, a.models(p.Provider)))
+	}
 	for _, p := range a.Providers {
 		if line := allowanceText(p, a.GeneratedAt); line != "" {
 			fmt.Fprintln(&b, line)
 		}
-		if p.Fleet != nil {
-			fmt.Fprintln(&b, fleetText(p.Provider, *p.Fleet))
+		if pp, ok := postures[p.Provider]; ok && pp.Trend != nil {
+			fmt.Fprintln(&b, trendText(pp, a.models(p.Provider)))
 		}
 		if p.OpenCode != nil {
 			if line := openCodeText(*p.OpenCode, a.GeneratedAt); line != "" {
@@ -38,10 +42,7 @@ func (a Advice) Text() string {
 		for _, name := range names {
 			hints = append(hints, name+": "+m.Harnesses[name])
 		}
-		fmt.Fprintf(&b, "%s effort=%s mode=%s | %s | %s | %s\n", m.Model, m.ReasoningEffort, m.Mode, stepText(m), roomText(m), strings.Join(hints, ", "))
-	}
-	if line := agentsText(a.Fleet); line != "" {
-		fmt.Fprintln(&b, line)
+		fmt.Fprintf(&b, "%s effort=%s mode=%s | %s | %s\n", m.Model, m.ReasoningEffort, m.Mode, stepText(m), strings.Join(hints, ", "))
 	}
 	for _, w := range a.Warnings {
 		fmt.Fprintf(&b, "warning: %s\n", w)
@@ -49,27 +50,14 @@ func (a Advice) Text() string {
 	return b.String()
 }
 
-// postureLine is the first line: what every orchestrator should do now.
-func postureLine(a Advice) string {
-	working := a.Fleet.Agents
-	switch a.Posture {
-	case PostureRoom:
-		return fmt.Sprintf("room for ~%d more %s across all orchestrators (%d working now); start at most that many", a.RoomAgents, plural(a.RoomAgents, "agent"), working)
-	case PostureHold:
-		return fmt.Sprintf("hold: %d %s working already use the target rate; start no new agents", working, plural(working, "agent"))
-	case PostureConserve:
-		return fmt.Sprintf("conserve: quota runs out before it resets at this rate; start no new agents, lowest effort (%d working now)", working)
-	case PostureUnknown:
-		return fmt.Sprintf("budget unknown: no quota telemetry; start few agents (%d working now)", working)
+// models returns the advice of a provider's first model, or nil.
+func (a Advice) models(provider string) *ModelAdvice {
+	for i := range a.Models {
+		if a.Models[i].Provider == provider {
+			return &a.Models[i]
+		}
 	}
-	return "unavailable: start no new subagents"
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return word
-	}
-	return word + "s"
+	return nil
 }
 
 // effortName is the human name of an effort; the machine value stays in
@@ -81,84 +69,96 @@ func effortName(effort string) string {
 	return effort
 }
 
+// stepText is the posture and step, for example "use more, extra high + fast".
 func stepText(m ModelAdvice) string {
+	return postureName(m.Posture) + ", " + effortText(m)
+}
+
+// effortText is the effort and mode, for example "extra high + fast".
+func effortText(m ModelAdvice) string {
 	text := effortName(m.ReasoningEffort)
 	if m.Mode != ModeStandard {
 		text += " + " + m.Mode
 	}
-	if m.Steps > 1 {
-		text += fmt.Sprintf(", step %d of %d", m.Step, m.Steps)
-	}
 	return text
 }
 
-func roomText(m ModelAdvice) string {
-	switch {
-	case m.Basis == KindHold:
-		return "hold: no new agents"
-	case m.Basis == KindConserve:
-		return "conserve: no new agents"
-	case m.RoomAgents == nil:
-		if strings.Contains(m.Reason, "usage tracker") {
-			return "room unknown (quota per tracker above)"
+// postureGloss explains a posture in a few words, so the text needs no
+// outside explanation. It never gives a number of agents.
+func postureGloss(p ProviderPosture, m *ModelAdvice) string {
+	switch p.Posture {
+	case PostureAvoid:
+		return p.Reason
+	case PostureConserve:
+		return "runs short before reset at the recent pace; use fewer subagents"
+	case PostureUseMore:
+		if m == nil {
+			return "allowance would go unused at the recent pace"
 		}
-		return "budget unknown"
+		return "allowance would go unused at the recent pace; " + effortText(*m) + " is fine"
 	}
-	return fmt.Sprintf("room for ~%d more", *m.RoomAgents)
+	if m == nil {
+		return "use the normal effort"
+	}
+	return "use " + effortText(*m) + " effort"
 }
 
-// fleetText compares the pool's recent use with its target rate.
-func fleetText(provider string, r FleetRate) string {
-	line := fmt.Sprintf("%s fleet: %d %s working, recent %s/h", provider, r.Agents, plural(r.Agents, "agent"), rate(r.RecentPercentPerHour))
-	if r.RecentBasis == "estimated" {
-		line += " (estimated)"
+// trendText compares the pool's daily use over the last days with its even
+// daily budget.
+func trendText(p ProviderPosture, m *ModelAdvice) string {
+	t := *p.Trend
+	line := p.Provider + " trend: "
+	if t.PercentPerDay == nil {
+		line += "unknown (" + t.Unknown + ")"
+	} else {
+		line += fmt.Sprintf("last %s days %s/day of one account", days(t.CoveredDays), pct(*t.PercentPerDay))
 	}
-	line += fmt.Sprintf(" of one account; target %s/h (%.0f%% of the %s/h that uses every account by its reset", rate(r.TargetPercentPerHour), fraction(r), rate(r.NeedPercentPerHour))
-	if r.CreditsPercentPerHour > 0 {
-		line += fmt.Sprintf(", incl. %s/h of credits", rate(r.CreditsPercentPerHour))
+	period := "period"
+	if t.PeriodDays > 0 {
+		period = days(t.PeriodDays) + " days"
 	}
-	line += fmt.Sprintf("); ~%s/h per agent", rate(r.PerAgentPercentPerHour))
-	switch r.PerAgentBasis {
-	case PerAgentTaskEstimate:
-		line += " (estimated from task size)"
-	case PerAgentLastMeasured:
-		line += " (last measured)"
+	line += fmt.Sprintf("; even budget %s/day (%d %s x 100%%/%s", pct(t.BudgetPercentPerDay), t.Accounts, plural(t.Accounts, "account"), period)
+	if t.CreditsPercent > 0 {
+		line += fmt.Sprintf(" + %.0f%% credits over %s days", t.CreditsPercent, days(t.CreditSpendDays))
 	}
-	switch r.State {
-	case RateRoom:
-		line += fmt.Sprintf(" -> room for ~%d more", r.RoomAgents)
-	case RateHold:
-		line += " -> hold"
-	default:
-		line += " -> conserve"
+	line += ") ->"
+	if t.Ratio != nil {
+		line += fmt.Sprintf(" %.2f of budget:", *t.Ratio)
 	}
-	if r.TimeSensitive {
-		line += fmt.Sprintf("; %.0f%% of one account expires unused within a day even at the target", r.ExpiringSoonPercent)
+	if m == nil {
+		return line + " " + postureName(p.Posture)
+	}
+	line += " " + stepText(*m)
+	if t.ExpiringSoonPercent != nil && m.Mode != ModeStandard {
+		line += fmt.Sprintf(" (%.0f%% of one account expires unused within %s at this trend)", *t.ExpiringSoonPercent, roughDuration(time.Duration(t.ExpiringWithinHours*float64(time.Hour))))
 	}
 	return line
 }
 
-func fraction(r FleetRate) float64 {
-	if r.NeedPercentPerHour <= 0 {
-		return 0
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
 	}
-	return r.TargetPercentPerHour / r.NeedPercentPerHour * 100
+	return word + "s"
 }
 
-func rate(v float64) string {
-	if v != 0 && math.Abs(v) < 0.1 {
-		return fmt.Sprintf("%.2f%%", v)
+// days prints a day count without a needless decimal: 3, 1.5.
+func days(v float64) string {
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", v), ".0")
+}
+
+// pct prints a percentage with one decimal below 100 and none above.
+func pct(v float64) string {
+	if math.Abs(v) >= 100 {
+		return fmt.Sprintf("%.0f%%", v)
 	}
 	return fmt.Sprintf("%.1f%%", v)
 }
 
-// openCodeText shows OpenCode Go's windows, or when to come back.
+// openCodeText shows OpenCode Go's windows from the usage tracker.
 func openCodeText(u OpenCodeUsage, now time.Time) string {
 	if !u.Reachable {
 		return ""
-	}
-	if u.AvoidUntil != nil {
-		return "OpenCode Go: avoid until " + u.AvoidUntil.UTC().Format("Jan 2 15:04 MST") + " (" + u.AvoidWhy + ")"
 	}
 	parts := make([]string, 0, len(u.Windows))
 	for _, w := range u.Windows {
@@ -171,22 +171,7 @@ func openCodeText(u OpenCodeUsage, now time.Time) string {
 		}
 		parts = append(parts, part)
 	}
-	return "OpenCode Go: " + strings.Join(parts, "; ")
-}
-
-// agentsText lists who is working, by provider and client device.
-func agentsText(s fleetactivity.Snapshot) string {
-	if s.Agents == 0 {
-		return fmt.Sprintf("agents working (last %s): none", roughDuration(time.Duration(s.WindowSeconds)*time.Second))
-	}
-	var providers, devices []string
-	for _, name := range fleetactivity.SortedNames(s.Providers) {
-		providers = append(providers, fmt.Sprintf("%s %d", name, s.Providers[name].Agents))
-	}
-	for _, name := range fleetactivity.SortedNames(s.Devices) {
-		devices = append(devices, fmt.Sprintf("%s %d", name, s.Devices[name].Agents))
-	}
-	return fmt.Sprintf("agents working (last %s): %d (%d requests in flight); %s; devices %s", roughDuration(time.Duration(s.WindowSeconds)*time.Second), s.Agents, s.InFlight, strings.Join(providers, ", "), strings.Join(devices, ", "))
+	return "opencode-go quota: " + strings.Join(parts, "; ")
 }
 
 // allowanceText summarizes a provider's weekly or monthly allowances: first

@@ -3,17 +3,15 @@ package subagentadvice
 import (
 	"fmt"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 // Response schemas. Clients reject unknown versions.
 const (
 	Schema         = "cliproxy.subagent-advice"
 	ForecastSchema = "cliproxy.subagent-forecast"
-	// SchemaVersion 2 replaced per-model task budgets with a fleet-wide rate,
-	// shared room for more agents and effort ladders.
-	SchemaVersion = 2
+	// SchemaVersion 3 replaced the agent counter and room with a posture per
+	// provider from its usage trend against an even daily budget.
+	SchemaVersion = 3
 )
 
 // Advice statuses.
@@ -23,16 +21,15 @@ const (
 	StatusUnavailable = "unavailable"
 )
 
-// Bases explain why a model was advised.
+// Provider postures. Normal advises the normal step (high), use_more the
+// use-more step (extra high, plus fast/priority for allowance that expires
+// unused soon), conserve the conserve step and fewer subagents, and avoid
+// means do not start subagents on the provider now.
 const (
-	// KindRoom: the fleet runs below its target rate; more agents fit.
-	KindRoom = "room"
-	// KindHold: the fleet already uses its target rate; start no more.
-	KindHold = "hold"
-	// KindUnmetered: no quota telemetry; budget unknown.
-	KindUnmetered = "unmetered"
-	// KindConserve: the fleet uses allowance faster than it lasts.
-	KindConserve = "conserve"
+	PostureNormal   = "normal"
+	PostureUseMore  = "use_more"
+	PostureConserve = "conserve"
+	PostureAvoid    = "avoid"
 )
 
 // Request narrows one advice computation.
@@ -43,45 +40,77 @@ type Request struct {
 	ContextTokens int
 }
 
-// Advice is the read-only answer to "which models should subagents use now,
-// and how many more agents fit". The room is shared by every orchestrator;
-// nothing is reserved or capped.
+// Advice is the read-only answer to "which models, efforts and modes should
+// subagents use now". It never gives a number of agents; the postures are
+// shared by every orchestrator and nothing is reserved.
 type Advice struct {
-	Schema        string `json:"schema"`
-	SchemaVersion int    `json:"schema_version"`
-	Status        string `json:"status"`
-	Posture       string `json:"posture"`
-	// RoomAgents is how many more agents the whole fleet can start, summed
-	// over the providers of the advised models.
-	RoomAgents int `json:"room_agents"`
-	// Fleet counts the agents working through the proxy right now.
-	Fleet               fleetactivity.Snapshot `json:"fleet"`
-	GeneratedAt         time.Time              `json:"generated_at"`
-	ValidUntil          time.Time              `json:"valid_until"`
-	RefreshAfterSeconds int                    `json:"refresh_after_seconds"`
-	RefreshReason       string                 `json:"refresh_reason"`
-	Models              []ModelAdvice          `json:"models"`
-	Summary             string                 `json:"summary"`
-	Warnings            []string               `json:"warnings"`
-	RetryAfterSeconds   *int                   `json:"retry_after_seconds,omitempty"`
-	Freshness           Freshness              `json:"freshness"`
-	Providers           []ProviderSummary      `json:"providers"`
+	Schema              string            `json:"schema"`
+	SchemaVersion       int               `json:"schema_version"`
+	Status              string            `json:"status"`
+	GeneratedAt         time.Time         `json:"generated_at"`
+	ValidUntil          time.Time         `json:"valid_until"`
+	RefreshAfterSeconds int               `json:"refresh_after_seconds"`
+	RefreshReason       string            `json:"refresh_reason"`
+	Postures            []ProviderPosture `json:"postures"`
+	Models              []ModelAdvice     `json:"models"`
+	Summary             string            `json:"summary"`
+	Warnings            []string          `json:"warnings"`
+	RetryAfterSeconds   *int              `json:"retry_after_seconds,omitempty"`
+	Freshness           Freshness         `json:"freshness"`
+	Providers           []ProviderSummary `json:"providers"`
+}
+
+// ProviderPosture is how orchestrators should use one provider now, in
+// display order: normal and use_more first, then conserve, then avoid.
+type ProviderPosture struct {
+	Provider string `json:"provider"`
+	Posture  string `json:"posture"`
+	Reason   string `json:"reason"`
+	// Trend is the provider pool's usage trend against its budget; nil for
+	// providers without one (OpenCode Go).
+	Trend *Trend `json:"trend,omitempty"`
+}
+
+// Trend compares a provider pool's average daily use over the last days with
+// an even daily budget. Percentages are of one account's long-window
+// allowance; both are rough estimates.
+type Trend struct {
+	// Days is the configured trend window; CoveredDays how much of it the
+	// history covers.
+	Days        float64 `json:"days"`
+	CoveredDays float64 `json:"covered_days"`
+	// Basis is allowance_history (durable quota observations),
+	// request_ledger (priced request tokens) or mixed.
+	Basis string `json:"basis,omitempty"`
+	// PercentPerDay is nil while the trend is unknown (under a day of history).
+	PercentPerDay *float64 `json:"percent_per_day"`
+	Unknown       string   `json:"unknown_reason,omitempty"`
+	// Accounts and PeriodDays give the allowance budget: accounts x 100% /
+	// period days.
+	Accounts                     int     `json:"accounts"`
+	PeriodDays                   float64 `json:"period_days"`
+	AllowanceBudgetPercentPerDay float64 `json:"allowance_budget_percent_per_day"`
+	// CreditsPercent is credits above the protected floors, in percent of one
+	// account, spread over CreditSpendDays while routing spends credits.
+	CreditsPercent      float64 `json:"credits_percent,omitempty"`
+	CreditSpendDays     float64 `json:"credit_spend_days,omitempty"`
+	BudgetPercentPerDay float64 `json:"budget_percent_per_day"`
+	// Ratio is the trend over the budget; nil while the trend is unknown.
+	Ratio *float64 `json:"ratio"`
+	// ExpiringSoonPercent is allowance that would expire unused within the
+	// fast horizon at the trend; nil while the trend is unknown.
+	ExpiringSoonPercent *float64 `json:"expiring_soon_percent,omitempty"`
+	ExpiringWithinHours float64  `json:"expiring_within_hours,omitempty"`
 }
 
 // ModelAdvice is how subagents should use one model, in preference order.
 type ModelAdvice struct {
-	Capability      string `json:"capability"`
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort"`
-	Mode            string `json:"mode"`
-	Basis           string `json:"basis"`
-	// Step is the 1-based ladder step advised, of Steps.
-	Step  int `json:"step"`
-	Steps int `json:"steps"`
-	// RoomAgents is the provider's room for more agents across all
-	// orchestrators; nil when unknown.
-	RoomAgents       *int              `json:"room_agents,omitempty"`
+	Capability       string            `json:"capability"`
+	Provider         string            `json:"provider"`
+	Model            string            `json:"model"`
+	ReasoningEffort  string            `json:"reasoning_effort"`
+	Mode             string            `json:"mode"`
+	Posture          string            `json:"posture"`
 	Harnesses        map[string]string `json:"harnesses"`
 	CapabilitySource string            `json:"capability_source"`
 	Reason           string            `json:"reason"`
@@ -111,43 +140,8 @@ type ProviderSummary struct {
 	// Allowance lists each metered account's weekly (or monthly) allowance,
 	// earliest reset first, without identifying accounts.
 	Allowance []AllowanceWindow `json:"allowance,omitempty"`
-	// Fleet is the pool's usage rate against its target.
-	Fleet *FleetRate `json:"fleet,omitempty"`
 	// OpenCode is OpenCode Go's quota from the usage tracker.
 	OpenCode *OpenCodeUsage `json:"opencode,omitempty"`
-}
-
-// FleetRate compares a provider pool's recent use with the rate that would
-// use every account's remaining allowance by its reset. Rates are percentage
-// points of one account per hour.
-type FleetRate struct {
-	State string `json:"state"`
-	// Accounts counts the accounts whose allowance can still be used.
-	Accounts int `json:"accounts"`
-	// NeedPercentPerHour uses every account's remaining allowance by its
-	// reset (plus credits above the floors spread over the surplus horizon).
-	NeedPercentPerHour float64 `json:"need_percent_per_hour"`
-	// CreditsPercentPerHour is the credit part of the need.
-	CreditsPercentPerHour float64 `json:"credits_percent_per_hour,omitempty"`
-	// TargetPercentPerHour is the need times target-fraction.
-	TargetPercentPerHour float64 `json:"target_percent_per_hour"`
-	// RecentPercentPerHour is the fleet's use over the last 3 hours; its basis
-	// is observed, ledger or estimated (agents times the per-agent estimate).
-	RecentPercentPerHour float64 `json:"recent_percent_per_hour"`
-	RecentBasis          string  `json:"recent_basis"`
-	Agents               int     `json:"agents"`
-	// PerAgentPercentPerHour is recent use per working agent ("measured"),
-	// the last such rate within a day while the fleet is idle
-	// ("last_measured"), or the per-task estimate turned into a rate
-	// ("task_estimate").
-	PerAgentPercentPerHour float64 `json:"per_agent_percent_per_hour"`
-	PerAgentBasis          string  `json:"per_agent_basis"`
-	RoomAgents             int     `json:"room_agents"`
-	// ExpiringSoonPercent would still expire unused within the fast horizon
-	// with the fleet at the target; above fast-min-percent it unlocks the
-	// fast/priority step.
-	ExpiringSoonPercent float64 `json:"expiring_soon_percent"`
-	TimeSensitive       bool    `json:"time_sensitive"`
 }
 
 // CombinedAllowance is a provider's allowance as if all its metered accounts

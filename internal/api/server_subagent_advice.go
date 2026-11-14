@@ -20,10 +20,15 @@ import (
 )
 
 const (
-	subagentAdvicePath       = "/v1/account-policy/subagent-advice"
-	subagentForecastPath     = "/v1/account-policy/subagent-forecast"
-	subagentSampleInterval   = 5 * time.Minute
-	subagentLedgerTTL        = 5 * time.Minute
+	subagentAdvicePath     = "/v1/account-policy/subagent-advice"
+	subagentForecastPath   = "/v1/account-policy/subagent-forecast"
+	subagentSampleInterval = 5 * time.Minute
+	subagentLedgerTTL      = 5 * time.Minute
+	// subagentTrendTTL is how often the background sampler re-reads the
+	// request ledger over the whole trend window; a trend over days moves slowly.
+	subagentTrendTTL = 30 * time.Minute
+	// subagentHistorySpacing thins durable allowance observations.
+	subagentHistorySpacing   = 4 * time.Minute
 	claudeLongWindowSeconds  = 7 * 24 * 3600
 	claudeShortWindowSeconds = 5 * 3600
 )
@@ -39,8 +44,15 @@ type subagentInventory struct {
 	mu      sync.Mutex
 	usageAt time.Time
 	usage   map[string]*subagentadvice.UsageHistory
-	allowAt map[string]time.Time
-	allow   map[string][]subagentadvice.Sample
+	// trend holds per-credential ledger totals over the trend window and the
+	// part of it the ledger covers.
+	trendAt   time.Time
+	trendSpan time.Duration
+	trend     map[string][]subagentadvice.ModelUsage
+	trendFrom time.Time
+	trendTo   time.Time
+	allowAt   map[string]time.Time
+	allow     map[string][]subagentadvice.Sample
 }
 
 func newSubagentInventory(manager *auth.Manager, policy *accountpolicy.Service, history func() *accountpolicyledger.Archive) *subagentInventory {
@@ -122,7 +134,10 @@ func (r *subagentInventory) Inventory(ctx context.Context) (subagentadvice.Inven
 		if u, ok := usage[a.ID]; ok {
 			acct.Usage = u
 		} else if usage != nil {
-			acct.Usage = &subagentadvice.UsageHistory{}
+			// No requests in the window: the ledger still covers it.
+			r.mu.Lock()
+			acct.Usage = &subagentadvice.UsageHistory{TrendFrom: r.trendFrom, TrendTo: r.trendTo}
+			r.mu.Unlock()
 		}
 		if len(acct.Windows) > 0 && provider != "claude" {
 			acct.History = r.allowanceHistory(ctx, a.ID, now)
@@ -368,8 +383,8 @@ func (r *subagentInventory) archive() *accountpolicyledger.Archive {
 	return r.history()
 }
 
-// ledgerUsage returns token totals per credential for the last 24 and 3 hours,
-// or nil when unavailable. Only the background sampler reads the archive (its
+// ledgerUsage returns token totals per credential for the last 24 and 3 hours
+// and the trend window, or nil when unavailable. Only the background sampler reads the archive (its
 // queries may prepare it); keyless advice requests use the sampler's result.
 func (r *subagentInventory) ledgerUsage(ctx context.Context, now time.Time) map[string]*subagentadvice.UsageHistory {
 	r.mu.Lock()
@@ -427,18 +442,61 @@ func (r *subagentInventory) ledgerUsage(ctx context.Context, now time.Time) map[
 		log.WithField("component", "subagent-advisor").Debug("usage history unavailable for forecasting")
 		return nil
 	}
-	result := map[string]*subagentadvice.UsageHistory{}
-	for id, list := range day {
-		result[id] = &subagentadvice.UsageHistory{Last24h: list, Last3h: recent[id]}
-	}
+	r.refreshTrend(ctx, a, now, subagentadvice.TrendSpan(ctx), collect)
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := map[string]*subagentadvice.UsageHistory{}
+	entry := func(id string) *subagentadvice.UsageHistory {
+		if result[id] == nil {
+			result[id] = &subagentadvice.UsageHistory{TrendFrom: r.trendFrom, TrendTo: r.trendTo}
+		}
+		return result[id]
+	}
+	for id, list := range day {
+		u := entry(id)
+		u.Last24h, u.Last3h = list, recent[id]
+	}
+	for id, list := range r.trend {
+		entry(id).Trend = list
+	}
 	r.usage, r.usageAt = result, now
-	r.mu.Unlock()
 	return result
 }
 
-// allowanceHistory returns durable weekly observations from the last day.
-// Like ledgerUsage, only the background sampler reads the archive.
+// refreshTrend re-reads the ledger over the trend window at most every
+// subagentTrendTTL, and finds how much of the window the ledger covers: all of
+// it when a request predates the window, otherwise from its first request.
+// A failed read clears the trend so it is never computed from stale totals.
+func (r *subagentInventory) refreshTrend(ctx context.Context, a *accountpolicyledger.Archive, now time.Time, span time.Duration, collect func(time.Time) (map[string][]subagentadvice.ModelUsage, error)) {
+	r.mu.Lock()
+	fresh := span == r.trendSpan && !r.trendAt.IsZero() && now.Sub(r.trendAt) < subagentTrendTTL
+	r.mu.Unlock()
+	if span <= 0 || fresh {
+		return
+	}
+	from := now.Add(-span)
+	start := time.Time{}
+	if before, err := a.RequestsContext(ctx, accountpolicyledger.Query{To: from, Limit: 1}); err == nil && len(before.Records) > 0 {
+		start = from
+	} else if err == nil {
+		if first, errFirst := a.RequestsContext(ctx, accountpolicyledger.Query{From: from, To: now, Limit: 1}); errFirst == nil && len(first.Records) > 0 {
+			start = first.Records[0].RequestedAt
+		}
+	}
+	totals, err := collect(from)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trendAt, r.trendSpan = now, span
+	if err != nil || start.IsZero() {
+		r.trend, r.trendFrom, r.trendTo = nil, time.Time{}, time.Time{}
+		return
+	}
+	r.trend, r.trendFrom, r.trendTo = totals, start, now
+}
+
+// allowanceHistory returns durable weekly observations from the trend window
+// (at least the last day). Like ledgerUsage, only the background sampler
+// reads the archive.
 func (r *subagentInventory) allowanceHistory(ctx context.Context, id string, now time.Time) []subagentadvice.Sample {
 	r.mu.Lock()
 	cached := r.allow[id]
@@ -450,14 +508,24 @@ func (r *subagentInventory) allowanceHistory(ctx context.Context, id string, now
 	if a == nil {
 		return nil
 	}
+	span := max(24*time.Hour, subagentadvice.TrendSpan(ctx))
 	var samples []subagentadvice.Sample
-	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-24 * time.Hour), To: now}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
+	err := a.Allowance(accountpolicyledger.Query{CredentialID: id, From: now.Add(-span), To: now}, claudeLongWindowSeconds, func(o accountpolicyledger.Observation) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if o.Model == "" {
-			samples = append(samples, subagentadvice.Sample{At: o.ObservedAt, UsedPercent: o.UsedPercent, ResetAt: o.ResetAt})
+		if o.Model != "" {
+			return nil
 		}
+		sample := subagentadvice.Sample{At: o.ObservedAt, UsedPercent: o.UsedPercent, ResetAt: o.ResetAt}
+		// Observations arrive every few seconds; within one window usage only
+		// grows, so one sample per few minutes (plus each window change and
+		// the latest) measures the same use at a fraction of the size.
+		if n := len(samples); n > 1 && samples[n-1].ResetAt.Equal(sample.ResetAt) && samples[n-2].ResetAt.Equal(sample.ResetAt) && sample.At.Sub(samples[n-2].At) < subagentHistorySpacing {
+			samples[n-1] = sample
+			return nil
+		}
+		samples = append(samples, sample)
 		return nil
 	})
 	if err != nil {

@@ -387,7 +387,7 @@ func runCapacityRecovery[T any](ctx context.Context, m *Manager, auth *Auth, req
 			}
 			return out, &capacityFinalError{cause: &Error{Code: ErrorCodeRequestScoped, Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}}
 		}
-		if err = beginPolicyAttempt(ctx, opts, current.ID, current.Provider); err != nil {
+		if err = beginPolicyAttempt(ctx, opts, current.ID); err != nil {
 			return out, err
 		}
 

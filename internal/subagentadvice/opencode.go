@@ -154,41 +154,47 @@ func openCodeUsage(cfg Config, reading openCodeReading, now time.Time) *OpenCode
 	at := reading.at
 	u.Reachable, u.ObservedAt = true, &at
 	u.Windows = append([]OpenCodeWindow(nil), reading.windows...)
-	for _, w := range u.Windows {
-		if !w.Fresh {
-			continue
-		}
-		var why string
+	// Any window that is nearly empty, used up, blocked or burning too fast
+	// rules OpenCode Go out; the tightest such window explains why. Stale
+	// windows count too: a stale reading never makes the quota look better.
+	tooFast := func(w *OpenCodeWindow) bool {
 		hoursLeft := math.Inf(1)
 		if w.ResetAt != nil {
 			hoursLeft = w.ResetAt.Sub(now).Hours()
 		}
-		switch {
-		case w.Verdict == "used_up" || w.LeftPercent <= 0:
-			why = "used up"
-		case w.LeftPercent <= cfg.OpenCodeAvoidPercent:
-			why = fmt.Sprintf("%.0f%% left", w.LeftPercent)
-		case w.Verdict == "too_fast" || (w.PacePercentPerHour != nil && *w.PacePercentPerHour > 0 && w.LeftPercent / *w.PacePercentPerHour < hoursLeft):
-			why = fmt.Sprintf("%.0f%% left, runs out before it resets at this pace", w.LeftPercent)
-		default:
+		return w.Verdict == "too_fast" || (w.PacePercentPerHour != nil && *w.PacePercentPerHour > 0 && w.LeftPercent / *w.PacePercentPerHour < hoursLeft)
+	}
+	var tightest *OpenCodeWindow
+	for i := range u.Windows {
+		w := &u.Windows[i]
+		if w.Verdict != "used_up" && w.Verdict != "blocked" && w.LeftPercent > cfg.OpenCodeAvoidPercent && !tooFast(w) {
 			continue
 		}
-		why = w.Window + " " + why
 		// Avoid until every blocking window has reset.
 		if w.ResetAt != nil && (u.AvoidUntil == nil || w.ResetAt.After(*u.AvoidUntil)) {
 			until := *w.ResetAt
 			u.AvoidUntil = &until
 		}
-		if u.AvoidWhy == "" {
-			u.AvoidWhy = why
-		} else {
-			u.AvoidWhy += "; " + why
+		if tightest == nil || w.LeftPercent < tightest.LeftPercent {
+			tightest = w
 		}
 	}
-	if u.AvoidWhy != "" && u.AvoidUntil == nil {
-		// No reset time: avoid until the tracker says otherwise.
-		until := now.Add(openCodeMaxAge)
-		u.AvoidUntil = &until
+	if tightest != nil {
+		u.AvoidWhy = fmt.Sprintf("%s %.0f%% left", tightest.Window, tightest.LeftPercent)
+		switch {
+		case tightest.Verdict == "blocked":
+			u.AvoidWhy += ", blocked"
+		case tooFast(tightest):
+			u.AvoidWhy += ", running out too fast"
+		}
+		if tightest.ResetAt != nil {
+			u.AvoidWhy += " until " + tightest.ResetAt.UTC().Format("Jan 2 15:04 MST")
+		}
+		if u.AvoidUntil == nil {
+			// No reset time: avoid until the tracker says otherwise.
+			until := now.Add(openCodeMaxAge)
+			u.AvoidUntil = &until
+		}
 	}
 	sort.SliceStable(u.Windows, func(i, j int) bool { return windowRank(u.Windows[i].Window) < windowRank(u.Windows[j].Window) })
 	return u

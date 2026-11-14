@@ -6,18 +6,19 @@ import (
 )
 
 func TestSubagentAdvisorParsesAndValidates(t *testing.T) {
-	cfg, err := ParseConfigBytes([]byte("port: 8317\nsubagent-advisor:\n  max-refresh-seconds: 1800\n  never-advise: [claude-fable-*, claude-mythos-*]\n  providers:\n    claude: {capacity-units: 15000}\n  models:\n    - {name: opus, match: [claude-opus-5-5], provider: claude, efforts: [xhigh], modes: [standard, fast], harnesses: {claude-code: opus}}\n"))
+	cfg, err := ParseConfigBytes([]byte("port: 8317\nsubagent-advisor:\n  max-refresh-seconds: 1800\n  never-advise: [claude-fable-*, claude-mythos-*]\n  providers:\n    claude: {capacity-units: 15000}\n  models:\n    - {name: opus, match: [claude-opus-5-5], provider: claude, normal: {effort: high}, use-more: {effort: extra-high}, fast: {effort: xhigh, mode: fast}, harnesses: {claude-code: opus}}\n  trend-days: 4\n  credit-spend-days: 10\n  xhigh-below-ratio: 0.4\n  conserve-above-ratio: 1.1\n  fast-min-expiring-percent: 60\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resolved := cfg.SubagentAdvisor.Resolve()
-	if resolved.Providers["claude"].CapacityUnits != 15000 || len(resolved.Models) != 1 || resolved.Models[0].Efforts[0] != "xhigh" {
+	if resolved.Providers["claude"].CapacityUnits != 15000 || len(resolved.Models) != 1 || resolved.Models[0].UseMore.Effort != "xhigh" || resolved.Models[0].Conserve.Effort != "high" || resolved.Models[0].Fast.Mode != "fast" ||
+		resolved.TrendDays != 4 || resolved.CreditSpendDays != 10 || resolved.XHighBelowRatio != 0.4 || resolved.ConserveAboveRatio != 1.1 || resolved.FastMinExpiringPercent != 60 {
 		t.Fatalf("resolved = %+v", resolved)
 	}
 	if resolved.Models[0].Harnesses["claude-code"] != "opus" || len(resolved.NeverAdvise) != 2 || resolved.MaxRefreshSeconds != 1800 {
 		t.Fatalf("harnesses/never-advise = %+v %v", resolved.Models[0].Harnesses, resolved.NeverAdvise)
 	}
-	if _, err = ParseConfigBytes([]byte("port: 8317\nsubagent-advisor:\n  models:\n    - {name: bad, match: [x], efforts: [ultra]}\n")); err == nil || !strings.Contains(err.Error(), "subagent-advisor") {
+	if _, err = ParseConfigBytes([]byte("port: 8317\nsubagent-advisor:\n  models:\n    - {name: bad, match: [x], normal: {effort: ultra}}\n")); err == nil || !strings.Contains(err.Error(), "subagent-advisor") {
 		t.Fatalf("invalid effort accepted: %v", err)
 	}
 }

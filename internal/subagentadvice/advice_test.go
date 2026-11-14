@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 var t0 = time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
@@ -69,7 +66,7 @@ func discovered() []DiscoveredModel {
 	}
 }
 
-// normalFleet's demand uses every weekly allowance before it resets.
+// normalFleet has only six hours of history: the trend is unknown.
 func normalFleet() Inventory {
 	return Inventory{
 		Accounts: []Account{
@@ -90,6 +87,39 @@ func surplusFleet() Inventory {
 	inv.Accounts[0] = claudeAcct("claude-a", 40, 10*time.Hour, 0)
 	return inv
 }
+
+// trendAcct is an account observed now whose weekly use rose by perDay
+// percent per day over the last hours.
+func trendAcct(a Account, perDay float64, hours int) Account {
+	w := &a.Windows[0]
+	w.ObservedAt = t0
+	a.History = nil
+	for h := hours; h >= 1; h-- {
+		a.History = append(a.History, Sample{At: t0.Add(-time.Duration(h) * time.Hour), UsedPercent: w.UsedPercent - perDay*float64(h)/24, ResetAt: w.ResetAt})
+	}
+	return a
+}
+
+// trendFleet gives every Claude and Codex account the same daily use over
+// the last hours. Budgets: Claude 3 x 100/7 = 42.9%/day, Codex 2 x 100/7 =
+// 28.6%/day of one account.
+func trendFleet(claudeEach, codexEach float64, hours int) Inventory {
+	return Inventory{
+		Accounts: []Account{
+			trendAcct(claudeAcct("claude-a", 60, 72*time.Hour, 0), claudeEach, hours),
+			trendAcct(claudeAcct("claude-b", 55, 120*time.Hour, 0), claudeEach, hours),
+			trendAcct(claudeAcct("claude-c", 52, 144*time.Hour, 0), claudeEach, hours),
+			trendAcct(codexAcct("codex-a", 60, 96*time.Hour, 0), codexEach, hours),
+			trendAcct(codexAcct("codex-b", 55, 150*time.Hour, 0), codexEach, hours),
+			opencodeAcct("opencode"),
+		},
+		Models: discovered(),
+	}
+}
+
+// eachFor returns the per-account daily use that puts a pool of n accounts
+// at ratio of its weekly budget.
+func eachFor(ratio float64) float64 { return ratio * 100 / 7 }
 
 type fakeSource struct {
 	mu  sync.Mutex
@@ -115,19 +145,7 @@ func newTestService(t *testing.T, cfg Config, inv Inventory) (*Service, *fakeSou
 	svc := New(cfg, src)
 	now := t0
 	svc.SetClock(func() time.Time { return now })
-	tracker := fleetactivity.New()
-	tracker.SetClock(func() time.Time { return now })
-	svc.SetActivity(tracker)
 	return svc, src, &now
-}
-
-// working records n agents (distinct sessions) on provider in the last minutes.
-func working(svc *Service, provider string, n int) {
-	for i := 0; i < n; i++ {
-		r := svc.activity.Begin("scope-secret", fmt.Sprintf("session-%s-%d", provider, i))
-		r.Provider(provider)
-		r.End()
-	}
 }
 
 func mustAdvise(t *testing.T, svc *Service, req Request) Advice {
@@ -146,6 +164,15 @@ func by(a Advice, model string) *ModelAdvice {
 	for i := range a.Models {
 		if a.Models[i].Model == model {
 			return &a.Models[i]
+		}
+	}
+	return nil
+}
+
+func posture(a Advice, provider string) *ProviderPosture {
+	for i := range a.Postures {
+		if a.Postures[i].Provider == provider {
+			return &a.Postures[i]
 		}
 	}
 	return nil
@@ -174,8 +201,8 @@ func TestHarnessHintsResolveToModelNames(t *testing.T) {
 
 func TestFableIsNeverAdvisedByDefault(t *testing.T) {
 	cfg := Config{Models: []ModelCapability{
-		{Name: "fable", Match: []string{"claude-fable-*"}, Provider: "claude", Efforts: []string{"high"}, Harnesses: map[string]string{"claude-code": "fable"}},
-		{Name: "opus", Match: []string{opus}, Provider: "claude", Efforts: []string{"xhigh"}},
+		{Name: "fable", Match: []string{"claude-fable-*"}, Provider: "claude", Normal: Step{Effort: "high"}, Harnesses: map[string]string{"claude-code": "fable"}},
+		{Name: "opus", Match: []string{opus}, Provider: "claude", Normal: Step{Effort: "xhigh"}},
 	}}
 	svc, _, _ := newTestService(t, cfg, surplusFleet())
 	a := mustAdvise(t, svc, Request{})
@@ -203,7 +230,7 @@ func TestAccountRemovalAndAdditionNeedNoRestart(t *testing.T) {
 	src.inv.Accounts = []Account{codexAcct("codex-a", 30, 96*time.Hour, 0.5), opencodeAcct("opencode")}
 	src.mu.Unlock()
 	a := mustAdvise(t, svc, Request{})
-	if by(a, opus) != nil || len(a.Models) != 2 || len(a.Warnings) == 0 {
+	if by(a, opus) != nil || len(a.Models) != 1 || len(a.Warnings) == 0 {
 		t.Fatalf("advice after removing claude: %+v %v", a.Models, a.Warnings)
 	}
 	src.mu.Lock()
@@ -222,13 +249,13 @@ func TestNewProviderThroughConfigurationOnly(t *testing.T) {
 		},
 		Models: []DiscoveredModel{{ID: "gemini-4-pro", Provider: "gemini", Levels: []string{"low", "high"}}, {ID: "kimi-k3", Provider: "kimi"}},
 	}
-	cfg := Config{Models: []ModelCapability{{Name: "gemini-pro", Match: []string{"gemini-4-pro*"}, Provider: "gemini", Efforts: []string{"high", "max"}, Harnesses: map[string]string{"gemini-cli": ""}}}}
+	cfg := Config{Models: []ModelCapability{{Name: "gemini-pro", Match: []string{"gemini-4-pro*"}, Provider: "gemini", Normal: Step{Effort: "high"}, UseMore: Step{Effort: "xhigh"}, Harnesses: map[string]string{"gemini-cli": ""}}}}
 	svc, _, _ := newTestService(t, cfg, inv)
 	a := mustAdvise(t, svc, Request{})
 	if len(a.Models) != 1 {
 		t.Fatalf("models = %+v", a.Models)
 	}
-	// max is configured but the registry does not advertise it: never selected.
+	// xhigh is configured but the registry does not advertise it: never selected.
 	if m := a.Models[0]; m.Model != "gemini-4-pro" || m.ReasoningEffort != "high" || m.CapabilitySource != "registry+configured" || m.Harnesses["gemini-cli"] != "gemini-4-pro" {
 		t.Fatalf("gemini = %+v", m)
 	}
@@ -239,7 +266,7 @@ func TestMissingCapabilityIsNeverSelected(t *testing.T) {
 	inv.Models[2].Levels = []string{"low"}
 	svc, _, _ := newTestService(t, Config{}, inv)
 	a := mustAdvise(t, svc, Request{})
-	if by(a, sol) != nil || by(a, deepseek) == nil {
+	if by(a, sol) != nil || by(a, opus) == nil {
 		t.Fatalf("gpt-6.1-sol advised without a supported effort: %+v", a.Models)
 	}
 	f, err := svc.Forecast(context.Background(), 0)
@@ -271,7 +298,7 @@ func TestProviderOutageFallsBackToOtherProviders(t *testing.T) {
 	inv.Accounts[0].Blocked = "auth_error"
 	svc, _, _ := newTestService(t, Config{}, inv)
 	a := mustAdvise(t, svc, Request{})
-	if by(a, sol) != nil || by(a, opus) == nil || by(a, deepseek) == nil {
+	if by(a, sol) != nil || by(a, opus) == nil || posture(a, "codex").Posture != PostureAvoid {
 		t.Fatalf("fallback advice = %+v", a.Models)
 	}
 }
@@ -409,9 +436,9 @@ func TestPrefixedAndAliasedFableIsNeverAdvised(t *testing.T) {
 	acct.Models = []string{opus, "best", "team/claude-fable-5-2"}
 	acct.Canonical = map[string]string{"best": "claude-fable-5-2"}
 	cfg := Config{Models: []ModelCapability{
-		{Name: "prefixed", Match: []string{"team/claude-fable-*"}, Provider: "claude", Efforts: []string{"high"}},
-		{Name: "alias", Match: []string{"best"}, Provider: "claude", Efforts: []string{"high"}},
-		{Name: "opus", Match: []string{opus}, Provider: "claude", Efforts: []string{"xhigh"}},
+		{Name: "prefixed", Match: []string{"team/claude-fable-*"}, Provider: "claude", Normal: Step{Effort: "high"}},
+		{Name: "alias", Match: []string{"best"}, Provider: "claude", Normal: Step{Effort: "high"}},
+		{Name: "opus", Match: []string{opus}, Provider: "claude", Normal: Step{Effort: "xhigh"}},
 	}}
 	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{acct}, Models: discovered()})
 	a := mustAdvise(t, svc, Request{})
@@ -423,7 +450,11 @@ func TestPrefixedAndAliasedFableIsNeverAdvised(t *testing.T) {
 func TestUnavailableFirstMatchFallsThrough(t *testing.T) {
 	acct := Account{ID: "opencode", Provider: "opencode-go", Models: []string{"opencode-go/deepseek-v4.1", deepseek},
 		ModelBlocks: map[string]Block{"opencode-go/deepseek-v4.1": {Reason: "model_cooldown", Until: t0.Add(time.Hour)}}}
-	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	srv := trackerServer(t, trackerOK)
+	svc, _, _ := newTestService(t, Config{OpenCodeUsageURL: srv.URL}, Inventory{Accounts: []Account{acct}, Models: discovered()})
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if d := by(mustAdvise(t, svc, Request{}), deepseek); d == nil {
 		t.Fatal("a cooled-down first match hid the healthy alternative")
 	}
@@ -466,7 +497,7 @@ func TestSharedAliasRoutingToFableIsNeverAdvised(t *testing.T) {
 	a.Blocked, a.BlockedUntil = "cooldown", t0.Add(time.Hour)
 	b := claudeAcct("claude-b", 40, 72*time.Hour, 0)
 	b.Models, b.Canonical = []string{"best"}, map[string]string{"best": "claude-fable-5-2"}
-	cfg := Config{Models: []ModelCapability{{Name: "best", Match: []string{"best"}, Provider: "claude", Efforts: []string{"high"}}}}
+	cfg := Config{Models: []ModelCapability{{Name: "best", Match: []string{"best"}, Provider: "claude", Normal: Step{Effort: "high"}}}}
 	svc, _, _ := newTestService(t, cfg, Inventory{Accounts: []Account{a, b}, Models: discovered()})
 	if adv := mustAdvise(t, svc, Request{}); len(adv.Models) != 0 {
 		t.Fatalf("a shared alias that routes to Fable was advised: %+v", adv.Models)
@@ -516,202 +547,6 @@ func liveClaude() Inventory {
 	}, Models: discovered()}
 }
 
-func TestLiveClaudeAdvisesHighWithRoomForAboutOneMore(t *testing.T) {
-	svc, _, _ := newTestService(t, Config{}, liveClaude())
-	working(svc, "claude", 4)
-	a := mustAdvise(t, svc, Request{})
-	o := by(a, opus)
-	if a.Posture != PostureRoom || o == nil || o.ReasoningEffort != "high" || o.Mode != ModeStandard || o.Basis != KindRoom || o.Step != 1 || o.Steps != 3 {
-		t.Fatalf("advice = %s %+v", a.Posture, o)
-	}
-	// need = 1/91 + 92/128 + 100/140 = 1.44%/h; target 0.8x = 1.16%/h; recent
-	// 0.9%/h over 4 agents = 0.225%/h each: floor(0.26/0.225) = 1 more.
-	fr := a.Providers[0].Fleet
-	if fr == nil || fr.RoomAgents != 1 || o.RoomAgents == nil || *o.RoomAgents != 1 || a.RoomAgents != 1 || fr.PerAgentBasis != "measured" || fr.RecentBasis != PaceObserved {
-		t.Fatalf("fleet = %+v", fr)
-	}
-	if math.Abs(fr.NeedPercentPerHour-1.444) > 0.01 || math.Abs(fr.TargetPercentPerHour-1.155) > 0.01 || math.Abs(fr.RecentPercentPerHour-0.9) > 0.01 || fr.TimeSensitive {
-		t.Fatalf("rates = %+v", fr)
-	}
-	if a.Fleet.Agents != 4 || a.Fleet.Providers["claude"].Agents != 4 {
-		t.Fatalf("activity = %+v", a.Fleet)
-	}
-	if !strings.HasPrefix(a.Text(), "room for ~1 more agent across all orchestrators (4 working now); start at most that many | reuse until 2026-11-12T12:05:00Z") {
-		t.Fatalf("text = %s", a.Text())
-	}
-}
-
-func TestFleetAtTargetHolds(t *testing.T) {
-	inv := liveClaude()
-	inv.Accounts[1] = claudeAcct("claude-b", 8, 128*time.Hour, 1.3)
-	svc, _, _ := newTestService(t, Config{}, inv)
-	working(svc, "claude", 2)
-	a := mustAdvise(t, svc, Request{})
-	o := by(a, opus)
-	if a.Posture != PostureHold || o.Basis != KindHold || o.ReasoningEffort != "high" || o.RoomAgents == nil || *o.RoomAgents != 0 || a.RoomAgents != 0 {
-		t.Fatalf("advice = %s %+v", a.Posture, o)
-	}
-	if !strings.HasPrefix(a.Text(), "hold: 2 agents working already use the target rate; start no new agents | ") {
-		t.Fatalf("text = %s", a.Text())
-	}
-	// A lower target fraction holds sooner; a higher one makes room.
-	svc, _, _ = newTestService(t, Config{TargetFraction: 1.5}, inv)
-	working(svc, "claude", 2)
-	if a = mustAdvise(t, svc, Request{}); a.Posture != PostureRoom {
-		t.Fatalf("target-fraction 1.5 = %s %+v", a.Posture, a.Providers[0].Fleet)
-	}
-}
-
-func TestFleetAboveNeedConserves(t *testing.T) {
-	// One Claude account, 5% left, burning 2pp/h, reset in 3 days.
-	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{claudeAcct("claude-a", 95, 72*time.Hour, 2)}, Models: discovered()})
-	a := mustAdvise(t, svc, Request{})
-	if a.Status != StatusDegraded || a.Posture != PostureConserve || len(a.Models) != 1 || a.Models[0].Basis != KindConserve || a.Models[0].Step != 1 {
-		t.Fatalf("conserve advice = %s %s %+v", a.Status, a.Posture, a.Models)
-	}
-	if !strings.HasPrefix(a.Text(), "conserve: ") {
-		t.Fatalf("text = %s", a.Text())
-	}
-}
-
-func TestLadderClimbsOnlyWellUnderTarget(t *testing.T) {
-	step := func(pace float64) ModelAdvice {
-		t.Helper()
-		inv := liveClaude()
-		inv.Accounts[1] = claudeAcct("claude-b", 8, 128*time.Hour, pace)
-		svc, _, _ := newTestService(t, Config{}, inv)
-		working(svc, "claude", 1)
-		return *by(mustAdvise(t, svc, Request{}), opus)
-	}
-	// Target ~1.16%/h: 0.8 is 69% of it, 0.5 is 43%, 0.2 is 17%.
-	if o := step(0.8); o.ReasoningEffort != "high" || o.Step != 1 {
-		t.Fatalf("near target = %+v", o)
-	}
-	if o := step(0.5); o.ReasoningEffort != "xhigh" || o.Mode != ModeStandard || o.Step != 2 {
-		t.Fatalf("under 0.6 of target = %+v", o)
-	}
-	// Two steps up would be fast mode, which only time-sensitive surplus unlocks.
-	if o := step(0.2); o.ReasoningEffort != "xhigh" || o.Mode != ModeStandard || o.Step != 2 || !strings.Contains(o.Reason, "17% of its target") {
-		t.Fatalf("under 0.3 of target = %+v", o)
-	}
-	// Codex climbs medium -> high -> xhigh, never to priority by itself.
-	inv := Inventory{Accounts: []Account{codexAcct("codex-a", 20, 96*time.Hour, 0.1), codexAcct("codex-b", 0, 150*time.Hour, 0)}, Models: discovered()}
-	svc, _, _ := newTestService(t, Config{}, inv)
-	working(svc, "codex", 1)
-	if s := by(mustAdvise(t, svc, Request{}), sol); s.ReasoningEffort != "xhigh" || s.Mode != ModeStandard || s.Step != 3 || s.Steps != 4 {
-		t.Fatalf("codex = %+v", s)
-	}
-	inv.Accounts[0] = codexAcct("codex-a", 20, 96*time.Hour, 1.2)
-	svc, _, _ = newTestService(t, Config{}, inv)
-	working(svc, "codex", 1)
-	if s := by(mustAdvise(t, svc, Request{}), sol); s.ReasoningEffort != "medium" || s.Step != 1 {
-		t.Fatalf("codex near target = %+v", s)
-	}
-}
-
-// expiringFleet has two idle Claude accounts whose weeks end within a day.
-func expiringFleet() Inventory {
-	return Inventory{Accounts: []Account{
-		claudeAcct("claude-a", 0, 10*time.Hour, 0),
-		claudeAcct("claude-b", 0, 12*time.Hour, 0),
-		claudeAcct("claude-c", 50, 140*time.Hour, 0),
-	}, Models: discovered()}
-}
-
-func TestFastStepOnlyForTimeSensitiveSurplus(t *testing.T) {
-	// At a 0.5 target the fleet would still leave ~90% of one account
-	// unused at the resets within 24h: the top (fast) step applies.
-	svc, _, _ := newTestService(t, Config{TargetFraction: 0.5}, expiringFleet())
-	a := mustAdvise(t, svc, Request{})
-	o := by(a, opus)
-	if o.ReasoningEffort != "xhigh" || o.Mode != ModeFast || o.Step != 3 || !a.Providers[0].Fleet.TimeSensitive || !strings.Contains(o.Reason, "expire unused within 24h") {
-		t.Fatalf("fast = %+v fleet %+v", o, a.Providers[0].Fleet)
-	}
-	if !strings.Contains(a.Text(), "claude-opus-5-5 effort=xhigh mode=fast | extra high + fast, step 3 of 3 | room for ~") {
-		t.Fatalf("text = %s", a.Text())
-	}
-	// At the default 0.8 target the fleet would use nearly all of it.
-	svc, _, _ = newTestService(t, Config{}, expiringFleet())
-	if o = by(mustAdvise(t, svc, Request{}), opus); o.Mode != ModeStandard {
-		t.Fatalf("default target = %+v", o)
-	}
-	// fast-mode off, a nearly full 5h window or a routing override rule it out.
-	for name, mutate := range map[string]func(*Config, *Inventory){
-		"off":      func(c *Config, _ *Inventory) { c.FastMode = "off" },
-		"caution":  func(_ *Config, inv *Inventory) { inv.Accounts[0].Windows[1].UsedPercent = 90 },
-		"override": func(_ *Config, inv *Inventory) { inv.RoutingOverrides = map[string]string{"claude": "single"} },
-	} {
-		cfg, inv := Config{TargetFraction: 0.5}, expiringFleet()
-		mutate(&cfg, &inv)
-		svc, _, _ = newTestService(t, cfg, inv)
-		if o = by(mustAdvise(t, svc, Request{}), opus); o.Mode != ModeStandard {
-			t.Fatalf("%s: %+v", name, o)
-		}
-	}
-}
-
-func TestCreditsCountAsRoomButNeverTriggerPriority(t *testing.T) {
-	svc, _, _ := newTestService(t, Config{}, liveCodex(true))
-	working(svc, "codex", 1)
-	adv := mustAdvise(t, svc, Request{})
-	s := by(adv, sol)
-	fr := adv.Providers[0].Fleet
-	// ~832% of one account in credits over the 192h horizon: ~4.3%/h.
-	if s == nil || s.Mode != ModeStandard || fr.TimeSensitive || fr.CreditsPercentPerHour < 4 || fr.State != RateRoom || fr.RoomAgents < 3 {
-		t.Fatalf("credit advice = %+v fleet %+v", s, fr)
-	}
-	without, _, _ := newTestService(t, Config{}, liveCodex(false))
-	working(without, "codex", 1)
-	if fr2 := mustAdvise(t, without, Request{}).Providers[0].Fleet; fr2.CreditsPercentPerHour != 0 || fr2.RoomAgents >= fr.RoomAgents {
-		t.Fatalf("credits counted while routing ignores them: %+v", fr2)
-	}
-	text := adv.Text()
-	if !strings.Contains(text, "; credits above the 7.5k floors: 107k (+416%), spend them; 6 full-reset grants (earliest expires in 18d), redeemed automatically\n") ||
-		!strings.Contains(text, "incl. 4.3%/h of credits") {
-		t.Fatalf("text = %s", text)
-	}
-}
-
-func TestPerAgentFallsBackToTaskEstimate(t *testing.T) {
-	inv := liveClaude()
-	for i := range inv.Accounts {
-		inv.Accounts[i].History = nil
-	}
-	svc, _, _ := newTestService(t, Config{}, inv)
-	working(svc, "claude", 3)
-	a := mustAdvise(t, svc, Request{})
-	fr := a.Providers[0].Fleet
-	// A high task: (300k*$4 + 40k*$20)/1e6 = 2 units of 13000 per 30 minutes.
-	if fr.PerAgentBasis != "task_estimate" || fr.RecentBasis != "estimated" || math.Abs(fr.PerAgentPercentPerHour-0.0308) > 0.001 || math.Abs(fr.RecentPercentPerHour-3*0.0308) > 0.003 {
-		t.Fatalf("fallback = %+v", fr)
-	}
-	if o := by(a, opus); !strings.Contains(o.Reason, "estimated from task size") || !strings.Contains(a.Text(), "(estimated from task size)") {
-		t.Fatalf("fallback not explained: %+v\n%s", o, a.Text())
-	}
-	// A ledger rate after a restart counts as measured use.
-	for i := range inv.Accounts {
-		inv.Accounts[i].Usage = &UsageHistory{}
-	}
-	inv.Accounts[1].Usage = &UsageHistory{Last3h: []ModelUsage{{Model: opus, InputTokens: 3e6, OutputTokens: 3e5}}}
-	svc, _, _ = newTestService(t, Config{}, inv)
-	working(svc, "claude", 2)
-	if fr = mustAdvise(t, svc, Request{}).Providers[0].Fleet; fr.RecentBasis != PaceLedger || fr.PerAgentBasis != "measured" || fr.RecentPercentPerHour <= 0 {
-		t.Fatalf("ledger = %+v", fr)
-	}
-}
-
-func TestReserveLowersNeed(t *testing.T) {
-	inv := Inventory{Accounts: []Account{claudeAcct("claude-a", 40, 60*time.Hour, 0.2)}, Models: discovered()}
-	svc, _, _ := newTestService(t, Config{}, inv)
-	free := mustAdvise(t, svc, Request{}).Providers[0].Fleet
-	inv.Accounts[0].ReservePercent = 30
-	svc, _, _ = newTestService(t, Config{}, inv)
-	reserved := mustAdvise(t, svc, Request{}).Providers[0].Fleet
-	if math.Abs(free.NeedPercentPerHour-1) > 0.01 || math.Abs(reserved.NeedPercentPerHour-0.5) > 0.01 {
-		t.Fatalf("need %v / %v", free.NeedPercentPerHour, reserved.NeedPercentPerHour)
-	}
-}
-
 func TestStaleAndExpiredObservations(t *testing.T) {
 	inv := liveClaude()
 	inv.Accounts[0].Windows[0].ObservedAt = t0.Add(-30 * time.Minute)
@@ -727,11 +562,8 @@ func TestStaleAndExpiredObservations(t *testing.T) {
 	}
 	src.mu.Unlock()
 	a = mustAdvise(t, svc, Request{})
-	if o := by(a, opus); o == nil || o.Basis != KindUnmetered || o.Mode != ModeStandard || o.RoomAgents != nil || a.Posture != PostureUnknown {
-		t.Fatalf("expired evidence produced %s %+v", a.Posture, o)
-	}
-	if !strings.HasPrefix(a.Text(), "budget unknown: ") || !strings.Contains(a.Text(), "| budget unknown |") {
-		t.Fatalf("text = %s", a.Text())
+	if o := by(a, opus); o == nil || o.Posture != PostureNormal || o.ReasoningEffort != "high" || o.Mode != ModeStandard {
+		t.Fatalf("expired evidence produced %+v", o)
 	}
 }
 
@@ -742,8 +574,8 @@ func TestCreditFundedAccountsStayAdvised(t *testing.T) {
 	acct.Credits = &Credits{Balance: 20000, Spendable: 12500, Floor: 7500, Enabled: true}
 	svc, _, _ := newTestService(t, Config{}, Inventory{Accounts: []Account{acct}, Models: discovered()})
 	a := mustAdvise(t, svc, Request{})
-	if s := by(a, sol); s == nil || s.Basis == KindConserve || a.Providers[0].Fleet.CreditsPercentPerHour <= 0 {
-		t.Fatalf("credit-funded account = %s %+v", a.Posture, s)
+	if s := by(a, sol); s == nil || s.Posture == PostureAvoid || a.Postures[0].Trend.CreditsPercent <= 0 {
+		t.Fatalf("credit-funded account = %+v %+v", s, a.Postures)
 	}
 	// Without credits the same full window blocks.
 	acct.ServingOnCredits, acct.Credits = false, nil
@@ -760,20 +592,20 @@ func TestExhaustedAccountsAndRetryAfter(t *testing.T) {
 	}
 	svc, src, _ := newTestService(t, Config{}, inv)
 	a := mustAdvise(t, svc, Request{})
-	if by(a, opus) != nil || len(a.Models) != 2 {
+	if by(a, opus) != nil || len(a.Models) != 1 {
 		t.Fatalf("exhausted claude advised: %+v", a.Models)
 	}
 	src.mu.Lock()
 	src.inv.Accounts = src.inv.Accounts[:3]
 	src.mu.Unlock()
 	a = mustAdvise(t, svc, Request{})
-	if a.Status != StatusUnavailable || a.Posture != PostureUnavailable || a.RetryAfterSeconds == nil || len(a.Models) != 0 {
-		t.Fatalf("advice = %s %s retry %v", a.Status, a.Posture, a.RetryAfterSeconds)
+	if a.Status != StatusUnavailable || len(a.Postures) != 3 || a.Postures[0].Provider != "claude" || a.Postures[0].Posture != PostureAvoid || a.RetryAfterSeconds == nil || len(a.Models) != 0 {
+		t.Fatalf("advice = %s %+v retry %v", a.Status, a.Postures, a.RetryAfterSeconds)
 	}
 	if want := int((72 * time.Hour).Seconds()); *a.RetryAfterSeconds != want || a.RefreshAfterSeconds != 300 {
 		t.Fatalf("retry after %d (want %d), refresh %d %q", *a.RetryAfterSeconds, want, a.RefreshAfterSeconds, a.RefreshReason)
 	}
-	if !strings.HasPrefix(a.Text(), "unavailable: start no new subagents | reuse until ") {
+	if !strings.HasPrefix(a.Text(), "claude avoid, codex avoid, opencode-go avoid | reuse until ") || !strings.Contains(a.Text(), "\nclaude avoid: no usable account (allowance_exhausted)\n") {
 		t.Fatalf("text = %s", a.Text())
 	}
 }
@@ -805,19 +637,25 @@ func TestReuseWindow(t *testing.T) {
 	}
 }
 
-func TestAdviceReservesAndCapsNothing(t *testing.T) {
-	svc, _, _ := newTestService(t, Config{}, liveClaude())
-	working(svc, "claude", 4)
-	raw, err := json.Marshal(mustAdvise(t, svc, Request{}))
+func TestAdviceReservesCountsAndCapsNothing(t *testing.T) {
+	svc, _, _ := newTestService(t, Config{}, trendFleet(4, 4, 72))
+	a := mustAdvise(t, svc, Request{})
+	raw, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"max_parallel", "max_subagents", "lease", "reservation", "budget_tasks"} {
+	for _, field := range []string{"max_parallel", "max_subagents", "lease", "reservation", "budget_tasks", "room_agents", "fleet", "agents", "in_flight"} {
 		if strings.Contains(string(raw), "\""+field+"\"") {
 			t.Fatalf("advice carries %q: %s", field, raw)
 		}
 	}
-	for _, leaked := range []string{"claude-a", "scope-secret", "session-claude"} {
+	text := strings.ToLower(a.Text())
+	for _, phrase := range []string{"room for", "working", "agents", "spend freely", "devices"} {
+		if strings.Contains(text, phrase) {
+			t.Fatalf("text carries %q:\n%s", phrase, text)
+		}
+	}
+	for _, leaked := range []string{"claude-a", "codex-a"} {
 		if strings.Contains(string(raw), leaked) {
 			t.Fatalf("advice exposes identity %q", leaked)
 		}
@@ -843,19 +681,46 @@ const trackerOK = `{"opencode":{"windows":[
  {"window":"monthly","left_pct":40,"reset_h":216,"pace_pct_h":0.1,"verdict":"on_track","data":"fresh"},
  {"window":"5h","left_pct":90,"reset_h":1,"pace_pct_h":1,"verdict":"on_track","data":"stale"}]}}`
 
+// The live tracker on 2026-11-14: 5h full, weekly 24% left, monthly 2% left
+// and burning too fast.
+const trackerLive = `{"opencode":{"windows":[
+ {"window":"5h","left_pct":100,"reset_h":4.1,"verdict":"burst_limit","data":"fresh"},
+ {"window":"weekly","left_pct":24,"reset_h":25,"verdict":"too_slow","data":"fresh"},
+ {"window":"monthly","left_pct":2,"reset_h":205.6,"verdict":"too_fast","data":"fresh"}]}}`
+
 func TestOpenCodeGoAvoidedWhenTrackerSaysSo(t *testing.T) {
-	srv := trackerServer(t, trackerLow)
+	for name, tc := range map[string]struct{ body, why string }{
+		"low":  {trackerLow, "monthly 2% left, running out too fast until Nov 21 12:00 UTC"},
+		"live": {trackerLive, "monthly 2% left, running out too fast until Nov 21 01:36 UTC"},
+		// One window burning too fast is enough, even with plenty left.
+		"too fast": {`{"opencode":{"windows":[{"window":"weekly","left_pct":60,"reset_h":30,"verdict":"too_fast","data":"fresh"},{"window":"5h","left_pct":3,"reset_h":1,"data":"stale"}]}}`, "5h 3% left until Nov 12 13:00 UTC"},
+		"blocked":  {`{"opencode":{"windows":[{"window":"5h","left_pct":40,"reset_h":2,"verdict":"blocked","data":"fresh"}]}}`, "5h 40% left, blocked until Nov 12 14:00 UTC"},
+	} {
+		srv := trackerServer(t, tc.body)
+		svc, _, _ := newTestService(t, Config{OpenCodeUsageURL: srv.URL}, normalFleet())
+		if err := svc.SampleOpenCode(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		a := mustAdvise(t, svc, Request{})
+		d, p := by(a, deepseek), posture(a, OpenCodeProvider)
+		reason := tc.why + "; only when Claude and Codex can't serve"
+		// Kept as a last resort: listed last, marked avoid, never usable.
+		if d == nil || d.Posture != PostureAvoid || p.Posture != PostureAvoid || p.Reason != reason || a.Models[len(a.Models)-1].Model != deepseek {
+			t.Fatalf("%s: deepseek %+v posture %+v", name, d, p)
+		}
+		text := a.Text()
+		if !strings.Contains(text, "\nopencode-go avoid: "+reason+"\n") || !strings.Contains(text, "\nopencode-go/deepseek-v4.1-flash effort=high mode=standard | avoid, high | opencode: ") || strings.Contains(text, "budget unknown") || !strings.Contains(strings.SplitN(text, "\n", 2)[0], "opencode-go avoid |") {
+			t.Fatalf("%s: text = %s", name, text)
+		}
+	}
+	srv := trackerServer(t, trackerLive)
 	svc, _, _ := newTestService(t, Config{OpenCodeUsageURL: srv.URL}, normalFleet())
 	if err := svc.SampleOpenCode(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	a := mustAdvise(t, svc, Request{})
-	if by(a, deepseek) != nil {
-		t.Fatalf("opencode advised while nearly empty: %+v", a.Models)
-	}
-	want := "OpenCode Go: avoid until Nov 21 12:00 UTC (monthly 2% left)"
-	if !strings.Contains(a.Text(), want+"\n") || !strings.Contains(a.Text(), "warning: "+want+"\n") {
-		t.Fatalf("text = %s", a.Text())
+	if !strings.Contains(a.Text(), "opencode-go quota: 5h 100% left, resets in 4h; weekly 24% left, resets in 25h; monthly 2% left, resets in 8d13h\n") {
+		t.Fatalf("quota line: %s", a.Text())
 	}
 	var oc *OpenCodeUsage
 	for _, p := range a.Providers {
@@ -865,6 +730,86 @@ func TestOpenCodeGoAvoidedWhenTrackerSaysSo(t *testing.T) {
 	}
 	if oc == nil || !oc.Reachable || oc.AvoidUntil == nil || len(oc.Windows) != 3 || oc.Windows[2].Window != "monthly" {
 		t.Fatalf("opencode = %+v", oc)
+	}
+	// Only OpenCode Go left: nothing is usable.
+	svc, _, _ = newTestService(t, Config{OpenCodeUsageURL: srv.URL}, Inventory{Accounts: []Account{opencodeAcct("opencode")}, Models: discovered()})
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if a := mustAdvise(t, svc, Request{}); a.Status != StatusUnavailable {
+		t.Fatalf("status = %s", a.Status)
+	}
+}
+
+// A failed or hung tracker fetch is never cached: the next fetch replaces it.
+func TestOpenCodeTrackerRecoversAfterFailureAndHang(t *testing.T) {
+	var mu sync.Mutex
+	status, hang := http.StatusForbidden, make(chan struct{})
+	hanging := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		code, h := status, hanging
+		mu.Unlock()
+		if h {
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(trackerOK))
+	}))
+	t.Cleanup(func() { close(hang); srv.Close() })
+	svc, _, now := newTestService(t, Config{OpenCodeUsageURL: srv.URL}, normalFleet())
+	if err := svc.SampleOpenCode(context.Background()); err == nil {
+		t.Fatal("403 accepted")
+	}
+	if by(mustAdvise(t, svc, Request{}), deepseek) != nil {
+		t.Fatal("advised after a 403")
+	}
+	mu.Lock()
+	status = http.StatusOK
+	mu.Unlock()
+	*now = t0.Add(5 * time.Minute)
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d := by(mustAdvise(t, svc, Request{}), deepseek); d == nil || d.Posture != PostureNormal {
+		t.Fatalf("the 403 stuck: %+v", d)
+	}
+	// A hung fetch blocks further fetches only for one reading lifetime.
+	mu.Lock()
+	hanging = true
+	mu.Unlock()
+	*now = t0.Add(10 * time.Minute)
+	go func() { _ = svc.SampleOpenCode(context.Background()) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		svc.mu.Lock()
+		started := !svc.fetchStarted.IsZero()
+		svc.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fetch never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	hanging = false
+	mu.Unlock()
+	*now = t0.Add(15 * time.Minute)
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err) // skipped while the hung fetch is young
+	}
+	*now = t0.Add(26 * time.Minute)
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d := by(mustAdvise(t, svc, Request{}), deepseek); d == nil || d.Posture != PostureNormal {
+		t.Fatalf("a hung fetch froze the tracker: %+v", d)
 	}
 }
 
@@ -876,17 +821,17 @@ func TestOpenCodeGoUsableShowsWindows(t *testing.T) {
 	}
 	a := mustAdvise(t, svc, Request{})
 	d := by(a, deepseek)
-	if d == nil || d.Basis != KindUnmetered || d.ReasoningEffort != "high" {
+	if d == nil || d.Posture != PostureNormal || d.ReasoningEffort != "high" {
 		t.Fatalf("deepseek = %+v", d)
 	}
 	text := a.Text()
-	if !strings.Contains(text, "OpenCode Go: 5h 90% left, resets in 1h (stale); monthly 40% left, resets in 9d\n") || !strings.Contains(text, "room unknown (quota per tracker above)") || strings.Contains(text, "warning: OpenCode") {
+	if !strings.Contains(text, "opencode-go quota: 5h 90% left, resets in 1h (stale); monthly 40% left, resets in 9d\n") || !strings.Contains(text, "opencode-go/deepseek-v4.1-flash effort=high mode=standard | normal, high | opencode: opencode-go/deepseek-v4.1-flash\n") {
 		t.Fatalf("text = %s", text)
 	}
-	// A reading older than 15 minutes counts as unreachable.
+	// A reading older than 15 minutes counts as unreachable: avoid, budget unknown.
 	*now = t0.Add(20 * time.Minute)
 	a = mustAdvise(t, svc, Request{})
-	if by(a, deepseek) == nil || !strings.Contains(a.Text(), "warning: OpenCode Go usage tracker unreachable; its budget is unknown") || !strings.Contains(a.Text(), "| budget unknown |") {
+	if by(a, deepseek) != nil || !strings.Contains(a.Text(), "opencode-go avoid: budget unknown (usage tracker unreachable)\n") || !strings.Contains(strings.SplitN(a.Text(), "\n", 2)[0], "opencode-go avoid |") {
 		t.Fatalf("stale tracker text = %s", a.Text())
 	}
 }
@@ -898,51 +843,17 @@ func TestOpenCodeGoTrackerFailures(t *testing.T) {
 		if err := svc.SampleOpenCode(context.Background()); err == nil {
 			t.Fatalf("%s: accepted", name)
 		}
-		if a := mustAdvise(t, svc, Request{}); by(a, deepseek) == nil || !strings.Contains(a.Text(), "tracker unreachable") {
+		if a := mustAdvise(t, svc, Request{}); by(a, deepseek) != nil || !strings.Contains(a.Text(), "opencode-go avoid: budget unknown (usage tracker unreachable)") {
 			t.Fatalf("%s: %s", name, a.Text())
 		}
 	}
-	// Without a URL nothing is fetched and nothing warns.
+	// Without a URL nothing is fetched and the budget stays unknown.
 	svc, _, _ := newTestService(t, Config{}, normalFleet())
-	if err := svc.SampleOpenCode(context.Background()); err != nil || strings.Contains(mustAdvise(t, svc, Request{}).Text(), "OpenCode") {
-		t.Fatalf("unconfigured tracker: %v", err)
+	if err := svc.SampleOpenCode(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestTextIsShortAndComplete(t *testing.T) {
-	inv := liveClaude()
-	inv.Accounts = append(inv.Accounts, liveCodex(true).Accounts...)
-	inv.Accounts = append(inv.Accounts, opencodeAcct("opencode"))
-	svc, _, _ := newTestService(t, Config{}, inv)
-	working(svc, "claude", 4)
-	working(svc, "codex", 1)
-	a := mustAdvise(t, svc, Request{})
-	text := a.Text()
-	t.Log("\n" + text)
-	lines := strings.Split(strings.TrimSpace(text), "\n")
-	if len(lines) != 11 || len(text) > 2600 {
-		t.Fatalf("lines = %d, bytes = %d:\n%s", len(lines), len(text), text)
-	}
-	want := map[int]string{
-		1:  "claude weekly, all 3 accounts as one: 64% left now; refills +33% in 3d19h, +3% in 5d8h; projected to expire unused: ",
-		2:  "claude accounts: 1% left, resets in 3d19h; 92% left, resets in 5d8h; 100% left, resets in 5d20h",
-		3:  "claude fleet: 4 agents working, recent 0.9%/h of one account; target 1.2%/h (80% of the 1.4%/h that uses every account by its reset); ~0.2%/h per agent -> room for ~1 more",
-		6:  "codex fleet: 1 agent working, recent ",
-		7:  "claude-opus-5-5 effort=high mode=standard | high, step 1 of 3 | room for ~1 more | claude-code: opus, opencode: claude-opus-5-5",
-		8:  "gpt-6.1-sol effort=",
-		9:  "opencode-go/deepseek-v4.1-flash effort=high mode=standard | high | budget unknown | opencode: opencode-go/deepseek-v4.1-flash",
-		10: "agents working (last 10m): 5 (0 requests in flight); claude 4, codex 1; devices key-",
-	}
-	for i, prefix := range want {
-		if !strings.HasPrefix(lines[i], prefix) {
-			t.Fatalf("line %d = %q, want prefix %q\n%s", i, lines[i], prefix, text)
-		}
-	}
-	if !strings.Contains(lines[8], "extra high") || !strings.Contains(lines[8], "effort=xhigh") {
-		t.Fatalf("xhigh must read as extra high but stay xhigh in the token: %q", lines[8])
-	}
-	if !strings.HasPrefix(lines[0], fmt.Sprintf("room for ~%d more agents across all orchestrators (5 working now); start at most that many | reuse until ", a.RoomAgents)) {
-		t.Fatalf("posture line = %q", lines[0])
+	if text := mustAdvise(t, svc, Request{}).Text(); !strings.Contains(text, "opencode-go avoid: budget unknown (no usage tracker configured)") {
+		t.Fatalf("unconfigured tracker: %s", text)
 	}
 }
 
@@ -956,98 +867,62 @@ func TestConfigValidation(t *testing.T) {
 		{MinRefreshSeconds: 5},
 		{MinRefreshSeconds: 600, MaxRefreshSeconds: 300},
 		{NeverAdvise: []string{"["}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"ultra"}}}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Ladder: []Step{{Effort: "high", Mode: "turbo"}}}}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}}}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"["}, Efforts: []string{"high"}}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Normal: Step{Effort: "ultra"}}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, UseMore: Step{Effort: "high", Mode: "turbo"}}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, UseMore: Step{Effort: "max"}}}},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"["}}}},
 		{SafetyFactor: math.NaN()},
 		{SurplusHorizonHours: math.Inf(1)},
 		{Providers: map[string]ProviderConfig{"claude": {CapacityUnits: math.Inf(1)}}},
 		{AccountCapacityUnits: map[string]float64{"a": math.NaN()}},
-		{TaskInputTokens: -1},
-		{TaskOutputTokens: -5},
 		{Prices: map[string]Price{"x*": {}}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"high"}, Price: &Price{Input: -1, Output: 2}}}},
-		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Efforts: []string{"high"}, ModeCostMultiplier: map[string]float64{"fast": 0}}}},
-		{TargetFraction: -0.1},
-		{TargetFraction: math.NaN()},
-		{StepUpOneBelow: 0.2, StepUpTwoBelow: 0.5},
-		{AgentWindowSeconds: 5},
+		{Models: []ModelCapability{{Name: "x", Match: []string{"x"}, Price: &Price{Input: -1, Output: 2}}}},
 		{ReuseSeconds: 10},
-		{TaskMinutes: -1},
-		{FastMinPercent: math.Inf(1)},
+		{TrendDays: 0.5},
+		{TrendDays: 40},
+		{TrendDays: math.NaN()},
+		{CreditSpendDays: -1},
+		{XHighBelowRatio: 1.5},
+		{XHighBelowRatio: -0.1},
+		{ConserveAboveRatio: math.Inf(1)},
+		{FastHorizonHours: -1},
+		{FastMinExpiringPercent: math.Inf(1)},
 		{OpenCodeUsageURL: "ftp://x"},
 	}
 	for i, cfg := range bad {
 		if cfg.Validate() == nil {
-			t.Fatalf("config %d accepted", i)
+			t.Fatalf("config %d accepted: %+v", i, cfg)
 		}
 	}
 	r := Config{Providers: map[string]ProviderConfig{"codex": {PlanCapacityUnits: map[string]float64{"Pro": 500}}}}.Resolve()
 	if r.Providers["codex"].PlanCapacityUnits["pro"] != 500 || r.Providers["claude"].CapacityUnits != 13000 {
 		t.Fatalf("resolve merge = %+v", r.Providers)
 	}
-	defaults := DefaultConfig().Resolve()
-	if len(defaults.NeverAdvise) != 1 || defaults.NeverAdvise[0] != "claude-fable-*" || defaults.TargetFraction != 0.8 || defaults.ReuseSeconds != 300 || defaults.AgentWindowSeconds != 600 || defaults.OpenCodeUsageURL != "" {
-		t.Fatalf("defaults = %+v", defaults)
+	d := DefaultConfig().Resolve()
+	if len(d.NeverAdvise) != 1 || d.NeverAdvise[0] != "claude-fable-*" || d.ReuseSeconds != 300 || d.OpenCodeUsageURL != "" ||
+		d.TrendDays != 3 || d.CreditSpendDays != 7 || d.XHighBelowRatio != 0.5 || d.ConserveAboveRatio != 1 || d.FastHorizonHours != 24 || d.FastMinExpiringPercent != 50 {
+		t.Fatalf("defaults = %+v", d)
 	}
-	ladders := map[string]string{}
-	for _, m := range defaults.Models {
-		var steps []string
-		for _, s := range m.Ladder {
-			steps = append(steps, s.Effort+"/"+s.Mode)
+	steps := map[string]string{}
+	for _, m := range d.Models {
+		var parts []string
+		for _, s := range m.steps() {
+			parts = append(parts, s.Effort+"/"+s.Mode)
 		}
-		ladders[m.Name] = strings.Join(steps, " ")
-		if matchModel(defaults.NeverAdvise, m.Match[0]) {
+		steps[m.Name] = strings.Join(parts, " ")
+		if matchModel(d.NeverAdvise, m.Match[0]) {
 			t.Fatalf("default model %s is on the never-advise list", m.Name)
 		}
 	}
-	if ladders["claude-opus-5.5"] != "high/standard xhigh/standard xhigh/fast" || ladders["gpt-6.1-sol"] != "medium/standard high/standard xhigh/standard xhigh/priority" {
-		t.Fatalf("ladders = %v", ladders)
+	// conserve, normal, use more, fast
+	if steps["claude-opus-5.5"] != "high/standard high/standard xhigh/standard xhigh/fast" ||
+		steps["gpt-6.1-sol"] != "medium/standard high/standard xhigh/standard xhigh/priority" ||
+		steps["deepseek-4.1"] != "high/standard high/standard high/standard high/standard" {
+		t.Fatalf("steps = %v", steps)
 	}
-	// Older configs with efforts and default-effort still load as a ladder.
-	old := Config{Models: []ModelCapability{{Name: "o", Match: []string{opus}, Provider: "claude", Efforts: []string{"xhigh", "high"}, DefaultEffort: "xhigh", Modes: []string{"fast"}}}}
-	if err := old.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if l := old.Resolve().Models[0].Ladder; len(l) != 2 || l[0].Effort != "high" || l[1].Effort != "xhigh" || l[1].Mode != ModeStandard {
-		t.Fatalf("legacy ladder = %+v", l)
-	}
-}
-
-func TestIdleFleetKeepsLastMeasuredPerAgentRate(t *testing.T) {
-	svc, src, now := newTestService(t, Config{}, liveClaude())
-	working(svc, "claude", 4)
-	if fr := mustAdvise(t, svc, Request{}).Providers[0].Fleet; fr.PerAgentBasis != PerAgentMeasured {
-		t.Fatalf("first = %+v", fr)
-	}
-	// Three idle hours later the recent rate is zero; the last measured
-	// per-agent rate (0.225%/h) still sizes the room, not the task estimate.
-	*now = t0.Add(3 * time.Hour)
-	src.mu.Lock()
-	for i := range src.inv.Accounts {
-		w := &src.inv.Accounts[i].Windows[0]
-		w.ObservedAt = *now
-		src.inv.Accounts[i].History = []Sample{{At: t0.Add(30 * time.Minute), UsedPercent: w.UsedPercent, ResetAt: w.ResetAt}}
-	}
-	src.mu.Unlock()
-	a := mustAdvise(t, svc, Request{})
-	fr := a.Providers[0].Fleet
-	if fr.PerAgentBasis != PerAgentLastMeasured || math.Abs(fr.PerAgentPercentPerHour-0.225) > 0.005 || fr.RecentPercentPerHour != 0 || fr.RoomAgents != 5 {
-		t.Fatalf("idle = %+v", fr)
-	}
-	if !strings.Contains(a.Text(), "~0.2%/h per agent (last measured) -> room for ~5 more") {
-		t.Fatalf("text = %s", a.Text())
-	}
-	// After a day it is forgotten.
-	*now = t0.Add(25 * time.Hour)
-	src.mu.Lock()
-	for i := range src.inv.Accounts {
-		src.inv.Accounts[i].Windows[0].ObservedAt = *now
-		src.inv.Accounts[i].History = []Sample{{At: t0.Add(22 * time.Hour), UsedPercent: src.inv.Accounts[i].Windows[0].UsedPercent, ResetAt: src.inv.Accounts[i].Windows[0].ResetAt}}
-	}
-	src.mu.Unlock()
-	if fr = mustAdvise(t, svc, Request{}).Providers[0].Fleet; fr.PerAgentBasis != PerAgentTaskEstimate {
-		t.Fatalf("after a day = %+v", fr)
+	// A rule that names only its normal step uses it everywhere.
+	one := Config{Models: []ModelCapability{{Name: "o", Match: []string{opus}, Provider: "claude", Normal: Step{Effort: "extra-high"}}}}.Resolve().Models[0]
+	if one.Conserve != (Step{Effort: "xhigh", Mode: ModeStandard}) || one.Fast != one.Normal {
+		t.Fatalf("single-step rule = %+v", one)
 	}
 }

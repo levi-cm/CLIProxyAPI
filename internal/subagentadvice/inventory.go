@@ -21,6 +21,20 @@ func WithBackgroundRefresh(ctx context.Context) context.Context {
 	return context.WithValue(ctx, backgroundKey{}, true)
 }
 
+type trendSpanKey struct{}
+
+// WithTrendSpan tells the inventory source how far back the usage trend
+// reaches, so the background sampler reads enough history.
+func WithTrendSpan(ctx context.Context, span time.Duration) context.Context {
+	return context.WithValue(ctx, trendSpanKey{}, span)
+}
+
+// TrendSpan returns the trend window set by WithTrendSpan, or zero.
+func TrendSpan(ctx context.Context) time.Duration {
+	v, _ := ctx.Value(trendSpanKey{}).(time.Duration)
+	return v
+}
+
 // BackgroundRefresh reports whether ctx belongs to the background sampler.
 func BackgroundRefresh(ctx context.Context) bool {
 	v, _ := ctx.Value(backgroundKey{}).(bool)
@@ -71,7 +85,8 @@ type Account struct {
 	ActiveRequests   int
 	// ReservePercent is an operator reserve for this account.
 	ReservePercent float64
-	// History holds durable long-window observations from the last day.
+	// History holds durable long-window observations from the trend window
+	// (at least the last day).
 	History []Sample
 	// Usage holds token totals from the request ledger; nil when unavailable.
 	Usage *UsageHistory
@@ -126,6 +141,11 @@ type Sample struct {
 type UsageHistory struct {
 	Last24h []ModelUsage
 	Last3h  []ModelUsage
+	// Trend holds the totals from TrendFrom to TrendTo, the part of the trend
+	// window the request ledger covers.
+	Trend     []ModelUsage
+	TrendFrom time.Time
+	TrendTo   time.Time
 }
 
 // ModelUsage aggregates tokens for one model.

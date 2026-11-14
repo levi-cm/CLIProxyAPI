@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetactivity"
 )
 
 const (
@@ -27,34 +25,15 @@ type Service struct {
 	source   InventorySource
 	now      func() time.Time
 	samples  map[string][]Sample
-	activity *fleetactivity.Tracker
 	openCode openCodeReading
 	client   *http.Client
-	fetching sync.Mutex // one tracker fetch at a time
-	// perAgent remembers each provider's last measured per-agent rate, the
-	// fallback while the fleet is idle.
-	perAgent map[string]measuredRate
+	// fetchStarted is when the running tracker fetch began; zero when idle.
+	fetchStarted time.Time
 }
 
-type measuredRate struct {
-	rate float64
-	at   time.Time
-}
-
-// perAgentMemory is how long a measured per-agent rate stays a fallback.
-const perAgentMemory = 24 * time.Hour
-
-// New creates a service. cfg is resolved over the defaults. Fleet activity
-// comes from the process-wide tracker.
+// New creates a service. cfg is resolved over the defaults.
 func New(cfg Config, source InventorySource) *Service {
-	return &Service{cfg: cfg.Resolve(), source: source, now: time.Now, samples: map[string][]Sample{}, activity: fleetactivity.Default(), client: &http.Client{}, perAgent: map[string]measuredRate{}}
-}
-
-// SetActivity replaces the fleet activity tracker (tests).
-func (s *Service) SetActivity(t *fleetactivity.Tracker) {
-	s.mu.Lock()
-	s.activity = t
-	s.mu.Unlock()
+	return &Service{cfg: cfg.Resolve(), source: source, now: time.Now, samples: map[string][]Sample{}, client: &http.Client{}}
 }
 
 // SetHTTPClient replaces the client used for the OpenCode Go tracker (tests).
@@ -65,25 +44,31 @@ func (s *Service) SetHTTPClient(c *http.Client) {
 }
 
 // SampleOpenCode refreshes the OpenCode Go reading from the usage tracker. It
-// returns at once when a fetch is already running or no URL is configured.
+// returns at once when no URL is configured or a fetch started less than a
+// reading lifetime ago. A fetch that hangs longer no longer blocks new ones,
+// so a stuck connection cannot freeze the tracker as unreachable; failures
+// are never cached, and only a newer reading replaces the current one.
 func (s *Service) SampleOpenCode(ctx context.Context) error {
 	s.mu.Lock()
-	url, client := s.cfg.OpenCodeUsageURL, s.client
-	s.mu.Unlock()
-	if url == "" || !s.fetching.TryLock() {
+	url, client, now := s.cfg.OpenCodeUsageURL, s.client, s.now().UTC()
+	if url == "" || (!s.fetchStarted.IsZero() && now.Sub(s.fetchStarted) < openCodeMaxAge) {
+		s.mu.Unlock()
 		return nil
 	}
-	defer s.fetching.Unlock()
-	s.mu.Lock()
-	now := s.now().UTC()
+	s.fetchStarted = now
 	s.mu.Unlock()
 	reading, err := fetchOpenCode(ctx, client, url, now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fetchStarted.Equal(now) {
+		s.fetchStarted = time.Time{}
+	}
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.openCode = reading
-	s.mu.Unlock()
+	if reading.at.After(s.openCode.at) {
+		s.openCode = reading
+	}
 	return nil
 }
 
@@ -174,40 +159,22 @@ func (s *Service) prepare(ctx context.Context) (*forecaster, Inventory, error) {
 	return newForecaster(s.cfg, now, inv, s.samplesCopyLocked()), inv, nil
 }
 
-func (s *Service) lastPerAgent(now time.Time) map[string]float64 {
+// openCodeState returns the OpenCode Go usage at the forecaster's clock.
+func (s *Service) openCodeState(f *forecaster) *OpenCodeUsage {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[string]float64{}
-	for provider, m := range s.perAgent {
-		if now.Sub(m.at) <= perAgentMemory {
-			out[provider] = m.rate
-		}
-	}
-	return out
-}
-
-func (s *Service) rememberPerAgent(d decision, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for provider, r := range d.rates {
-		if r != nil && r.perAgentBasis == PerAgentMeasured {
-			s.perAgent[provider] = measuredRate{rate: r.perAgent, at: now}
-		}
-	}
-}
-
-// fleetState returns the current fleet activity and OpenCode Go usage.
-func (s *Service) fleetState(f *forecaster) (fleetactivity.Snapshot, *OpenCodeUsage) {
-	s.mu.Lock()
-	activity, reading := s.activity, s.openCode
+	reading := s.openCode
 	s.mu.Unlock()
-	return activity.Snapshot(time.Duration(f.cfg.AgentWindowSeconds) * time.Second), openCodeUsage(f.cfg, reading, f.now)
+	return openCodeUsage(f.cfg, reading, f.now)
 }
 
-// Sample records quota observations so usage pace is measurable between requests.
+// Sample records quota observations so usage pace is measurable between
+// requests, and lets the inventory source read the trend window's history.
 func (s *Service) Sample(ctx context.Context) error {
+	s.mu.Lock()
+	span := time.Duration(s.cfg.TrendDays * 24 * float64(time.Hour))
+	s.mu.Unlock()
 	s.compute.Lock()
-	inv, err := s.inventory(WithBackgroundRefresh(ctx))
+	inv, err := s.inventory(WithTrendSpan(WithBackgroundRefresh(ctx), span))
 	s.compute.Unlock()
 	if err != nil {
 		return err
@@ -228,18 +195,14 @@ func (s *Service) Advise(ctx context.Context, req Request) (Advice, error) {
 	if err != nil {
 		return Advice{}, err
 	}
-	activity, openCode := s.fleetState(f)
-	d := decide(f, req, activity, openCode, s.lastPerAgent(f.now))
-	s.rememberPerAgent(d, f.now)
+	d := decide(f, req, s.openCodeState(f))
 	refresh, reason := refreshAfter(f, d)
 	out := Advice{
 		Schema:        Schema,
 		SchemaVersion: SchemaVersion,
 		Status:        d.status,
-		Posture:       d.posture,
-		RoomAgents:    d.room,
-		Fleet:         d.activity,
 		GeneratedAt:   f.now,
+		Postures:      append([]ProviderPosture{}, d.postures...),
 		Models:        []ModelAdvice{},
 		Summary:       d.summary,
 		Warnings:      append([]string{}, d.warnings...),
@@ -272,30 +235,21 @@ func modelAdvice(c modelChoice) ModelAdvice {
 		Capability:       c.offer.cap.Name,
 		Provider:         c.offer.provider,
 		Model:            c.offer.model,
-		ReasoningEffort:  c.effort(),
-		Mode:             c.mode(),
-		Basis:            c.kind,
-		Step:             c.step + 1,
-		Steps:            len(c.offer.ladder),
+		ReasoningEffort:  c.step.Effort,
+		Mode:             c.step.Mode,
+		Posture:          c.posture,
 		Harnesses:        harnesses,
 		CapabilitySource: c.offer.capabilitySource,
 		Reason:           c.reason,
 	}
-	if c.room >= 0 && c.kind != KindUnmetered {
-		room := c.room
-		m.RoomAgents = &room
-	}
 	return m
 }
 
-// providerSummaries adds each pool's fleet rate and the OpenCode Go usage to
-// the forecaster's provider summaries.
+// providerSummaries adds the OpenCode Go usage to the forecaster's provider
+// summaries.
 func (d decision) providerSummaries(f *forecaster) []ProviderSummary {
 	out := f.providerSummaries()
 	for i := range out {
-		if r := d.rates[out[i].Provider]; r != nil {
-			out[i].Fleet = r.view()
-		}
 		if out[i].Provider == OpenCodeProvider {
 			out[i].OpenCode = d.openCode
 		}
@@ -303,23 +257,13 @@ func (d decision) providerSummaries(f *forecaster) []ProviderSummary {
 	return out
 }
 
-func (r *fleetRate) view() *FleetRate {
-	return &FleetRate{
-		State: r.state, Accounts: r.accounts,
-		NeedPercentPerHour: round(r.need, 3), CreditsPercentPerHour: round(r.needCredits, 3), TargetPercentPerHour: round(r.target, 3),
-		RecentPercentPerHour: round(r.recent, 3), RecentBasis: r.recentBasis, Agents: r.agents,
-		PerAgentPercentPerHour: round(r.perAgent, 3), PerAgentBasis: r.perAgentBasis, RoomAgents: r.room,
-		ExpiringSoonPercent: round(r.expiring, 1), TimeSensitive: r.timeSensitive,
-	}
-}
-
-// refreshAfter is the reuse window: advice describes a shared, moving fleet,
-// so every orchestrator asks again after reuse-seconds, sooner when a known
-// event (a reset or recovery) changes the answer first.
+// refreshAfter is the reuse window: usage moves, so every orchestrator asks
+// again after reuse-seconds, sooner when a known event (a reset or recovery)
+// changes the answer first.
 func refreshAfter(f *forecaster, d decision) (time.Duration, string) {
 	minWait := time.Duration(f.cfg.MinRefreshSeconds) * time.Second
 	maxWait := time.Duration(f.cfg.MaxRefreshSeconds) * time.Second
-	wait, reason := time.Duration(f.cfg.ReuseSeconds)*time.Second, "the fleet moves; ask again after the reuse window"
+	wait, reason := time.Duration(f.cfg.ReuseSeconds)*time.Second, "usage moves; ask again after the reuse window"
 	consider := func(candidate time.Duration, why string) {
 		if candidate < wait {
 			wait, reason = candidate, why

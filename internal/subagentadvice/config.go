@@ -1,7 +1,8 @@
 // Package subagentadvice forecasts provider quota and turns it into
-// deterministic, read-only subagent advice for orchestrators: how freely to
-// use subagents and with which model, reasoning effort and mode. It owns
-// capability rules and forecasting; it reserves nothing and runs nothing.
+// deterministic, read-only subagent advice for orchestrators: a posture per
+// provider and, per model, the reasoning effort and mode. Postures follow each
+// pool's usage trend over the last days against an even daily budget. It
+// reserves nothing, runs nothing and never gives a number of agents.
 package subagentadvice
 
 import (
@@ -16,7 +17,8 @@ import (
 var effortOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 // Execution modes. Fast is Anthropic's speed tier; priority is the OpenAI
-// service tier. Both spend allowance faster and are selected only for surplus.
+// service tier. Both spend allowance faster and are selected only for
+// allowance that would otherwise expire unused soon.
 const (
 	ModeStandard = "standard"
 	ModeFast     = "fast"
@@ -56,40 +58,33 @@ type Config struct {
 	ShortWindowCautionPercent float64 `yaml:"short-window-caution-percent,omitempty" json:"short-window-caution-percent,omitempty"`
 	// ShortWindowBlockPercent treats a short window this full as closed (default 97).
 	ShortWindowBlockPercent float64 `yaml:"short-window-block-percent,omitempty" json:"short-window-block-percent,omitempty"`
-	// TaskOutputTokens estimates one subagent task's total output at "high" effort (default 40000).
-	TaskOutputTokens int `yaml:"task-output-tokens,omitempty" json:"task-output-tokens,omitempty"`
-	// TaskInputTokens estimates one subagent task's total input across its requests (default 300000).
-	TaskInputTokens int `yaml:"task-input-tokens,omitempty" json:"task-input-tokens,omitempty"`
-	// UnmeteredSubagentPercent is the conservative cost of one subagent task, in
-	// percentage points of an account whose capacity is unknown (default 2).
-	UnmeteredSubagentPercent float64 `yaml:"unmetered-subagent-percent,omitempty" json:"unmetered-subagent-percent,omitempty"`
 	// InFlightRequestPercent is the assumed remaining cost of each in-flight request (default 0.05).
 	InFlightRequestPercent float64 `yaml:"in-flight-request-percent,omitempty" json:"in-flight-request-percent,omitempty"`
 	// FastMode is "auto" (default) or "off".
 	FastMode string `yaml:"fast-mode,omitempty" json:"fast-mode,omitempty"`
-	// AgentWindowSeconds is the sliding window in which a session that sent a
-	// request counts as a working agent (default 600).
-	AgentWindowSeconds int `yaml:"agent-window-seconds,omitempty" json:"agent-window-seconds,omitempty"`
 	// ReuseSeconds is how long orchestrators reuse advice before asking again
 	// (default 300), within the refresh bounds and never past a known change.
 	ReuseSeconds int `yaml:"reuse-seconds,omitempty" json:"reuse-seconds,omitempty"`
-	// TargetFraction is the share of the rate that would use every account's
-	// remaining allowance by its reset that the whole fleet aims for (default 0.8).
-	TargetFraction float64 `yaml:"target-fraction,omitempty" json:"target-fraction,omitempty"`
-	// StepUpOneBelow and StepUpTwoBelow climb the effort ladder one or two
-	// steps while the fleet's recent rate is below that fraction of the target
-	// (defaults 0.6 and 0.3).
-	StepUpOneBelow float64 `yaml:"step-up-one-below,omitempty" json:"step-up-one-below,omitempty"`
-	StepUpTwoBelow float64 `yaml:"step-up-two-below,omitempty" json:"step-up-two-below,omitempty"`
-	// FastHorizonHours and FastMinPercent gate the fast/priority top step: it
-	// is advised only when allowance resetting within the horizon would still
-	// expire unused with the fleet at the target, by more than this percentage
-	// of one account (defaults 24 and 50). Credits never trigger it.
-	FastHorizonHours float64 `yaml:"fast-horizon-hours,omitempty" json:"fast-horizon-hours,omitempty"`
-	FastMinPercent   float64 `yaml:"fast-min-percent,omitempty" json:"fast-min-percent,omitempty"`
-	// TaskMinutes turns the per-task cost estimate into a per-agent rate when
-	// no measured rate exists (default 30).
-	TaskMinutes float64 `yaml:"task-minutes,omitempty" json:"task-minutes,omitempty"`
+	// TrendDays is how many past days the usage trend averages (default 3).
+	// The trend needs at least a day of history; otherwise it is unknown and
+	// advice stays at the normal step.
+	TrendDays float64 `yaml:"trend-days,omitempty" json:"trend-days,omitempty"`
+	// CreditSpendDays spreads credits above the protected floors over this many
+	// days in the daily budget (default 7), while routing spends credits.
+	// Credits never unlock fast or priority mode.
+	CreditSpendDays float64 `yaml:"credit-spend-days,omitempty" json:"credit-spend-days,omitempty"`
+	// XHighBelowRatio advises the use-more step (extra high) only while the
+	// trend is below this share of the even daily budget (default 0.5).
+	XHighBelowRatio float64 `yaml:"xhigh-below-ratio,omitempty" json:"xhigh-below-ratio,omitempty"`
+	// ConserveAboveRatio advises the conserve step while the trend is above
+	// this share of the even daily budget (default 1.0).
+	ConserveAboveRatio float64 `yaml:"conserve-above-ratio,omitempty" json:"conserve-above-ratio,omitempty"`
+	// FastHorizonHours and FastMinExpiringPercent gate the fast/priority
+	// step: on top of the use-more condition, at least this much allowance
+	// (percent of one account) must expire unused within the horizon at the
+	// trend (defaults 24 and 50).
+	FastHorizonHours       float64 `yaml:"fast-horizon-hours,omitempty" json:"fast-horizon-hours,omitempty"`
+	FastMinExpiringPercent float64 `yaml:"fast-min-expiring-percent,omitempty" json:"fast-min-expiring-percent,omitempty"`
 	// OpenCodeUsageURL is the usage tracker's JSON endpoint for OpenCode Go
 	// windows. Empty leaves OpenCode Go's budget unknown.
 	OpenCodeUsageURL string `yaml:"opencode-go-usage-url,omitempty" json:"opencode-go-usage-url,omitempty"`
@@ -141,20 +136,17 @@ type ModelCapability struct {
 	Match []string `yaml:"match" json:"match"`
 	// Provider restricts the match to accounts of this provider. Empty matches any.
 	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
-	// Ladder lists the effort/mode steps from cheapest to most expensive.
-	// Advice starts at the first step and climbs while the fleet runs well
-	// under its target rate. When empty, each effort is one standard step.
-	Ladder []Step `yaml:"ladder,omitempty" json:"ladder,omitempty"`
-	// Efforts are the allowed reasoning efforts; with a ladder they are
-	// derived from it.
-	Efforts []string `yaml:"efforts,omitempty" json:"efforts,omitempty"`
-	// DefaultEffort is ignored: advice starts at the ladder's first step. It is
-	// accepted so older configurations still load.
-	DefaultEffort string `yaml:"default-effort,omitempty" json:"default-effort,omitempty"`
-	// Modes are the allowed execution modes; with a ladder they are derived from it.
-	Modes []string `yaml:"modes,omitempty" json:"modes,omitempty"`
-	// ModeCostMultiplier is the allowance cost of each non-standard mode (default 2).
-	ModeCostMultiplier map[string]float64 `yaml:"mode-cost-multiplier,omitempty" json:"mode-cost-multiplier,omitempty"`
+	// Normal is the step advised by default and while the trend is unknown
+	// (default effort high).
+	Normal Step `yaml:"normal,omitempty" json:"normal,omitempty"`
+	// UseMore is advised while the trend is clearly under budget (default:
+	// the normal step).
+	UseMore Step `yaml:"use-more,omitempty" json:"use-more,omitempty"`
+	// Fast is advised on top of use-more when allowance expires unused soon;
+	// empty means use-more.
+	Fast Step `yaml:"fast,omitempty" json:"fast,omitempty"`
+	// Conserve is advised while the trend is above budget (default: the normal step).
+	Conserve Step `yaml:"conserve,omitempty" json:"conserve,omitempty"`
 	// Price estimates the model's cost in its provider's units.
 	Price *Price `yaml:"price,omitempty" json:"price,omitempty"`
 	// MaxOutputTokens is the output budget used for the context fit check (default 32000).
@@ -167,7 +159,7 @@ type ModelCapability struct {
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
-// Step is one rung of an effort ladder.
+// Step is one reasoning effort and execution mode.
 type Step struct {
 	Effort string `yaml:"effort" json:"effort"`
 	// Mode is standard (default), fast or priority.
@@ -190,19 +182,15 @@ func DefaultConfig() Config {
 		ReservePercent:            5,
 		ShortWindowCautionPercent: 85,
 		ShortWindowBlockPercent:   97,
-		TaskOutputTokens:          40000,
-		TaskInputTokens:           300000,
-		UnmeteredSubagentPercent:  2,
 		InFlightRequestPercent:    0.05,
 		FastMode:                  "auto",
-		AgentWindowSeconds:        600,
 		ReuseSeconds:              300,
-		TargetFraction:            0.8,
-		StepUpOneBelow:            0.6,
-		StepUpTwoBelow:            0.3,
+		TrendDays:                 3,
+		CreditSpendDays:           7,
+		XHighBelowRatio:           0.5,
+		ConserveAboveRatio:        1.0,
 		FastHorizonHours:          24,
-		FastMinPercent:            50,
-		TaskMinutes:               30,
+		FastMinExpiringPercent:    50,
 		OpenCodeAvoidPercent:      5,
 		Providers: map[string]ProviderConfig{
 			"claude": {
@@ -214,30 +202,34 @@ func DefaultConfig() Config {
 		},
 		Models: []ModelCapability{
 			{
-				Name:               "claude-opus-5.5",
-				Match:              []string{"claude-opus-5-5"},
-				Provider:           "claude",
-				Ladder:             []Step{{Effort: "high"}, {Effort: "xhigh"}, {Effort: "xhigh", Mode: ModeFast}},
-				ModeCostMultiplier: map[string]float64{ModeFast: 2},
-				Price:              &Price{Input: 4, Output: 20, CacheRead: 0.2},
-				MaxOutputTokens:    64000,
-				Harnesses:          map[string]string{"claude-code": "opus", "opencode": ""},
+				Name:            "claude-opus-5.5",
+				Match:           []string{"claude-opus-5-5"},
+				Provider:        "claude",
+				Normal:          Step{Effort: "high"},
+				UseMore:         Step{Effort: "xhigh"},
+				Fast:            Step{Effort: "xhigh", Mode: ModeFast},
+				Conserve:        Step{Effort: "high"},
+				Price:           &Price{Input: 4, Output: 20, CacheRead: 0.2},
+				MaxOutputTokens: 64000,
+				Harnesses:       map[string]string{"claude-code": "opus", "opencode": ""},
 			},
 			{
-				Name:               "gpt-6.1-sol",
-				Match:              []string{"gpt-6.1-sol"},
-				Provider:           "codex",
-				Ladder:             []Step{{Effort: "medium"}, {Effort: "high"}, {Effort: "xhigh"}, {Effort: "xhigh", Mode: ModePriority}},
-				ModeCostMultiplier: map[string]float64{ModePriority: 2},
-				Price:              &Price{Input: 2.5, Output: 15, CacheRead: 0.25},
-				MaxOutputTokens:    32000,
-				Harnesses:          map[string]string{"codex": "", "opencode": ""},
+				Name:            "gpt-6.1-sol",
+				Match:           []string{"gpt-6.1-sol"},
+				Provider:        "codex",
+				Normal:          Step{Effort: "high"},
+				UseMore:         Step{Effort: "xhigh"},
+				Fast:            Step{Effort: "xhigh", Mode: ModePriority},
+				Conserve:        Step{Effort: "medium"},
+				Price:           &Price{Input: 2.5, Output: 15, CacheRead: 0.25},
+				MaxOutputTokens: 32000,
+				Harnesses:       map[string]string{"codex": "", "opencode": ""},
 			},
 			{
 				Name:            "deepseek-4.1",
 				Match:           []string{"opencode-go/deepseek-v4.1*", "deepseek-v4.1*"},
 				Provider:        "opencode-go",
-				Ladder:          []Step{{Effort: "high"}},
+				Normal:          Step{Effort: "high"},
 				MaxOutputTokens: 32000,
 				Harnesses:       map[string]string{"opencode": ""},
 			},
@@ -283,21 +275,17 @@ func (cfg Config) Resolve() Config {
 	setFloat(&out.ReservePercent, cfg.ReservePercent)
 	setFloat(&out.ShortWindowCautionPercent, cfg.ShortWindowCautionPercent)
 	setFloat(&out.ShortWindowBlockPercent, cfg.ShortWindowBlockPercent)
-	setInt(&out.TaskOutputTokens, cfg.TaskOutputTokens)
-	setInt(&out.TaskInputTokens, cfg.TaskInputTokens)
-	setFloat(&out.UnmeteredSubagentPercent, cfg.UnmeteredSubagentPercent)
 	setFloat(&out.InFlightRequestPercent, cfg.InFlightRequestPercent)
 	if v := strings.TrimSpace(cfg.FastMode); v != "" {
 		out.FastMode = strings.ToLower(v)
 	}
-	setInt(&out.AgentWindowSeconds, cfg.AgentWindowSeconds)
 	setInt(&out.ReuseSeconds, cfg.ReuseSeconds)
-	setFloat(&out.TargetFraction, cfg.TargetFraction)
-	setFloat(&out.StepUpOneBelow, cfg.StepUpOneBelow)
-	setFloat(&out.StepUpTwoBelow, cfg.StepUpTwoBelow)
+	setFloat(&out.TrendDays, cfg.TrendDays)
+	setFloat(&out.CreditSpendDays, cfg.CreditSpendDays)
+	setFloat(&out.XHighBelowRatio, cfg.XHighBelowRatio)
+	setFloat(&out.ConserveAboveRatio, cfg.ConserveAboveRatio)
 	setFloat(&out.FastHorizonHours, cfg.FastHorizonHours)
-	setFloat(&out.FastMinPercent, cfg.FastMinPercent)
-	setFloat(&out.TaskMinutes, cfg.TaskMinutes)
+	setFloat(&out.FastMinExpiringPercent, cfg.FastMinExpiringPercent)
 	setFloat(&out.OpenCodeAvoidPercent, cfg.OpenCodeAvoidPercent)
 	if v := strings.TrimSpace(cfg.OpenCodeUsageURL); v != "" {
 		out.OpenCodeUsageURL = v
@@ -340,31 +328,10 @@ func (cfg Config) Resolve() Config {
 		m := &out.Models[i]
 		m.Provider = normalizeProvider(m.Provider)
 		m.Match = append([]string(nil), m.Match...)
-		m.DefaultEffort = ""
-		ladder := make([]Step, 0, len(m.Ladder))
-		for _, step := range m.Ladder {
-			ladder = append(ladder, Step{Effort: normalizeEffort(step.Effort), Mode: normalizeMode(step.Mode)})
-		}
-		if len(ladder) == 0 {
-			efforts := make([]string, 0, len(m.Efforts))
-			for _, effort := range m.Efforts {
-				efforts = append(efforts, normalizeEffort(effort))
-			}
-			for _, effort := range sortEfforts(efforts) {
-				ladder = append(ladder, Step{Effort: effort, Mode: ModeStandard})
-			}
-		}
-		m.Ladder = ladder
-		var efforts []string
-		modes := []string{ModeStandard}
-		for _, step := range ladder {
-			efforts = append(efforts, step.Effort)
-			if !contains(modes, step.Mode) {
-				modes = append(modes, step.Mode)
-			}
-		}
-		m.Efforts = sortEfforts(efforts)
-		m.Modes = modes
+		m.Normal = normalizeStep(m.Normal, Step{Effort: "high"})
+		m.UseMore = normalizeStep(m.UseMore, m.Normal)
+		m.Fast = normalizeStep(m.Fast, m.UseMore)
+		m.Conserve = normalizeStep(m.Conserve, m.Normal)
 		if m.MaxOutputTokens <= 0 {
 			m.MaxOutputTokens = 32000
 		}
@@ -403,20 +370,20 @@ func (cfg Config) Validate() error {
 	if r.FastMode != "auto" && r.FastMode != "off" {
 		return fmt.Errorf("fast-mode must be auto or off")
 	}
-	if r.AgentWindowSeconds < 60 || r.AgentWindowSeconds > 3600 {
-		return fmt.Errorf("agent-window-seconds must be between 60 and 3600")
-	}
 	if r.ReuseSeconds < 30 || r.ReuseSeconds > 86400 {
 		return fmt.Errorf("reuse-seconds must be between 30 and 86400")
 	}
-	if r.TargetFraction <= 0 || r.TargetFraction > 2 {
-		return fmt.Errorf("target-fraction must be above 0 and at most 2")
+	if r.TrendDays < 1 || r.TrendDays > 28 {
+		return fmt.Errorf("trend-days must be between 1 and 28")
 	}
-	if r.StepUpTwoBelow < 0 || r.StepUpTwoBelow > r.StepUpOneBelow || r.StepUpOneBelow > 1 {
-		return fmt.Errorf("step thresholds must satisfy 0 <= step-up-two-below <= step-up-one-below <= 1")
+	if r.CreditSpendDays <= 0 {
+		return fmt.Errorf("credit-spend-days must be positive")
 	}
-	if r.TaskMinutes <= 0 {
-		return fmt.Errorf("task-minutes must be positive")
+	if r.XHighBelowRatio <= 0 || r.XHighBelowRatio > r.ConserveAboveRatio {
+		return fmt.Errorf("ratios must satisfy 0 < xhigh-below-ratio <= conserve-above-ratio")
+	}
+	if r.FastHorizonHours <= 0 {
+		return fmt.Errorf("fast-horizon-hours must be positive")
 	}
 	if r.OpenCodeUsageURL != "" && !strings.HasPrefix(r.OpenCodeUsageURL, "http://") && !strings.HasPrefix(r.OpenCodeUsageURL, "https://") {
 		return fmt.Errorf("opencode-go-usage-url must be an http(s) URL")
@@ -440,12 +407,12 @@ func (cfg Config) Validate() error {
 				return fmt.Errorf("models[%d] (%s) has invalid pattern %q", i, m.Name, pattern)
 			}
 		}
-		if len(m.Ladder) == 0 {
-			return fmt.Errorf("models[%d] (%s) needs a ladder or at least one effort", i, m.Name)
-		}
-		for _, step := range m.Ladder {
+		for _, step := range m.steps() {
 			if effortRank(step.Effort) < 0 {
 				return fmt.Errorf("models[%d] (%s) has unknown effort %q", i, m.Name, step.Effort)
+			}
+			if step.Effort == "max" {
+				return fmt.Errorf("models[%d] (%s) must not advise effort max", i, m.Name)
 			}
 			if step.Mode != ModeStandard && step.Mode != ModeFast && step.Mode != ModePriority {
 				return fmt.Errorf("models[%d] (%s) has unknown mode %q", i, m.Name, step.Mode)
@@ -480,23 +447,27 @@ func (r Config) validateNumbers() error {
 		return nil
 	}
 	checks := map[string]float64{
-		"surplus-horizon-hours": r.SurplusHorizonHours, "safety-factor": r.SafetyFactor, "reserve-percent": r.ReservePercent,
-		"short-window-caution-percent": r.ShortWindowCautionPercent, "short-window-block-percent": r.ShortWindowBlockPercent,
-		"unmetered-subagent-percent": r.UnmeteredSubagentPercent, "in-flight-request-percent": r.InFlightRequestPercent,
-		"target-fraction": r.TargetFraction, "step-up-one-below": r.StepUpOneBelow, "step-up-two-below": r.StepUpTwoBelow,
-		"fast-horizon-hours": r.FastHorizonHours, "fast-min-percent": r.FastMinPercent, "task-minutes": r.TaskMinutes,
-		"opencode-go-avoid-percent": r.OpenCodeAvoidPercent,
+		"surplus-horizon-hours":        r.SurplusHorizonHours,
+		"safety-factor":                r.SafetyFactor,
+		"reserve-percent":              r.ReservePercent,
+		"short-window-caution-percent": r.ShortWindowCautionPercent,
+		"short-window-block-percent":   r.ShortWindowBlockPercent,
+		"in-flight-request-percent":    r.InFlightRequestPercent,
+		"trend-days":                   r.TrendDays,
+		"credit-spend-days":            r.CreditSpendDays,
+		"xhigh-below-ratio":            r.XHighBelowRatio,
+		"conserve-above-ratio":         r.ConserveAboveRatio,
+		"fast-horizon-hours":           r.FastHorizonHours,
+		"fast-min-expiring-percent":    r.FastMinExpiringPercent,
+		"opencode-go-avoid-percent":    r.OpenCodeAvoidPercent,
 	}
 	for name, v := range checks {
 		if err := nonNegative(name, v); err != nil {
 			return err
 		}
 	}
-	if r.UnmeteredSubagentPercent <= 0 {
-		return fmt.Errorf("subagent-advisor unmetered-subagent-percent must be positive")
-	}
-	if r.TaskInputTokens < 0 || r.TaskOutputTokens <= 0 || r.StaleAfterSeconds < 0 || r.ExpiredAfterSeconds < 0 {
-		return fmt.Errorf("subagent-advisor task tokens and observation ages must not be negative (task-output-tokens must be positive)")
+	if r.StaleAfterSeconds < 0 || r.ExpiredAfterSeconds < 0 {
+		return fmt.Errorf("subagent-advisor observation ages must not be negative")
 	}
 	for id, v := range r.AccountCapacityUnits {
 		if err := nonNegative("account-capacity-units."+id, v); err != nil {
@@ -529,11 +500,6 @@ func (r Config) validateNumbers() error {
 		if err := price("models."+m.Name+".price", m.Price); err != nil {
 			return err
 		}
-		for mode, v := range m.ModeCostMultiplier {
-			if !finite(v) || v <= 0 {
-				return fmt.Errorf("subagent-advisor models.%s.mode-cost-multiplier.%s must be a finite positive number", m.Name, mode)
-			}
-		}
 	}
 	return nil
 }
@@ -550,6 +516,19 @@ func normalizeEffort(e string) string {
 		return "xhigh"
 	}
 	return e
+}
+
+// normalizeStep normalizes a step; an empty effort takes the fallback step.
+func normalizeStep(s, fallback Step) Step {
+	if strings.TrimSpace(s.Effort) == "" {
+		return fallback
+	}
+	return Step{Effort: normalizeEffort(s.Effort), Mode: normalizeMode(s.Mode)}
+}
+
+// steps lists the rule's steps from conserve to fast.
+func (m ModelCapability) steps() []Step {
+	return []Step{m.Conserve, m.Normal, m.UseMore, m.Fast}
 }
 
 func normalizeMode(m string) string {

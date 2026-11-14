@@ -126,7 +126,6 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	defer policyLease.release()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
-	policyLease.trackActivity(opts)
 	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	normalized := m.normalizeProviders(providers)
@@ -257,7 +256,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
-	policyLease.trackActivity(opts)
 	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	if m.HomeEnabled() {
@@ -583,7 +581,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
-			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID, auth.Provider); errLease != nil {
+			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID); errLease != nil {
 				return cliproxyexecutor.Response{}, errLease
 			}
 			execCtx = newUpstreamAttemptContext(execCtx)
@@ -811,7 +809,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
-			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID, auth.Provider); errLease != nil {
+			if errLease := beginPolicyAttempt(execCtx, opts, auth.ID); errLease != nil {
 				return cliproxyexecutor.Response{}, errLease
 			}
 			execCtx = newUpstreamAttemptContext(execCtx)

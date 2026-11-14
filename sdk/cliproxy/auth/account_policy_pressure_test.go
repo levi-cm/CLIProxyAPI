@@ -42,7 +42,7 @@ func TestManualPressureUsesLiveLeasesAndEarlierTieBreak(t *testing.T) {
 		if err != nil || got == nil || got.ID != want {
 			t.Fatalf("selection %d: %v %v, want %s", i, got, err, want)
 		}
-		if err := beginPolicyAttempt(context.Background(), opts, got.ID, got.Provider); err != nil {
+		if err := beginPolicyAttempt(context.Background(), opts, got.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
