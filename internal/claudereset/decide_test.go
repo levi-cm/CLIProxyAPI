@@ -326,3 +326,26 @@ func TestClassOf(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionBlockedNeedsAKnownLaterRenewal(t *testing.T) {
+	a := Account{}
+	for _, tc := range []struct {
+		name    string
+		resetAt time.Time
+		want    bool
+	}{
+		{"unknown renewal", time.Time{}, false},
+		{"renews soon", testNow.Add(20 * time.Minute), false},
+		{"renews later", testNow.Add(3 * time.Hour), true},
+	} {
+		a.Session = Window{Known: true, Used: 100, ResetAt: tc.resetAt, ObservedAt: testNow}
+		if got := SessionBlocked(a, testNow); got != tc.want {
+			t.Fatalf("%s: blocked = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// A known-full window is still never a target, whatever its renewal time.
+	a.Session = Window{Known: true, Used: 100, ObservedAt: testNow}
+	if !sessionFull(a, testNow) {
+		t.Fatal("full session without a renewal time is not excluded as a target")
+	}
+}

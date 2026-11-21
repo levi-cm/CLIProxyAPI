@@ -306,7 +306,9 @@ func unconfirmed(a Account) bool {
 // sessionBlocked reports a full 5-hour window that keeps the account from
 // serving for a while; one renewing soon still counts as open headroom.
 func sessionBlocked(a Account, now time.Time) bool {
-	return a.Session.fresh(now) && a.Session.Used >= 100 && !a.Session.renewsSoon(now)
+	// A full window without a known renewal time may be about to renew, so it
+	// is no evidence of a lasting block.
+	return a.Session.fresh(now) && a.Session.Used >= 100 && !a.Session.ResetAt.IsZero() && !a.Session.renewsSoon(now)
 }
 
 // SessionBlocked reports a verified full 5-hour window that keeps the account

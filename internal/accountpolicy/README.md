@@ -203,10 +203,10 @@ cases:
     retry does not count; or
   - it was refused locally because no credential could serve (all cooling
     down, possibly beside logged-out ones, or no account the policy allows,
-    such as a forced account on cooldown), while every healthy account was
-    blocked by its weekly window or by a verified 5-hour window that stays
-    full for more than 30 minutes, judged at refusal time from fresh verified
-    inventory of the window running now (not renewed since it was read). At
+    such as a forced account on cooldown), while every account the request
+    could use when it started was blocked by its weekly window or by a
+    verified 5-hour window with a known renewal more than 30 minutes away.
+    It is judged at refusal time from fresh verified inventory of the window running now (not renewed since it was read). At
     least one account must be weekly-exhausted: a fleet blocked only by 5-hour
     windows is not need, because no grant reopens a 5-hour window. An
     active cooldown counts only when its deadline cannot also be the Fable
@@ -247,7 +247,8 @@ cases:
   each keyed by credential, account and organization. It counts only while
   that pool is unchanged, so a hold or override change, even one made while
   the request runs, cannot hand one pool's refusal to accounts that served all
-  along.
+  along. The pool is computed when the request starts, and a need claim is
+  sent only if it is still unchanged after the claim is journaled.
 - One refusal justifies one reset: a new need claim requires a refusal after
   the last need claim, which may already have met that shortage. A resend of
   a pending claim keeps the refusal that started it.

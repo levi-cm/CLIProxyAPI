@@ -35,8 +35,8 @@ func (s *Service) startClaudeResets(ctx context.Context) {
 		},
 		Lock:     policy.LockRedemption,
 		StateDir: policy.StateDir,
-		Held:     func(id string) bool { return policy.Settings().Accounts[id].Hold },
-		Forced:   func() string { return policy.Settings().ForceAccount },
+		Held:     policy.Held,
+		Forced:   policy.ForcedAccount,
 	})
 }
 

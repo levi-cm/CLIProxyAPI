@@ -199,6 +199,26 @@ func (s *Service) StateDir() string {
 	return s.stateDir
 }
 
+// ForcedAccount returns the force-account override without copying settings.
+func (s *Service) ForcedAccount() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.Settings.ForceAccount
+}
+
+// Held reports whether the operator holds account id, without copying settings.
+func (s *Service) Held(id string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.Settings.Accounts[id].Hold
+}
+
 func (s *Service) Settings() Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

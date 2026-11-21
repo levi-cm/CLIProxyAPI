@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,7 +190,7 @@ func newClaudeResetFixture(t *testing.T) *claudeResetFixture {
 // outcome publishes a failed Claude request through a real request lease, as
 // Execute does: the lease captures the routing pool when it starts.
 func (f *claudeResetFixture) outcome(model string, err error) {
-	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
 	defer lease.release()
 	f.m.noteClaudeRequestOutcome([]string{"claude"}, model, err, lease)
 }
@@ -433,7 +436,7 @@ func TestClaudeRefusalCountsOnlyWhenTheRequestFails(t *testing.T) {
 	}
 	claude := []string{"claude"}
 	request := func(window string) *policyRequestLease {
-		opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+		opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
 		t.Cleanup(lease.release)
 		resolved := "claude-opus-5-5"
 		if window == claudeFableWindow {
@@ -502,7 +505,7 @@ func TestClaudeRefusalAttribution(t *testing.T) {
 	m := g.m
 	claude := []string{"claude"}
 	// An Opus request refused with 7d_oi rejected (an overage cap) is not Fable need.
-	opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
 	t.Cleanup(lease.release)
 	h := http.Header{}
 	h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
@@ -1401,7 +1404,7 @@ func TestClaudeRefusalKeepsThePoolItStartedUnder(t *testing.T) {
 	forced = "a"
 	// A request starts while routing is forced to a, and the override is
 	// cleared before it fails: its refusal belongs to the pool {a}.
-	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
 	defer lease.release()
 	forced = ""
 	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), lease)
@@ -1458,5 +1461,86 @@ func TestClaudeResetLocalRefusalOfSessionOnlyFleetIsNotNeed(t *testing.T) {
 	f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
 	if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() || !r.localFable.at.IsZero() {
 		t.Fatalf("a fleet blocked only by 5-hour windows counted as need: %+v", r)
+	}
+}
+
+// claudeDemand is the demand a Claude request registers, as Execute does.
+var claudeDemand = policyRequestDemand{providers: []string{"claude"}, model: "claude-opus-5-5"}
+
+// weeklyRefusedRequest starts a Claude request (capturing the routing pool),
+// marks an upstream weekly-window refusal on it and returns its lease.
+func (f *claudeResetFixture) weeklyRefusedRequest(t *testing.T) *policyRequestLease {
+	opts, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
+	t.Cleanup(lease.release)
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+	f.m.noteClaudeWindowRefusal(Result{Provider: "claude", Model: "claude-opus-5-5", Options: opts}, h)
+	return lease
+}
+
+func TestClaudeRefusalUnderHoldDoesNotSpendTheHeldAccount(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	f.c.tick(context.Background()) // evaluates the full pool
+	// b is held between evaluations; a request starts while only a and c route.
+	f.held["b"] = true
+	lease := f.weeklyRefusedRequest(t)
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", quotaRefusal{}, lease)
+	if r := f.m.claudeRefusalTimes(); r.weekly.at.IsZero() {
+		t.Fatal("the weekly refusal was not recorded")
+	}
+	// b is released: the refusal belongs to {a, c}, not to the pool with b.
+	f.held["b"] = false
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 0 {
+		t.Fatalf("a refusal under a hold spent the held account's grant: %v", f.client.claims)
+	}
+}
+
+func TestClaudeLocalRefusalIsJudgedOnTheStartingPool(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	// b can still serve 4 points; a and c are out.
+	f.client.statuses["b"] = claudeResetObs(96, f.client.statuses["b"].Weekly.ResetAt, 1)
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
+	defer lease.release()
+	// b is held while the request runs, so selection refuses it locally; b
+	// was in the request's pool and is not window-blocked, so this is not need.
+	f.held["b"] = true
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), lease)
+	if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() {
+		t.Fatalf("a refusal caused by a hold counted as weekly need: %+v", r)
+	}
+	f.held["b"] = false
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 0 {
+		t.Fatalf("claims = %v, want none", f.client.claims)
+	}
+}
+
+func TestClaudeNeedClaimRechecksThePoolBeforeSending(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	journaled := regexp.MustCompile(`"attempts":\s*1`)
+	// After the claim on b is journaled, a is held: the pool whose refusal
+	// justified the claim is gone, so the claim is not sent.
+	f.c.opts.Gate = func() (bool, string) {
+		if data, err := os.ReadFile(filepath.Join(f.dir, claudereset.JournalFile)); err == nil && journaled.Match(data) {
+			f.held["a"] = true
+		}
+		return true, ""
+	}
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 0 {
+		t.Fatalf("claim sent after its routing pool changed: %v", f.client.claims)
+	}
+	if op := f.op(t, "b"); op.Result != claudereset.ResultNotSent {
+		t.Fatalf("op = %+v, want not_sent", op)
 	}
 }

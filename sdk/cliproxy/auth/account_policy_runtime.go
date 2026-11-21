@@ -35,11 +35,11 @@ type policyRequestLease struct {
 	clientSelection policyClientSelection
 	// Window refusals of this request's attempts, published as Claude reset
 	// need only if the request finally fails, for the routing pool the request
-	// started under.
+	// started under (computed live when it starts; nil for non-Claude requests
+	// or without a controller).
 	claudeWeeklyRefused bool
 	claudeFableRefused  bool
-	claudePool          string
-	claudePoolKnown     bool
+	claudePool          *claudePool
 }
 
 type policyRequestDemand struct {
@@ -56,7 +56,12 @@ func (m *Manager) trackPolicyRequest(ctx context.Context, opts cliproxyexecutor.
 		ctx = context.Background()
 	}
 	lease := &policyRequestLease{manager: m, ctx: ctx, transport: "downstream_http;upstream_unknown"}
-	lease.claudePool, lease.claudePoolKnown = m.claudeRefusalPool()
+	for _, demand := range demands {
+		if containsClaudeProvider(demand.providers) {
+			lease.claudePool = m.claudeRefusalPool()
+			break
+		}
+	}
 	lease.clientKey = policyClientKeyFromOptions(opts)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) {
 		lease.transport = "downstream_websocket;upstream_unknown"
