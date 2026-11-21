@@ -15,8 +15,8 @@ Claude Max accounts hold **reset grants**:
 - one or two "Fable resets" that clear only the Fable weekly window.
 
 CLIProxy now spends these grants automatically. It spends one when the whole
-Claude fleet runs out of the allowance the grant restores and requests still
-need it, or shortly before a grant would expire unused. Integrate this into
+Claude fleet runs out of the allowance the grant restores and requests are
+refused for it, or shortly before a grant would expire unused. Integrate this into
 the existing Claude views so that, at a glance, the owner can see:
 
 1. how many resets each account still holds, of which kind, and when each expires;
@@ -44,7 +44,7 @@ Keep these distinct in code, labels and docs:
 
 Use only `GET /v8/management/account-policy/accounts`, which is already in the
 read-only contract. CLIProxy builds with this feature add a top-level
-`claude_resets` object. Older builds omit it. If it is absent, hide the feature
+`claude_resets` object (the same object also appears in `/diagnostics`). Older builds omit it. If it is absent, hide the feature
 or show "Not reported by CLIProxy", never 0. Every time field may be absent,
 which means unknown.
 
@@ -58,7 +58,7 @@ which means unknown.
     "weekly": {                     // need trigger for weekly grants
       "headroom": 103.0,            // open weekly allowance across the fleet, in points (100 = one account's week)
       "threshold": 5,               // CLIProxy spends a weekly grant below this
-      "demand_at": "2026-11-20T22:09:58Z", // latest refusal caused by this window; absent when none
+      "demand_at": "2026-11-20T22:09:58Z", // latest request refused because of this window; absent when none
       "state": "ok",                // ok | waiting_demand | settling | capped | no_grant | spending
       "reason": "103 points of allowance are still open across the fleet"
     },
@@ -71,7 +71,7 @@ which means unknown.
       "<raw credential id>": {
         "observed_at": "2026-11-20T22:05:00Z", // last grant inventory read
         "fresh": true,              // weekly usage evidence at most 15 min old
-        "healthy": true,            // enabled, authenticated and not on hold
+        "healthy": true,            // enabled, authenticated, not on hold and not excluded by a force-account override
         "pending": false,           // an automatic claim on this account is unresolved
         "error": "",                // sanitised; "Provider observation failed." when set
         "eligible": true,           // provider reset program eligibility
@@ -90,22 +90,28 @@ which means unknown.
             "starts_at": "2026-11-10T21:30:00Z", "ends_at": "2026-12-10T22:00:00Z",
             "paused": false, "usable_now": true, "requires_limit": false, "blocked": false,
             "usable": true,         // CLIProxy could spend it now if a trigger fired
-            "unusable_reason": ""   // e.g. no_resets_left, not_started, requires_limit, pending, settling, backoff
+            "unusable_reason": ""   // account_ineligible | provider_cooldown | unsupported_grant | no_resets_left | paused |
+                                    // not_usable_now | blocked | not_started | expired | requires_limit | pending |
+                                    // unrecovered | backoff | settling
           }
         ]
       }
     },
     "operations": [                 // newest first, at most 50
       { "id": "…", "credential_id": "<raw>", "grant_id": "launch-2610-fable",
-        "grant_label": "…", "class": "fable",
+        "grant_label": "…", "class": "fable", "clears_fable": true, // clears_weekly / clears_fable: absent means false
         "trigger": "fable_need",    // weekly_need | fable_need | expiry
         "reason": "…", "resets_left_before": 1, "grant_ends_at": "…",
         "state": "done",            // pending | done | failed
-        "result": "reset",          // reset | already_used | reconciled_reset | not_limited | cooldown | ineligible | unavailable | rate_limited | auth_error | not_consumed | not_sent | unresolved | identity_changed | account_removed
+        "result": "reset",          // reset | already_used | reconciled_reset | not_limited | cooldown | ineligible |
+                                    // unavailable | rate_limited | auth_error | not_consumed | not_sent | unresolved |
+                                    // identity_mismatch | identity_changed | account_removed
+                                    // state "done" (reset, already_used, reconciled_reset) means a grant was spent;
+                                    // unresolved may have spent one.
         "attempts": 1, "created_at": "…", "updated_at": "…", "confirmed_at": "…",
         "weekly_before": { "used": 100, "reset_at": "…" },   // cleared windows at claim time, when known
         "fable_before":  { "used": 100, "reset_at": "…" },
-        "recovered": true }         // local routing recovery finished
+        "recovered": true }         // CLIProxy confirmed the reset from a fresh read and reopened routing
     ]
   }
 }
@@ -114,9 +120,12 @@ which means unknown.
 ### How CLIProxy decides (for wording and the "why" text)
 
 - **Weekly need:** when the open weekly allowance across healthy, unheld
-  accounts falls below 5 points and a request was refused because of the weekly
-  window within the last 15 minutes, it spends a weekly grant. It picks the exhausted
-  account (≥ 95% used) whose weekly window renews last.
+  accounts falls below 5 points and a request finally failed because of the
+  weekly window within the last 15 minutes, it spends a weekly grant. An
+  account whose 5-hour window stays full for more than 30 minutes counts as
+  closed, but a fleet blocked only by 5-hour windows is not need, because no
+  grant reopens them. It picks the exhausted account (≥ 95% used) whose weekly
+  window renews last. One refused request justifies at most one reset.
 - **Fable need:** the same check for Fable. It spends only Fable grants, on a
   Fable-exhausted account that has weekly allowance left right now.
 - **Expiry:** in a grant's last 6 h, it spends the grant if the windows it
@@ -125,10 +134,15 @@ which means unknown.
 - **Safety rules:**
   - An account renewing within 30 min counts as open, and so does stale
     evidence.
+  - An account whose last claim may have spent a reset counts as restored
+    until a fresh read confirms it, so a reset is never spent twice on old
+    data.
   - Need-triggered resets are at least 10 min apart and capped at 3 per day.
   - An unresolved claim quarantines only its own account, settles as
     `unresolved` after 1 h, and still counts against the cap.
-  - A failed claim pauses that account for 1 h.
+  - A failed claim pauses that account for 1 h (`backoff_until`).
+  - While routing is forced to one credential, the other accounts are shown
+    with `healthy: false` and do not count as open allowance.
 
 ## Server-side changes
 
