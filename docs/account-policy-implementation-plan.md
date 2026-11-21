@@ -8,7 +8,7 @@ The backend checkout contains passive quota observation, affinity, websocket tra
 
 Tailscale is running on `levi-thinkcentre-m700.dinosaur-dojo.ts.net`, IPv4 `100.82.251.30`. Verify locally over this interface with isolated fixtures. Do not alter host services, tailnet ACLs, credentials, or redeem live credits. Deliver service and ACL recipes and report which live deployment checks need operator provisioning.
 
-Go is not on PATH. Use an isolated Go 1.26 toolchain under `/tmp/cliproxy-policy-toolchain` for verification.
+Go is not on PATH. Use an isolated Go 1.26 toolchain under `/DATA/AppData/CLIProxyAPI/.tools/cliproxy-repair-toolchain` for verification.
 
 ### Updated automatic reset rule
 

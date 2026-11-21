@@ -20,7 +20,7 @@ credentials, conversation bindings, or account-policy state.
 ## Local installation
 
 The installed helper and original legacy template live in
-`/home/levi/.local/share/cliproxy-catalog/`. The output is
+`/DATA/AppData/CLIProxyAPI/.tmp/retained/cliproxy-catalog/`. The output is
 `/DATA/AppData/CLIProxyAPI/static/catalogs/codex-client-compat.json`, visible in the
 existing container mount as `/CLIProxyAPI/static/catalogs/codex-client-compat.json`.
 A user crontab entry refreshes the file hourly and logs metadata to the system

@@ -1,7 +1,7 @@
 # Remaining allowance, temporary routing, and permanent usage
 
 Source: user implementation plan supplied 2026-10-22. Base 17199e47.
-Candidate: /home/levi/worktrees/cliproxy-allowance-history, feature/allowance-history.
+Candidate: /DATA/AppData/CLIProxyAPI/.worktrees/cliproxy-allowance-history, feature/allowance-history.
 Production must remain untouched. No deployment is authorized without a verified uninterrupted handoff, draining, authoritative state ownership, and rollback rehearsal.
 
 Tasks (sequential):

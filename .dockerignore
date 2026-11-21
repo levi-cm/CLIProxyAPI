@@ -20,6 +20,11 @@ auths
 logs
 conv
 config.yaml
+.env
+.env.*
+docker-compose.override.yml
+plugins
+static
 
 # Development/editor
 bin
@@ -36,6 +41,9 @@ bin
 .idea
 .junie
 .worktrees
+.tools
+.tmp
+output
 .bmad
 _bmad
 _bmad-output

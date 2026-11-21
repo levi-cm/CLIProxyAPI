@@ -206,7 +206,7 @@ checks passed, along with affected race tests, server compilation, focused vet,
 All compilation used the half-CPU wrapper. Production remained untouched.
 
 The final uncached full Go suite also passed after both fixes:
-`GO_BINARY=/tmp/cliproxy-policy-toolchain/go/bin/go ./scripts/go-limited.sh test ./... -count=1`.
+`GO_BINARY=/DATA/AppData/CLIProxyAPI/.tools/cliproxy-repair-toolchain/go/bin/go ./scripts/go-limited.sh test ./... -count=1`.
 Logs: `/tmp/cliproxy-review-final-full.log` and
 `/tmp/cliproxy-review-final-race.log`. The CPU limiter regressions run with
 `python3 scripts/test_go_limited.py` (6/6 passed).

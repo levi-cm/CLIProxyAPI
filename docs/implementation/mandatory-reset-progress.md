@@ -5,7 +5,7 @@ two resets appeared to expire unused. Keep the production proxy available and
 preserve streams, WebSockets, conversation ownership and single-writer state.
 
 Implementation base: 27267423, feature/allowance-history, isolated worktree
-/home/levi/worktrees/cliproxy-allowance-history. No production code deployment.
+/DATA/AppData/CLIProxyAPI/.worktrees/cliproxy-allowance-history. No production code deployment.
 
 Behavior:
 - Selecting either automatic mode irreversibly latches automation_required in

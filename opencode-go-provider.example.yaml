@@ -1,0 +1,26 @@
+# Merge this section into config.yaml; this is not a complete server config.
+# Replace the URL, gateway access token and model list before enabling.
+# The three OpenCode Go account credentials stay on the remote gateway.
+api-keys:
+  openai-compatibility:
+    - name: opencode-go-remote
+      disabled: true
+      prefix: go
+      base-url: http://opencode-go-gateway.invalid:8080/v1
+      request-retry: 1
+      disable-cooling: false
+      headers:
+        User-Agent: "$User-Agent"
+        X-Opencode-Session: "$X-Opencode-Session"
+        Session-Id: "$Session-Id"
+        Session_id: "$Session_id"
+        Thread-Id: "$Thread-Id"
+        X-Claude-Code-Session-Id: "$X-Claude-Code-Session-Id"
+      keys:
+        - api-key: REPLACE_WITH_GATEWAY_ACCESS_TOKEN
+          proxy-url: direct
+      models:
+        - name: REPLACE_WITH_EXACT_GATEWAY_MODEL_ID
+          alias: REPLACE_WITH_EXACT_GATEWAY_MODEL_ID
+          input-modalities: [text]
+          output-modalities: [text]
