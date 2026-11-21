@@ -359,3 +359,19 @@ state as `claude_resets`: the mode and gate, both need triggers with their
 reasons, the planned claim, each account's windows and grants, and recent
 operations. Request and organization identifiers are omitted. The status never
 calls the provider.
+
+**Known limitations.** These can only cause a missed reset, never a double
+spend, a wrong-account spend or a routing outage, and they were left out to
+keep the request path simple:
+- On a Fable route, accounts exhausted in different windows (one out of weekly
+  allowance, another out of Fable allowance with weekly left) can keep
+  Fable requests refused until a window renews, even when a full reset
+  could reopen the route.
+- A model-support cooldown later wrapped by a credential-wide quota cooldown
+  keeps that credential out of the route until the wrapper ends.
+- Each scope keeps only its latest refusal; a refusal on a different route
+  (for example another Fable version) replaces it.
+- A refusal on a narrow route does not schedule an early inventory read of
+  that route's accounts; the regular refresh picks them up.
+- Any hold, force-account or credential change while a request runs discards
+  its refusal; the next refusal counts again.
