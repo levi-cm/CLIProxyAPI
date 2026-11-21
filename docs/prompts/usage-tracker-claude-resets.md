@@ -122,8 +122,8 @@ which means unknown.
 - **Weekly need:** when the open weekly allowance across healthy, unheld
   accounts falls below 5 points and a request finally failed because of the
   weekly window within the last 15 minutes, it spends a weekly grant. An
-  account whose 5-hour window stays full for more than 30 minutes counts as
-  closed, but a fleet blocked only by 5-hour windows is not need, because no
+  account whose 5-hour window is full and renews more than 30 minutes from now
+  counts as closed, but a fleet blocked only by 5-hour windows is not need, because no
   grant reopens them. It picks the exhausted account (≥ 95% used) whose weekly
   window renews last. One refused request justifies at most one reset.
 - **Fable need:** the same check for Fable. It spends only Fable grants, on a
