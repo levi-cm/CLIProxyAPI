@@ -58,7 +58,7 @@ func (m *Manager) trackPolicyRequest(ctx context.Context, opts cliproxyexecutor.
 	lease := &policyRequestLease{manager: m, ctx: ctx, transport: "downstream_http;upstream_unknown"}
 	for _, demand := range demands {
 		if containsClaudeProvider(demand.providers) {
-			lease.claudePool = m.claudeRefusalPool()
+			lease.claudePool = m.claudeRefusalPool(demand.model)
 			break
 		}
 	}

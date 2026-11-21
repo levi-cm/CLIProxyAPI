@@ -165,6 +165,9 @@ func newClaudeResetFixture(t *testing.T) *claudeResetFixture {
 			a.ModelStates = map[string]*ModelState{"claude-opus-5-5": quotaCooldown(until), "claude-fable-5-2": quotaCooldown(until)}
 		})
 		f.client.identity[id] = [2]string{account, org}
+		// Selection routes a model only to credentials registered for it.
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}, {ID: "claude-fable-5-2"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 	}
 	f.client.statuses["a"] = claudeResetObs(100, resets["a"], 1)
 	f.client.statuses["b"] = claudeResetObs(100, resets["b"], 1)
@@ -208,7 +211,7 @@ func (f *claudeResetFixture) outcome(model string, err error) {
 // refused records a weekly-window refusal ago before the fixture clock, for
 // the routing pool of that moment.
 func (f *claudeResetFixture) refused(ago time.Duration) {
-	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), f.c.pool(f.c.claudeAuths()).view(), true, false, false, false)
+	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), f.c.routePool(f.c.claudeAuths(), claudeDemand.model), true, false, false, false)
 }
 
 // clearRefusals forgets recorded need.
@@ -1712,5 +1715,121 @@ func TestClaudeResendNeedsTheOriginalTrigger(t *testing.T) {
 	f.c.tick(context.Background())
 	if len(f.client.claims) != 1 {
 		t.Fatalf("need claim resent on expiry evidence: %v", f.client.claims)
+	}
+}
+
+func TestClaudeFableNeedCountsOnlyFableCapableAccounts(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	fableGrant := claudereset.Grant{ID: "fable-reset", Label: "Fable reset", Class: claudereset.ClassFable, ClearsFable: true,
+		ResetsTotal: 1, ResetsLeft: 1, UsableNow: true, EndsAt: f.now.Add(20 * 24 * time.Hour)}
+	for _, id := range []string{"a", "b", "c"} {
+		obs := claudeResetObs(20, f.client.statuses[id].Weekly.ResetAt, 1)
+		obs.Fable.Used = 100
+		f.client.statuses[id] = obs
+	}
+	// a is Fable-exhausted with a Fable reset; b has Fable allowance open but
+	// cannot serve Fable (its credential does not offer the model).
+	a := f.client.statuses["a"]
+	a.Grants = append(a.Grants, fableGrant)
+	f.client.statuses["a"] = a
+	b := f.client.statuses["b"]
+	b.Fable.Used = 0
+	f.client.statuses["b"] = b
+	registry.GetGlobalRegistry().RegisterClient("b", "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	fableDemand := policyRequestDemand{providers: []string{"claude"}, model: "claude-fable-5-2"}
+	opts, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, fableDemand)
+	defer lease.release()
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+	f.m.noteClaudeWindowRefusal(Result{Provider: "claude", Model: "claude-fable-5-2", Options: opts}, h)
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-fable-5-2", quotaRefusal{}, lease)
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "a/fable-reset/") {
+		st, _ := f.m.ClaudeResetStatus()
+		t.Fatalf("claims = %v, want a's Fable reset; fable = %+v", f.client.claims, st.Fable)
+	}
+}
+
+func TestClaudeAggregateWeeklyRejectionIsAttributed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		weekly string
+		want   bool
+	}{{"individual status absent", "", true}, {"individual status allowed", "allowed", false}} {
+		f := newClaudeResetFixture(t)
+		f.clearRefusals()
+		opts, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
+		h := http.Header{}
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-Representative-Claim", "seven_day")
+		if tc.weekly != "" {
+			h.Set("Anthropic-Ratelimit-Unified-7d-Status", tc.weekly)
+		}
+		f.m.noteClaudeWindowRefusal(Result{Provider: "claude", Model: "claude-opus-5-5", Options: opts}, h)
+		f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", quotaRefusal{}, lease)
+		lease.release()
+		if got := !f.m.claudeRefusalTimes().weekly.at.IsZero(); got != tc.want {
+			t.Fatalf("%s: weekly refusal recorded = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestClaudeExpiryClaimRechecksEligibilityFromOneSnapshot(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	obs := f.client.statuses["a"]
+	obs.Grants[0].EndsAt = f.now.Add(3 * time.Hour)
+	f.client.statuses["a"] = obs
+	forced := ""
+	f.c.opts.Forced = func() string { return forced }
+	journaled := regexp.MustCompile(`"attempts":\s*1`)
+	armed, moved := false, false
+	f.c.opts.Gate = func() (bool, string) {
+		if data, err := os.ReadFile(filepath.Join(f.dir, claudereset.JournalFile)); err == nil && journaled.Match(data) {
+			armed = true
+		}
+		return true, ""
+	}
+	// During the final check, after force-account was read, routing is forced
+	// to b: the expiry claim on a must not be sent.
+	f.c.opts.Held = func(id string) bool {
+		if armed && !moved && id == "a" {
+			moved = true
+			forced = "b"
+			f.revision++
+		}
+		return f.held[id]
+	}
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	if !moved {
+		t.Fatal("fixture: no expiry claim reached the final check")
+	}
+	if len(f.client.claims) != 0 {
+		t.Fatalf("expiry claim sent after routing moved away: %v", f.client.claims)
+	}
+	if op := f.op(t, "a"); op.Trigger != claudereset.TriggerExpiry || op.Result != claudereset.ResultNotSent {
+		t.Fatalf("op = %+v, want a not-sent expiry claim", op)
+	}
+}
+
+func TestClaudeRouteCapableKeepsQuotaButNotModelSupportBlocks(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	a := mustAuth(t, f.m, "a")
+	// The fixture's quota cooldowns keep a in the route: a reset restores them.
+	if !f.c.routeCapable(a, "claude-fable-5-2", f.now) {
+		t.Fatal("a quota-cooling account left its route")
+	}
+	a.ModelStates["claude-fable-5-2"] = &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: f.now.Add(12 * time.Hour),
+		LastError: &Error{HTTPStatus: 400, Message: "requested model is not supported"}}
+	if f.c.routeCapable(a, "claude-fable-5-2", f.now) {
+		t.Fatal("a model-support cooldown kept the account in the Fable route")
+	}
+	if !f.c.routeCapable(a, "claude-opus-5-5", f.now) {
+		t.Fatal("a Fable model-support cooldown removed the account from the Opus route")
 	}
 }

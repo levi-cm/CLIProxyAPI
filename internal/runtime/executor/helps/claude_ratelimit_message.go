@@ -2,8 +2,8 @@ package helps
 
 import (
 	"net/http"
-	"strings"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,23 +22,9 @@ func DescribeClaudeRateLimitError(headers http.Header, body []byte) []byte {
 	if !ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
 		return body
 	}
-	status := func(name string) string {
-		return strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, name)))
-	}
-	fiveHourStatus := status("Anthropic-Ratelimit-Unified-5h-Status")
-	weeklyStatus := status("Anthropic-Ratelimit-Unified-7d-Status")
-	fiveHour := fiveHourStatus == "rejected"
-	weekly := weeklyStatus == "rejected"
-	// A rejected aggregate claim can identify a window when its individual
-	// status is absent. Allowed or malformed individual statuses are not proof.
-	if status("Anthropic-Ratelimit-Unified-Status") == "rejected" {
-		switch status("Anthropic-Ratelimit-Unified-Representative-Claim") {
-		case "five_hour":
-			fiveHour = fiveHour || fiveHourStatus == ""
-		case "seven_day":
-			weekly = weekly || weeklyStatus == ""
-		}
-	}
+	// Shared with automatic Claude resets, which attribute weekly refusals the
+	// same way.
+	fiveHour, weekly := cliproxyauth.ClaudeRejectedWindows(headers)
 	var message string
 	switch {
 	case fiveHour && weekly:

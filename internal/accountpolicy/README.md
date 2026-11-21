@@ -198,7 +198,8 @@ cases:
   that finally failed with a refusal (including one delivered in a stream),
   and either:
   - one of its attempts was refused with rate-limit headers marking the weekly
-    window `rejected` (attributed by the attempt's resolved model, so alias
+    window `rejected` (or a rejected aggregate whose representative claim is
+    `seven_day` while the weekly status is absent, as the executor reads it) (attributed by the attempt's resolved model, so alias
     routes count); an attempt refused while another account served the
     retry does not count; or
   - it was refused locally because no credential could serve (all cooling
@@ -243,10 +244,13 @@ cases:
 - Need claims that spent or may have spent a reset (pending or unresolved)
   are at least 10 minutes apart and capped at 3 per 24 hours.
 - Need is bound to the routing pool its request started under: the accounts
-  that could serve then (enabled, not terminally unauthorized, with an
-  unexpired access token, as selection requires; not held; not excluded by
-  `force-account`), each keyed by credential, account and organization. An
-  account that cannot serve adds no allowance and receives no reset. It counts only while
+  that could serve its route then (enabled, not terminally unauthorized, with
+  an unexpired access token, offering the requested model without a
+  model-support block, as selection requires; not held; not excluded by
+  `force-account`), each keyed by credential, account and organization. Quota
+  cooldowns keep an account in the pool, because a reset restores them. The
+  scope's headroom and targets count only that pool: an account that cannot
+  serve the refused route adds no allowance and receives no reset. It counts only while
   that pool is unchanged, so a hold or override change cannot hand one pool's
   refusal to accounts that served all along. The pool is computed when the
   request starts, together with a routing revision that advances on every

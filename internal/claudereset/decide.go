@@ -174,6 +174,26 @@ type Input struct {
 	// LastNeedClaimAt and NeedClaims24h come from need claims, pending or spent.
 	LastNeedClaimAt time.Time
 	NeedClaims24h   int
+	// WeeklyRoute and FableRoute, when set, are the account IDs that can serve
+	// the route whose refusal is that scope's demand. The scope's headroom and
+	// targets count only them: an account that cannot serve the refused model
+	// neither vetoes nor receives its reset.
+	WeeklyRoute map[string]bool
+	FableRoute  map[string]bool
+}
+
+// restrict returns in with accounts outside route marked as unable to serve.
+func restrict(in Input, route map[string]bool) Input {
+	if route == nil {
+		return in
+	}
+	accounts := make([]Account, len(in.Accounts))
+	for i, a := range in.Accounts {
+		a.Healthy = a.Healthy && route[a.ID]
+		accounts[i] = a
+	}
+	in.Accounts = accounts
+	return in
 }
 
 // Claim is a grant the decision wants spent.
@@ -214,19 +234,20 @@ type Plan struct {
 // Decide returns the next grant to spend, if any.
 func Decide(in Input) Plan {
 	plan := Plan{}
-	plan.Weekly = needScope(in, in.ClaudeDemandAt, weeklyHeadroom)
+	weekly, fable := restrict(in, in.WeeklyRoute), restrict(in, in.FableRoute)
+	plan.Weekly = needScope(weekly, in.ClaudeDemandAt, weeklyHeadroom)
 	if plan.Weekly.State == StateSpending {
-		if claim, reason := weeklyTarget(in); claim != nil {
+		if claim, reason := weeklyTarget(weekly); claim != nil {
 			plan.Claim = claim
 		} else {
 			plan.Weekly.State, plan.Weekly.Reason = StateNoGrant, reason
 		}
 	}
-	plan.Fable = needScope(in, in.FableDemandAt, fableHeadroom)
+	plan.Fable = needScope(fable, in.FableDemandAt, fableHeadroom)
 	if plan.Fable.State == StateSpending {
 		if plan.Claim != nil {
 			plan.Fable.State, plan.Fable.Reason = StateSettling, "a weekly reset is being spent first"
-		} else if claim, reason := fableTarget(in); claim != nil {
+		} else if claim, reason := fableTarget(fable); claim != nil {
 			plan.Claim = claim
 		} else {
 			plan.Fable.State, plan.Fable.Reason = StateNoGrant, reason

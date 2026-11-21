@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudereset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -210,12 +211,10 @@ func (m *Manager) noteClaudeWindowRefusal(result Result, headers http.Header) {
 	if !ok || lease == nil {
 		return
 	}
-	rejected := func(window string) bool {
-		return strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-"+window+"-Status")), "rejected")
-	}
 	// The result names the resolved model, so an alias route keeps its Fable
 	// attribution; 7d_oi on a non-Fable model (an overage cap) is not Fable.
-	weekly, fable := rejected("7d"), rejected(claudeFableWindow) && claudeFableModel(result.Model)
+	_, weekly := ClaudeRejectedWindows(headers)
+	fable := strings.EqualFold(claudeHeader(headers, "Anthropic-Ratelimit-Unified-"+claudeFableWindow+"-Status"), "rejected") && claudeFableModel(result.Model)
 	if !weekly && !fable {
 		return
 	}
@@ -273,7 +272,7 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	if lease != nil {
 		pool = lease.claudePool
 	}
-	if pool == nil || c.pool(c.claudeAuths()).view() != pool.view() {
+	if pool == nil || c.routePool(c.claudeAuths(), pool.model).view() != pool.view() {
 		// Without the pool the request started under, or when holds,
 		// force-account or credentials changed while it ran (the request may
 		// have been refused because of the change), this is not need.
@@ -294,7 +293,7 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 		c.poke()
 		return
 	}
-	m.recordClaudeRefusals(c, time.Now().UTC(), pool.view(), weekly, fable, localWeekly, localFable)
+	m.recordClaudeRefusals(c, time.Now().UTC(), *pool, weekly, fable, localWeekly, localFable)
 }
 
 func containsClaudeProvider(providers []string) bool {
@@ -306,13 +305,60 @@ func containsClaudeProvider(providers []string) bool {
 	return false
 }
 
+// ClaudeRejectedWindows reports which Claude usage windows a rate-limit
+// response rejected: the 5-hour and weekly windows by their individual
+// statuses, or by a rejected aggregate claim whose representative window has
+// no individual status. An allowed or malformed individual status is never
+// overridden by the aggregate.
+func ClaudeRejectedWindows(headers http.Header) (fiveHour, weekly bool) {
+	status := func(name string) string { return strings.ToLower(claudeHeader(headers, name)) }
+	fiveHourStatus := status("Anthropic-Ratelimit-Unified-5h-Status")
+	weeklyStatus := status("Anthropic-Ratelimit-Unified-7d-Status")
+	fiveHour, weekly = fiveHourStatus == "rejected", weeklyStatus == "rejected"
+	if status("Anthropic-Ratelimit-Unified-Status") == "rejected" {
+		switch status("Anthropic-Ratelimit-Unified-Representative-Claim") {
+		case "five_hour":
+			fiveHour = fiveHour || fiveHourStatus == ""
+		case "seven_day":
+			weekly = weekly || weeklyStatus == ""
+		}
+	}
+	return fiveHour, weekly
+}
+
+// claudeHeader reads a header case-insensitively, trimmed.
+func claudeHeader(h http.Header, name string) string {
+	if v := h.Get(name); v != "" {
+		return strings.TrimSpace(v)
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, name) && len(v) > 0 {
+			return strings.TrimSpace(v[0])
+		}
+	}
+	return ""
+}
+
 // claudePool is the set of Claude accounts that can serve at one moment:
 // healthy, not held and not excluded by force-account. Members are keyed by
 // credential, account and organization, so a same-ID replacement differs.
 type claudePool struct {
 	key      string
 	revision uint64
-	members  map[string]bool
+	// model is the route the pool was computed for; "" is the whole fleet.
+	model   string
+	members map[string]bool
+}
+
+// ids returns the credential IDs of the pool's members among auths.
+func (p claudePool) ids(auths []*Auth) map[string]bool {
+	out := make(map[string]bool, len(p.members))
+	for _, a := range auths {
+		if p.members[claudePoolMember(a)] {
+			out[a.ID] = true
+		}
+	}
+	return out
 }
 
 // view identifies the routing view: the members and the routing revision
@@ -321,10 +367,11 @@ func (p claudePool) view() string {
 	return strconv.FormatUint(p.revision, 10) + "\x00" + p.key
 }
 
-// claudeRefusalPool computes the routing pool now. A Claude request captures
-// it when it starts, so its refusal is bound to the pool it was routed under
-// even if a hold or override changes while it runs; nil without a controller.
-func (m *Manager) claudeRefusalPool() *claudePool {
+// claudeRefusalPool computes the routing pool of model now. A Claude request
+// captures it when it starts, so its refusal is bound to the accounts that
+// could serve its route even if a hold or override changes while it runs; nil
+// without a controller.
+func (m *Manager) claudeRefusalPool(model string) *claudePool {
 	if m == nil {
 		return nil
 	}
@@ -334,7 +381,7 @@ func (m *Manager) claudeRefusalPool() *claudePool {
 	if c == nil {
 		return nil
 	}
-	pool := c.pool(c.claudeAuths())
+	pool := c.routePool(c.claudeAuths(), model)
 	return &pool
 }
 
@@ -343,8 +390,8 @@ func (m *Manager) claudeRefusalPool() *claudePool {
 // while that pool is unchanged, so a force-account or hold change cannot hand
 // one pool's refusal to accounts that served all along. It wakes the
 // controller.
-func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, pool string, weekly, fable, localWeekly, localFable bool) {
-	refusal := claudeRefusal{at: at, pool: pool}
+func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, pool claudePool, weekly, fable, localWeekly, localFable bool) {
+	refusal := claudeRefusal{at: at, pool: pool.view(), model: pool.model}
 	m.claudeResetMu.Lock()
 	if weekly {
 		m.claudeRefusals.weekly = refusal
@@ -365,6 +412,36 @@ func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, p
 // pool returns the accounts of auths that can serve now (healthy, not held,
 // not excluded by force-account).
 func (c *claudeResetController) pool(auths []*Auth) claudePool {
+	return c.routePool(auths, "")
+}
+
+// routeCapable reports whether a can serve model as selection routes it: the
+// credential supports the model, and no model-support failure or disabled
+// model state blocks it. Quota cooldowns keep it: a reset restores those.
+func (c *claudeResetController) routeCapable(a *Auth, model string, now time.Time) bool {
+	if strings.TrimSpace(model) == "" {
+		return true
+	}
+	if !c.m.authSupportsRouteModel(registry.GetGlobalRegistry(), a, model) {
+		return false
+	}
+	keys := map[string]bool{canonicalModelKey(model): true}
+	if key := c.m.selectionModelKeyForAuth(a, model); key != "" {
+		keys[key] = true
+	}
+	for stateModel, state := range a.ModelStates {
+		if state == nil || !keys[canonicalModelKey(stateModel)] {
+			continue
+		}
+		if state.Status == StatusDisabled || (state.Unavailable && state.NextRetryAfter.After(now) && isModelSupportResultError(state.LastError)) {
+			return false
+		}
+	}
+	return true
+}
+
+// routePool is pool restricted to the accounts that can serve model.
+func (c *claudeResetController) routePool(auths []*Auth, model string) claudePool {
 	revision := func() uint64 {
 		if c.opts.Revision == nil {
 			return 0
@@ -384,7 +461,7 @@ func (c *claudeResetController) pool(auths []*Auth) claudePool {
 		ids := make([]string, 0, len(auths))
 		members := make(map[string]bool, len(auths))
 		for _, a := range auths {
-			if c.healthyFor(a, forced, now) {
+			if c.healthyFor(a, forced, now) && c.routeCapable(a, model, now) {
 				member := claudePoolMember(a)
 				ids = append(ids, member)
 				members[member] = true
@@ -394,10 +471,10 @@ func (c *claudeResetController) pool(auths []*Auth) claudePool {
 			continue
 		}
 		sort.Strings(ids)
-		return claudePool{key: strings.Join(ids, "\x00"), revision: before, members: members}
+		return claudePool{key: strings.Join(ids, "\x00"), revision: before, model: model, members: members}
 	}
 	// Routing keeps changing: a view no refusal or plan can match.
-	return claudePool{key: "unstable\x00" + uuid.NewString(), members: map[string]bool{}}
+	return claudePool{key: "unstable\x00" + uuid.NewString(), model: model, members: map[string]bool{}}
 }
 
 func claudePoolMember(a *Auth) string {
@@ -430,11 +507,30 @@ func (c *claudeResetController) poke() {
 	}
 }
 
-// claudeRefusal is confirmed need and the routing view (claudePool.view) it
-// was refused under.
+// claudeRefusal is confirmed need, the routing view (claudePool.view) it was
+// refused under and the route model that view was computed for.
 type claudeRefusal struct {
-	at   time.Time
-	pool string
+	at    time.Time
+	pool  string
+	model string
+}
+
+// claudeNeedViews are the routing views (and their route models) of the
+// refusals a decision counted as weekly and Fable need.
+type claudeNeedViews struct {
+	weekly, weeklyModel string
+	fable, fableModel   string
+}
+
+// forTrigger returns the view and route model a claim with trigger relies on.
+func (v claudeNeedViews) forTrigger(trigger string) (string, string) {
+	switch trigger {
+	case claudereset.TriggerWeeklyNeed:
+		return v.weekly, v.weeklyModel
+	case claudereset.TriggerFableNeed:
+		return v.fable, v.fableModel
+	}
+	return "", ""
 }
 
 type claudeRefusals struct {
@@ -788,9 +884,15 @@ func (c *claudeResetController) evaluate(auths []*Auth, ignoreOp string) clauder
 	return plan
 }
 
+// claimView sets t's routing view from the views of the decision that planned
+// a claim with trigger.
+func (t *claimTarget) claimView(views claudeNeedViews, trigger string) {
+	t.pool, t.poolModel = views.forTrigger(trigger)
+}
+
 // evaluatePool is evaluate that also returns the routing pool whose refusals
 // it counted as need.
-func (c *claudeResetController) evaluatePool(auths []*Auth, ignoreOp string) (claudereset.Plan, string) {
+func (c *claudeResetController) evaluatePool(auths []*Auth, ignoreOp string) (claudereset.Plan, claudeNeedViews) {
 	in, pool := c.inputPool(auths, ignoreOp, false)
 	plan := claudereset.Decide(in)
 	if ignoreOp == "" {
@@ -811,7 +913,7 @@ func (c *claudeResetController) input(auths []*Auth, ignoreOp string, withSignal
 	return in
 }
 
-func (c *claudeResetController) inputPool(auths []*Auth, ignoreOp string, withSignals bool) (claudereset.Input, string) {
+func (c *claudeResetController) inputPool(auths []*Auth, ignoreOp string, withSignals bool) (claudereset.Input, claudeNeedViews) {
 	now := c.now()
 	ops := c.operations()
 	if ignoreOp != "" {
@@ -833,22 +935,41 @@ func (c *claudeResetController) inputPool(auths []*Auth, ignoreOp string, withSi
 		in.Accounts[i].Healthy = snapshot.members[claudePoolMember(a)]
 	}
 	// Need is a refusal Anthropic attributed to the window, or a local refusal
-	// while every healthy account is blocked by that window, and only for the
-	// routing pool it was refused for.
+	// while every account of its route is blocked by that window, and only
+	// while that route's pool is unchanged. The scope then counts only the
+	// accounts that can serve that route.
 	r := c.m.claudeRefusalTimes()
-	pool := snapshot.view()
-	latest := func(refusals ...claudeRefusal) time.Time {
-		var at time.Time
+	routes := map[string]claudePool{"": snapshot}
+	current := func(model string) claudePool {
+		p, ok := routes[model]
+		if !ok {
+			p = c.routePool(auths, model)
+			routes[model] = p
+		}
+		return p
+	}
+	latest := func(refusals ...claudeRefusal) (time.Time, claudeRefusal) {
+		var best claudeRefusal
 		for _, refusal := range refusals {
-			if refusal.pool == pool && refusal.at.After(at) {
-				at = refusal.at
+			if refusal.at.After(best.at) && refusal.pool == current(refusal.model).view() {
+				best = refusal
 			}
 		}
-		return at
+		return best.at, best
 	}
-	in.ClaudeDemandAt = latest(r.weekly, r.localWeekly)
-	in.FableDemandAt = latest(r.fable, r.localFable)
-	return in, pool
+	var views claudeNeedViews
+	var weekly, fable claudeRefusal
+	in.ClaudeDemandAt, weekly = latest(r.weekly, r.localWeekly)
+	in.FableDemandAt, fable = latest(r.fable, r.localFable)
+	if !in.ClaudeDemandAt.IsZero() {
+		in.WeeklyRoute = current(weekly.model).ids(auths)
+		views.weekly, views.weeklyModel = weekly.pool, weekly.model
+	}
+	if !in.FableDemandAt.IsZero() {
+		in.FableRoute = current(fable.model).ids(auths)
+		views.fable, views.fableModel = fable.pool, fable.model
+	}
+	return in, views
 }
 
 // localRefusalCauses reports whether a local refusal right now is caused by
@@ -1015,8 +1136,9 @@ type claimTarget struct {
 	token string
 	obs   claudereset.Observation
 	// pool is the routing view (claudePool.view) whose refusal justified a
-	// need claim.
-	pool string
+	// need claim, computed for route poolModel.
+	pool      string
+	poolModel string
 }
 
 // freshTarget refreshes the token if it expires soon, then re-reads the
@@ -1056,7 +1178,7 @@ func (c *claudeResetController) target(ctx context.Context, id, wantAccount, wan
 // whose refusal justified it, changed after it was planned. Expiry claims need
 // no refusal.
 func (c *claudeResetController) poolChanged(t claimTarget, op claudereset.Operation) bool {
-	return op.Trigger != claudereset.TriggerExpiry && (t.pool == "" || c.pool(c.claudeAuths()).view() != t.pool)
+	return op.Trigger != claudereset.TriggerExpiry && (t.pool == "" || c.routePool(c.claudeAuths(), t.poolModel).view() != t.pool)
 }
 
 func (c *claudeResetController) stillTarget(t claimTarget) bool {
@@ -1068,7 +1190,10 @@ func (c *claudeResetController) stillTarget(t claimTarget) bool {
 // excluded by force-account).
 func (c *claudeResetController) unchanged(t claimTarget, eligible bool) bool {
 	current, ok := c.m.GetByID(t.auth.ID)
-	if !ok || current.RegistrationEpoch != t.auth.RegistrationEpoch || authAccessToken(current) != t.token || (eligible && !c.healthy(current)) {
+	// Eligibility comes from one routing snapshot, so a hold and a
+	// force-account change are never read from two policy states.
+	if !ok || current.RegistrationEpoch != t.auth.RegistrationEpoch || authAccessToken(current) != t.token ||
+		(eligible && !c.pool([]*Auth{current}).members[claudePoolMember(current)]) {
 		return false
 	}
 	readAccount, readOrg := claudeResetIdentity(t.auth)
@@ -1104,11 +1229,11 @@ func (c *claudeResetController) claim(ctx context.Context, planned claudereset.C
 	if !ok {
 		return
 	}
-	verified, pool := c.evaluatePool(c.claudeAuths(), "")
+	verified, views := c.evaluatePool(c.claudeAuths(), "")
 	if !sameClaim(verified.Claim, planned) {
 		return
 	}
-	t.pool = pool
+	t.claimView(views, verified.Claim.Trigger)
 	grant, ok := findGrant(t.obs, planned.GrantID)
 	if !ok {
 		return
@@ -1254,11 +1379,11 @@ func (c *claudeResetController) recoverPending(ctx context.Context) {
 				c.settle(ctx, op, claudereset.OpFailed, claudereset.ResultNotConsumed)
 				continue
 			case known:
-				replanned, pool := c.evaluatePool(c.claudeAuths(), op.ID)
+				replanned, views := c.evaluatePool(c.claudeAuths(), op.ID)
 				// The same trigger must still hold: an expiry claim is not resent
 				// on need evidence, nor a need claim on expiry.
 				if replanned.Claim != nil && replanned.Claim.AccountID == op.CredentialID && replanned.Claim.GrantID == op.GrantID && replanned.Claim.Trigger == op.Trigger {
-					t.pool = pool
+					t.claimView(views, op.Trigger)
 					c.submit(ctx, t, op)
 				}
 				continue
