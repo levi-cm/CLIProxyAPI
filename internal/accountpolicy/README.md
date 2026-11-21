@@ -204,8 +204,11 @@ cases:
   - it was refused locally because no credential could serve (all cooling
     down, possibly beside logged-out ones, or no account the policy allows,
     such as a forced account on cooldown), while every healthy account was
-    blocked by its weekly window, judged at refusal time from fresh verified
-    inventory of the window running now (not renewed since it was read). An
+    blocked by its weekly window or by a verified 5-hour window that stays
+    full for more than 30 minutes, judged at refusal time from fresh verified
+    inventory of the window running now (not renewed since it was read). At
+    least one account must be weekly-exhausted: a fleet blocked only by 5-hour
+    windows is not need, because no grant reopens a 5-hour window. An
     active cooldown counts only when its deadline cannot also be the Fable
     window's: the two usually renew together, and a Fable refusal can block a
     whole credential while weekly allowance remains. Later fleet changes cannot
@@ -239,10 +242,12 @@ cases:
   however soon it renews.
 - Need claims that spent or may have spent a reset (pending or unresolved)
   are at least 10 minutes apart and capped at 3 per 24 hours.
-- Need is bound to the routing pool it was refused for: the accounts that
-  could serve then (healthy, not held, not excluded by `force-account`). It
-  counts only while that pool is unchanged, so a hold or override change
-  cannot hand one pool's refusal to accounts that served all along.
+- Need is bound to the routing pool its request started under: the accounts
+  that could serve then (healthy, not held, not excluded by `force-account`),
+  each keyed by credential, account and organization. It counts only while
+  that pool is unchanged, so a hold or override change, even one made while
+  the request runs, cannot hand one pool's refusal to accounts that served all
+  along.
 - One refusal justifies one reset: a new need claim requires a refusal after
   the last need claim, which may already have met that shortage. A resend of
   a pending claim keeps the refusal that started it.

@@ -309,6 +309,10 @@ func sessionBlocked(a Account, now time.Time) bool {
 	return a.Session.fresh(now) && a.Session.Used >= 100 && !a.Session.renewsSoon(now)
 }
 
+// SessionBlocked reports a verified full 5-hour window that keeps the account
+// from serving for a while (not renewing soon).
+func SessionBlocked(a Account, now time.Time) bool { return sessionBlocked(a, now) }
+
 // sessionFull reports a known-full 5-hour window; such an account is never a
 // claim target, however soon the window renews.
 func sessionFull(a Account, now time.Time) bool {

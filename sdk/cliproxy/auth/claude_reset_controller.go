@@ -82,6 +82,9 @@ type claudeResetController struct {
 	wake   chan struct{}
 
 	mu          sync.Mutex
+	pool        string
+	poolForced  string
+	poolKnown   bool
 	recoveries  map[string]*claudeRecoveryProgress
 	journal     *claudereset.Journal
 	journalErr  string
@@ -275,21 +278,65 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	if c == nil {
 		return
 	}
-	if !weekly && !fable && !localWeekly && !localFable {
-		// Without a confirmed cause this is not need, but fresher inventory
-		// may confirm the next refusal: wake the controller.
+	if (!weekly && !fable && !localWeekly && !localFable) || lease == nil || !lease.claudePoolKnown {
+		// Without a confirmed cause or a known routing pool this is not need,
+		// but fresher inventory may confirm the next refusal: wake the controller.
 		c.poke()
 		return
 	}
-	m.recordClaudeRefusals(c, time.Now().UTC(), weekly, fable, localWeekly, localFable)
+	m.recordClaudeRefusals(c, time.Now().UTC(), lease.claudePool, weekly, fable, localWeekly, localFable)
+}
+
+// claudeRefusalPool returns the routing pool of the controller's latest
+// evaluation. A request captures it when it starts, so a refusal is bound to
+// the pool it was routed under even if an override changes while it runs.
+func (m *Manager) claudeRefusalPool() (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	m.claudeResetMu.Lock()
+	c := m.claudeResets
+	m.claudeResetMu.Unlock()
+	if c == nil {
+		return "", false
+	}
+	return c.currentPool()
+}
+
+// forced returns the force-account override, or "".
+func (c *claudeResetController) forced() string {
+	if c.opts.Forced == nil {
+		return ""
+	}
+	return c.opts.Forced()
+}
+
+// currentPool returns the cached routing pool, recomputing it when none is
+// known yet or the force-account override changed since it was computed.
+func (c *claudeResetController) currentPool() (string, bool) {
+	forced := c.forced()
+	c.mu.Lock()
+	pool, known, cachedForced := c.pool, c.poolKnown, c.poolForced
+	c.mu.Unlock()
+	if known && cachedForced == forced {
+		return pool, true
+	}
+	return c.storePool(forced, c.poolKey(c.claudeAuths())), true
+}
+
+func (c *claudeResetController) storePool(forced, pool string) string {
+	c.mu.Lock()
+	c.pool, c.poolForced, c.poolKnown = pool, forced, true
+	c.mu.Unlock()
+	return pool
 }
 
 // recordClaudeRefusals stores confirmed need with the routing pool (the
-// accounts that could serve) at refusal time; it counts only while that pool
-// is unchanged, so a force-account or hold change cannot hand one pool's
-// refusal to accounts that served all along. It wakes the controller.
-func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, weekly, fable, localWeekly, localFable bool) {
-	pool := c.poolKey(c.claudeAuths())
+// accounts that could serve) the request was routed under; it counts only
+// while that pool is unchanged, so a force-account or hold change cannot hand
+// one pool's refusal to accounts that served all along. It wakes the
+// controller.
+func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, pool string, weekly, fable, localWeekly, localFable bool) {
 	refusal := claudeRefusal{at: at, pool: pool}
 	m.claudeResetMu.Lock()
 	if weekly {
@@ -314,7 +361,9 @@ func (c *claudeResetController) poolKey(auths []*Auth) string {
 	ids := make([]string, 0, len(auths))
 	for _, a := range auths {
 		if c.healthy(a) {
-			ids = append(ids, a.ID)
+			// The logical identity keeps a same-ID replacement out of the pool.
+			account, org := claudeResetIdentity(a)
+			ids = append(ids, a.ID+"|"+account+"|"+org)
 		}
 	}
 	sort.Strings(ids)
@@ -723,7 +772,8 @@ func (c *claudeResetController) input(auths []*Auth, ignoreOp string, withSignal
 	// while every healthy account is blocked by that window, and only for the
 	// routing pool it was refused for.
 	r := c.m.claudeRefusalTimes()
-	pool := c.poolKey(auths)
+	forced := c.forced()
+	pool := c.storePool(forced, c.poolKey(auths))
 	latest := func(refusals ...claudeRefusal) time.Time {
 		var at time.Time
 		for _, refusal := range refusals {
@@ -797,7 +847,7 @@ func weeklyCooldown(a *Auth, acct claudereset.Account, now time.Time) bool {
 // window (or, for fable, by its weekly or Fable window), according to verified
 // inventory or a cooldown caused by that window.
 func fleetCooling(auths []*Auth, accts []claudereset.Account, fable bool, now time.Time) bool {
-	seen := false
+	seen, restorable := false, false
 	for i, a := range auths {
 		acct := accts[i]
 		if !acct.Healthy {
@@ -809,15 +859,25 @@ func fleetCooling(auths []*Auth, accts []claudereset.Account, fable bool, now ti
 		// proves a weekly cause only when its deadline cannot also be the
 		// Fable window's: the two usually renew together, and a Fable refusal
 		// can block the whole credential while weekly allowance remains.
-		if (acct.Weekly.Current(now) && windowOut(acct.Observation, claudereset.WindowWeekly, acct.Weekly)) || weeklyCooldown(a, acct, now) {
+		weeklyOut := (acct.Weekly.Current(now) && windowOut(acct.Observation, claudereset.WindowWeekly, acct.Weekly)) || weeklyCooldown(a, acct, now)
+		if weeklyOut {
+			// A weekly reset restores this account for weekly need.
+			restorable = restorable || !fable
+			continue
+		}
+		// A verified full 5-hour window blocks the account as the decision
+		// counts it, but no reset grant reopens it.
+		if claudereset.SessionBlocked(acct, now) {
 			continue
 		}
 		if fable && ((acct.Fable.Current(now) && windowOut(acct.Observation, claudereset.WindowFable, acct.Fable)) || cooldownCausedBy(a, acct.Fable.ResetAt, true, now)) {
+			restorable = true
 			continue
 		}
 		return false
 	}
-	return seen
+	// A fleet blocked only by 5-hour windows is not need: no grant helps.
+	return seen && restorable
 }
 
 // mergeClaudeSignals overlays each usage window from response headers or the

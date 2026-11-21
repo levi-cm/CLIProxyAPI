@@ -184,10 +184,18 @@ func newClaudeResetFixture(t *testing.T) *claudeResetFixture {
 	return f
 }
 
+// outcome publishes a failed Claude request through a real request lease, as
+// Execute does: the lease captures the routing pool when it starts.
+func (f *claudeResetFixture) outcome(model string, err error) {
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	defer lease.release()
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, model, err, lease)
+}
+
 // refused records a weekly-window refusal ago before the fixture clock, for
 // the routing pool of that moment.
 func (f *claudeResetFixture) refused(ago time.Duration) {
-	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), true, false, false, false)
+	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), f.c.poolKey(f.c.claudeAuths()), true, false, false, false)
 }
 
 // clearRefusals forgets recorded need.
@@ -452,7 +460,7 @@ func TestClaudeRefusalCountsOnlyWhenTheRequestFails(t *testing.T) {
 		t.Fatal("Fable refusal on an alias route not recorded")
 	}
 	// Without verified inventory confirming a window cause, a local refusal is not need.
-	m.noteClaudeRequestOutcome(claude, "claude-fable-5-2", newModelCooldownError("claude-fable-5-2", "claude", time.Hour), nil)
+	f.outcome("claude-fable-5-2", newModelCooldownError("claude-fable-5-2", "claude", time.Hour))
 	if r := m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() || !r.localFable.at.IsZero() {
 		t.Fatalf("unconfirmed local refusal = %+v", r)
 	}
@@ -508,7 +516,7 @@ func TestClaudeRefusalAttribution(t *testing.T) {
 	f := newClaudeResetFixture(t)
 	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
 	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
-	f.m.noteClaudeRequestOutcome(claude, "claude-opus-5-5", &Error{Code: "auth_unavailable", HTTPStatus: 503}, nil)
+	f.outcome("claude-opus-5-5", &Error{Code: "auth_unavailable", HTTPStatus: 503})
 	if r := f.m.claudeRefusalTimes(); r.localWeekly.at.IsZero() {
 		t.Fatal("auth_unavailable selection refusal not recorded")
 	}
@@ -603,7 +611,7 @@ func TestClaudeResetLocalRefusalNeedsWindowCause(t *testing.T) {
 	f.clearRefusals()
 	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
 	refuse := func() {
-		f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), nil)
+		f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
 	}
 	// At refusal time c (99%) is cooling for another cause (a 5-hour window):
 	// the refusal is not weekly need, and later fleet changes cannot make it one.
@@ -662,7 +670,7 @@ func TestClaudeResetLocalRefusalIgnoresRenewedOrStaleExhaustion(t *testing.T) {
 			t.Fatal(err)
 		}
 		tc.mutate(f)
-		f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), nil)
+		f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
 		if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() {
 			t.Fatalf("%s: local refusal given a weekly cause: %+v", tc.name, r)
 		}
@@ -686,7 +694,7 @@ func TestClaudeResetFableCooldownAtWeeklyDeadlineIsNotWeeklyNeed(t *testing.T) {
 	if _, err := f.m.Update(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), nil)
+	f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
 	if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() {
 		t.Fatalf("a Fable-caused credential cooldown counted as weekly need: %+v", r)
 	}
@@ -1379,5 +1387,76 @@ func TestClaudeResetForcedAccountCooldownThroughExecute(t *testing.T) {
 	c.tick(context.Background())
 	if len(client.claims) != 1 || !strings.HasPrefix(client.claims[0], ids["a"]+"/") {
 		t.Fatalf("claims = %v, want the forced account", client.claims)
+	}
+}
+
+func TestClaudeRefusalKeepsThePoolItStartedUnder(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	forced := ""
+	f.c.opts.Forced = func() string { return forced }
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	f.c.tick(context.Background()) // evaluates, caching the full pool
+	forced = "a"
+	// A request starts while routing is forced to a, and the override is
+	// cleared before it fails: its refusal belongs to the pool {a}.
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
+	defer lease.release()
+	forced = ""
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), lease)
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if r := f.m.claudeRefusalTimes(); r.localWeekly.at.IsZero() {
+		t.Fatal("the forced request's refusal was not recorded")
+	}
+	if len(f.client.claims) != 0 {
+		t.Fatalf("a forced-pool refusal was spent on the full pool: %v", f.client.claims)
+	}
+	// A refusal of a request routed under the full pool is need there.
+	f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "b/") {
+		t.Fatalf("claims = %v, want b", f.client.claims)
+	}
+}
+
+func TestClaudeResetLocalRefusalCountsSessionBlockedPeers(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	// b has weekly allowance left, but its verified 5-hour window is full for
+	// hours: it cannot serve and no reset grant reopens it.
+	b := claudeResetObs(10, f.client.statuses["b"].Weekly.ResetAt, 1)
+	b.Session = claudereset.Window{Known: true, Used: 100, ResetAt: f.now.Add(3 * time.Hour)}
+	f.client.statuses["b"] = b
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
+	if r := f.m.claudeRefusalTimes(); r.localWeekly.at.IsZero() {
+		t.Fatal("refusal of a fleet blocked by weekly and 5-hour windows not recorded")
+	}
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	// c renews last among the weekly-exhausted accounts.
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "c/") {
+		t.Fatalf("claims = %v, want c", f.client.claims)
+	}
+}
+
+func TestClaudeResetLocalRefusalOfSessionOnlyFleetIsNotNeed(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	for _, id := range []string{"a", "b", "c"} {
+		obs := claudeResetObs(10, f.client.statuses[id].Weekly.ResetAt, 1)
+		obs.Session = claudereset.Window{Known: true, Used: 100, ResetAt: f.now.Add(3 * time.Hour)}
+		f.client.statuses[id] = obs
+	}
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	f.outcome("claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour))
+	if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() || !r.localFable.at.IsZero() {
+		t.Fatalf("a fleet blocked only by 5-hour windows counted as need: %+v", r)
 	}
 }
