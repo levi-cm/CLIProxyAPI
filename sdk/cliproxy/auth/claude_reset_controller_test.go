@@ -774,7 +774,9 @@ func TestClaudeResetRestartAfterSendReconciles(t *testing.T) {
 	if op := f.op(t, "b"); op.State != claudereset.OpDone || op.Result != claudereset.ResultReconciled || !op.Recovered {
 		t.Fatalf("op = %+v", op)
 	}
-	// A resend that reports a refusal is settled from the inventory too.
+	// A resend refused while the inventory still shows the old count may
+	// follow an earlier attempt that landed: the claim stays pending and
+	// quarantined, and no other account is claimed for the same shortage.
 	g := newClaudeResetFixture(t)
 	j, err = claudereset.OpenJournal(g.dir)
 	if err != nil {
@@ -784,12 +786,18 @@ func TestClaudeResetRestartAfterSendReconciles(t *testing.T) {
 	if errSave := j.Save(sent); errSave != nil {
 		t.Fatal(errSave)
 	}
-	g.client.results = []string{"not_limited"}
+	g.client.results = []string{"rate_limited", "reset"}
 	g.c.tick(context.Background())
-	// The resend reuses the request ID; once b is settled unspent, the next
-	// account serves the still-unmet need.
-	if op := g.op(t, "b"); len(g.client.claims) < 1 || g.client.claims[0] != "b/full-reset-2611/req-1" || op.Attempts != 2 || op.State != claudereset.OpFailed || op.Result != "not_limited" {
+	if op := g.op(t, "b"); len(g.client.claims) != 1 || g.client.claims[0] != "b/full-reset-2611/req-1" || op.Attempts != 2 || op.State != claudereset.OpPending {
 		t.Fatalf("claims = %v op = %+v", g.client.claims, op)
+	}
+	// The post-window reconciliation decides: an unchanged count settles it
+	// unspent, and only then may the next account serve the need.
+	g.now = g.now.Add(claudereset.ClaimRetryWindow)
+	g.refused(time.Second)
+	g.c.tick(context.Background())
+	if op := g.op(t, "b"); op.State != claudereset.OpFailed || op.Result != claudereset.ResultNotConsumed {
+		t.Fatalf("op = %+v", op)
 	}
 }
 
@@ -908,6 +916,30 @@ type forgetWindowsSelector struct {
 
 func (s *forgetWindowsSelector) ForgetClaudeLimits(_ string, _ uint64, windows []string, _ time.Time) {
 	s.windows = append(s.windows, windows...)
+}
+
+func TestRecoverClaudeResetFablePassChecksBothDeadlines(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	weeklyReset := f.client.statuses["a"].Weekly.ResetAt
+	fableReset := weeklyReset.Add(-24 * time.Hour)
+	// The Fable cooldown came from the weekly window; the weekly pass ran
+	// while Fable was still unconfirmed, so the Fable pass must check both.
+	r := ClaudeResetRecovery{CredentialID: "a", AccountUUID: "acct-a", OrganizationUUID: f.client.identity["a"][1], ClearsWeekly: true, ClearsFable: true,
+		WeeklyResetAt: weeklyReset, FableResetAt: fableReset, WeeklyOpen: true, FableOpen: false, ObservedAt: f.now, ConfirmedAt: f.now,
+		Pass: &ClaudeResetPass{Weekly: true}, Fenced: true}
+	if err := f.m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.m.GetByID("a"); !a.ModelStates["claude-fable-5-2"].Unavailable {
+		t.Fatal("Fable cooldown cleared before Fable was confirmed")
+	}
+	r.FableOpen, r.Pass = true, &ClaudeResetPass{Fable: true}
+	if err := f.m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.m.GetByID("a"); a.ModelStates["claude-fable-5-2"].Unavailable {
+		t.Fatal("weekly-caused Fable cooldown stranded after the Fable pass")
+	}
 }
 
 func TestRecoverClaudeResetForgetsOnlyClearedWindow(t *testing.T) {

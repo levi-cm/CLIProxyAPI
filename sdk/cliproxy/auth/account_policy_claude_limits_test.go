@@ -539,3 +539,19 @@ func TestForgetClaudeLimitsSkipsAnotherRegistration(t *testing.T) {
 		t.Fatalf("forgetting registration 1 reopened registration 2: %q", got)
 	}
 }
+
+func TestForgetClaudeLimitsKeepsNewerObservation(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	f.observeAll()
+	fence := f.now
+	// A genuine full reading observed after the reset's fence is newer evidence.
+	f.now = f.now.Add(time.Minute)
+	f.limit("x", "7d_oi", 1.0, 40*time.Hour, "rejected")
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable")); got != "m" {
+		t.Fatalf("Fable with x full = %q want m", got)
+	}
+	f.s.ForgetClaudeLimits("x", 0, []string{claudeFableWindow}, fence)
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable-after-forget")); got != "m" {
+		t.Fatalf("forgetting dropped evidence newer than the fence: %q", got)
+	}
+}

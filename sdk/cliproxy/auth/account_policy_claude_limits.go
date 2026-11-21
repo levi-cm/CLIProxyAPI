@@ -213,7 +213,7 @@ func claudeFableModel(model string) bool {
 }
 
 // ForgetClaudeLimits drops the remembered limit windows (all when windows is
-// nil) of registration epoch after its quota was reset. A reset can reopen a
+// nil) of registration epoch, observed up to fence, after its quota was reset. A reset can reopen a
 // window without moving its reset time, which the staleness rule would
 // otherwise reject until that time passes. Observations up to fence predate the
 // reset and are ignored, so the stored snapshot cannot re-learn the full window.
@@ -245,7 +245,10 @@ func (s *EarliestDeadlineSelector) ForgetClaudeLimits(id string, epoch uint64, w
 		state.fences = make(map[string]time.Time, len(windows))
 	}
 	for _, name := range windows {
-		delete(state.windows, name)
+		// Evidence observed after the fence is newer than the reset; keep it.
+		if w, ok := state.windows[name]; ok && !w.observed.After(fence) {
+			delete(state.windows, name)
+		}
 		if fence.After(state.fences[name]) {
 			state.fences[name] = fence
 		}

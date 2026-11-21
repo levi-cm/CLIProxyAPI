@@ -47,7 +47,9 @@ type ClaudeResetRecovery struct {
 	Fenced bool
 }
 
-// ClaudeResetPass names the windows one recovery pass newly confirmed.
+// ClaudeResetPass names what one recovery pass newly confirmed: Weekly for
+// the weekly window (non-Fable models and the credential-wide cooldown), Fable
+// for Fable models, which need every window they draw confirmed.
 type ClaudeResetPass struct {
 	Weekly bool
 	Fable  bool
@@ -74,8 +76,9 @@ func (r ClaudeResetRecovery) cleared(model string, until time.Time) bool {
 		return false
 	}
 	if claudeFableModel(model) {
-		// Fable needs both windows open; its cooldown may come from either.
-		return r.FableOpen && r.WeeklyOpen && ((r.ClearsFable && r.passFable() && causedBy(until, r.FableResetAt)) || (r.ClearsWeekly && r.passWeekly() && causedBy(until, r.WeeklyResetAt)))
+		// Fable needs both windows open; its cooldown may come from either
+		// cleared window, so the Fable pass checks both deadlines.
+		return r.passFable() && r.FableOpen && r.WeeklyOpen && ((r.ClearsFable && causedBy(until, r.FableResetAt)) || (r.ClearsWeekly && causedBy(until, r.WeeklyResetAt)))
 	}
 	return r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(until, r.WeeklyResetAt)
 }

@@ -102,11 +102,11 @@ type claudeResetStatusEntry struct {
 }
 
 // claudeRecoveryProgress is one spent reset's recovery in this process: the
-// execution fence is taken once, and each window's routing recovery runs once.
+// execution fence is taken once, and each routing recovery step runs once.
 type claudeRecoveryProgress struct {
-	fenced bool
-	weekly bool
-	fable  bool
+	fenced      bool
+	weekly      bool
+	fableModels bool
 }
 
 // claudeResetBearer is the provider-reported identity of one access token.
@@ -923,19 +923,20 @@ func (c *claudeResetController) submit(ctx context.Context, t claimTarget, op cl
 		op.State, op.Result = claudereset.OpDone, result
 	default:
 		if op.Attempts > 1 {
-			// A resend can report the state after an earlier attempt succeeded.
+			// A refused resend says nothing about an earlier attempt whose
+			// outcome was lost: that one may have landed while the inventory
+			// still shows the old count. Only fewer resets left settles it now;
+			// otherwise the claim stays pending (quarantined and counted against
+			// the cap) until the post-window reconciliation decides.
 			obs, ok := c.readStatus(ctx, t.auth, op.AccountUUID, op.OrganizationUUID)
-			if !ok {
-				return
+			if ok {
+				if consumed, known := settled(op, obs, c.now()); known && consumed {
+					op.State, op.Result = claudereset.OpDone, claudereset.ResultReconciled
+					break
+				}
 			}
-			consumed, known := settled(op, obs, c.now())
-			if !known {
-				return
-			}
-			if consumed {
-				op.State, op.Result = claudereset.OpDone, claudereset.ResultReconciled
-				break
-			}
+			log.WithFields(fields).WithField("result", result).Info("claude reset: resend refused; claim stays pending until reconciliation")
+			return
 		}
 		op.State, op.Result = claudereset.OpFailed, result
 	}
@@ -1142,19 +1143,23 @@ func (c *claudeResetController) recover(ctx context.Context, op claudereset.Oper
 	}
 	// Each window's routing recovery runs once; a later pass recovers only the
 	// newly confirmed window and keeps newer observations.
+	// Fable models become usable once both windows they draw are confirmed:
+	// that pass checks both cleared deadlines for them.
+	weeklyOK := !op.ClearsWeekly || weeklyOpen
+	fableOK := !op.ClearsFable || fableOpen
 	c.mu.Lock()
 	newWeekly := op.ClearsWeekly && weeklyOpen && !progress.weekly
-	newFable := op.ClearsFable && fableOpen && !progress.fable
+	newFableModels := weeklyOK && fableOK && !progress.fableModels
 	c.mu.Unlock()
-	if newWeekly || newFable {
-		r.Pass, r.Fenced = &ClaudeResetPass{Weekly: newWeekly, Fable: newFable}, true
+	if newWeekly || newFableModels {
+		r.Pass, r.Fenced = &ClaudeResetPass{Weekly: newWeekly, Fable: newFableModels}, true
 		if err := c.m.RecoverClaudeReset(ctx, r); err != nil {
 			log.WithFields(fields).WithError(err).Warn("claude reset: reset spent but local recovery failed; it will be retried")
 			return
 		}
 		c.mu.Lock()
 		progress.weekly = progress.weekly || newWeekly
-		progress.fable = progress.fable || newFable
+		progress.fableModels = progress.fableModels || newFableModels
 		c.mu.Unlock()
 	}
 	if !complete {

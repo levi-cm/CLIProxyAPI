@@ -258,7 +258,9 @@ cases:
   read of the journaled identity, and fewer resets left settles it as spent. It
   is resent with the same request ID only within 9 minutes, which Anthropic
   treats as idempotent (`already_used`), and only if the decision still selects
-  that grant. After that, an unchanged count settles it as unspent. A vanished
+  that grant. A refused resend proves nothing about an earlier attempt whose
+  outcome was lost, so it leaves the claim pending. After the window, an
+  unchanged count settles it as unspent. A vanished
   grant counts as spent only when a cleared window is reported, its usage fell,
   and it has not renewed.
 - **Quarantine.** An unresolved claim quarantines its logical account (account
@@ -273,9 +275,13 @@ cases:
 - Each cleared window recovers on its own evidence. A window that was
   exhausted at claim time needs its usage to fall clearly below the pre-claim
   baseline; any other window only needs to be open.
-- The execution fence is taken once per reset, and each window's routing
-  recovery runs once, so later passes keep evidence from requests dispatched
-  after the reset.
+- The execution fence is taken once per reset, and each routing recovery step
+  runs once, so later passes keep evidence from requests dispatched after the
+  reset.
+- Fable models recover in the pass where every window they draw is first
+  confirmed, checking both cleared deadlines.
+- The selector forgets only window observations from before the fence; newer
+  evidence stays.
 - The operation counts as recovered only once every cleared window is
   confirmed. Until then the account counts as restored for need decisions, and
   no other claim is made on it.
