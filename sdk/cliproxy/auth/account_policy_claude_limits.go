@@ -37,6 +37,13 @@ type claudeLimitWindow struct {
 type claudeLimitState struct {
 	epoch   uint64
 	windows map[string]claudeLimitWindow
+	// fences ignore observations of a window up to a quota reset.
+	fences map[string]time.Time
+}
+
+// claudeLimitForgetter is implemented by selectors that remember Claude windows.
+type claudeLimitForgetter interface {
+	ForgetClaudeLimits(id string, epoch uint64, windows []string, fence time.Time)
 }
 
 // ObserveResponseHeaders records the limit windows carried by one upstream
@@ -145,6 +152,10 @@ func (s *EarliestDeadlineSelector) observeClaudeLimits(id string, epoch uint64, 
 		} else if state.epoch == 0 {
 			state.epoch = epoch
 		}
+		if fence, fenced := state.fences[name]; fenced && !observed.After(fence) {
+			s.mu.Unlock()
+			continue // observed before a quota reset
+		}
 		windows := state.windows
 		previous, known := windows[name]
 		if known && (!observed.After(previous.observed) || staleClaudeLimit(previous, next)) {
@@ -199,6 +210,46 @@ func (s *EarliestDeadlineSelector) claudeLimitBlocked(id string, epoch uint64, m
 
 func claudeFableModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(canonicalModelKey(model)), "claude-fable-")
+}
+
+// ForgetClaudeLimits drops the remembered limit windows (all when windows is
+// nil) of registration epoch after its quota was reset. A reset can reopen a
+// window without moving its reset time, which the staleness rule would
+// otherwise reject until that time passes. Observations up to fence predate the
+// reset and are ignored, so the stored snapshot cannot re-learn the full window.
+// State of another registration is left alone.
+func (s *EarliestDeadlineSelector) ForgetClaudeLimits(id string, epoch uint64, windows []string, fence time.Time) {
+	if s == nil || id == "" {
+		return
+	}
+	if windows == nil {
+		windows = claudeLimitWindows
+	}
+	if len(windows) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claudeLimits == nil {
+		s.claudeLimits = make(map[string]*claudeLimitState)
+	}
+	state := s.claudeLimits[id]
+	if state != nil && epoch != 0 && state.epoch != 0 && state.epoch != epoch {
+		return
+	}
+	if state == nil {
+		state = &claudeLimitState{epoch: epoch, windows: make(map[string]claudeLimitWindow, len(claudeLimitWindows))}
+		s.claudeLimits[id] = state
+	}
+	if state.fences == nil {
+		state.fences = make(map[string]time.Time, len(windows))
+	}
+	for _, name := range windows {
+		delete(state.windows, name)
+		if fence.After(state.fences[name]) {
+			state.fences[name] = fence
+		}
+	}
 }
 
 // ClaudeLimitWindowState is the last known state of one Claude limit window.

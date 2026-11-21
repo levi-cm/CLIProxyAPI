@@ -618,6 +618,14 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
+	// A reset also reopens Claude windows the selector remembers as full. The
+	// fence keeps this registration's stored pre-reset snapshot from re-learning
+	// them; the next observation does.
+	if snapshot != nil {
+		if forgetter, ok := m.Selector().(claudeLimitForgetter); ok && forgetter != nil {
+			forgetter.ForgetClaudeLimits(authID, snapshot.RegistrationEpoch, nil, now)
+		}
+	}
 	if errPersist != nil {
 		return nil, nil, errPersist
 	}
@@ -1427,6 +1435,7 @@ func (m *Manager) observeSelectorResponseHeaders(result Result, headers http.Hea
 	if m == nil || len(headers) == 0 {
 		return
 	}
+	m.noteClaudeWindowRefusal(result, headers)
 	if observer, ok := m.Selector().(responseHeaderObserver); ok && observer != nil {
 		observer.ObserveResponseHeaders(result.AuthID, result.Provider, result.RegistrationEpoch, headers, at)
 	}

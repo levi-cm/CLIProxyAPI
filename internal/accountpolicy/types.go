@@ -31,6 +31,10 @@ type Settings struct {
 	// conversations to the account whose weekly allowance would otherwise expire
 	// unused; off keeps every running conversation on its account.
 	ClaudeFocus string `json:"claude_focus,omitempty" yaml:"claude-focus,omitempty"`
+	// ClaudeResets is "auto" (empty) or "off". Auto spends Claude reset grants
+	// when the fleet runs out of the allowance they restore, or before they
+	// expire unused; off never spends them automatically.
+	ClaudeResets string `json:"claude_resets" yaml:"claude-resets,omitempty"`
 }
 type AccountControl struct {
 	Hold           bool    `json:"hold" yaml:"hold"`

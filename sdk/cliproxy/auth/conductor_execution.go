@@ -119,10 +119,12 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
-func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (executeResp cliproxyexecutor.Response, executeErr error) {
 	ctx = m.withCapacityRecovery(ctx)
 	ctx = withCodexClientRequestSnapshot(ctx, opts.Headers)
 	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
+	refusalModel := authSelectionModelFromOptions(opts, req.Model)
+	defer func() { m.noteClaudeRequestOutcome(providers, refusalModel, executeErr, policyLease) }()
 	defer policyLease.release()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
@@ -243,10 +245,12 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
-func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (executeStream *cliproxyexecutor.StreamResult, executeStreamErr error) {
 	ctx = m.withCapacityRecovery(ctx)
 	ctx = withCodexClientRequestSnapshot(ctx, opts.Headers)
 	opts, policyLease := m.trackPolicyRequest(ctx, opts, policyRequestDemand{providers: providers, model: authSelectionModelFromOptions(opts, req.Model)})
+	refusalModel := authSelectionModelFromOptions(opts, req.Model)
+	defer func() { m.noteClaudeRequestOutcome(providers, refusalModel, executeStreamErr, policyLease) }()
 	ctx = context.WithValue(ctx, policyRequestLeaseKey{}, policyLease)
 	handedOff := false
 	defer func() {
@@ -337,6 +341,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+			// The refusal travels in the stream; record it as the Go error would be.
+			m.noteClaudeRequestOutcome(providers, refusalModel, lastErr, policyLease)
 			return streamErrorResult(bootstrapErr.Headers(), publicTransportError(lastErr)), nil
 		}
 		return nil, publicTransportError(lastErr)

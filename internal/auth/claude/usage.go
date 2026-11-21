@@ -41,6 +41,38 @@ type Usage struct {
 	FiveHour *UsageWindow `json:"five_hour"`
 	SevenDay *UsageWindow `json:"seven_day"`
 	Limits   []UsageLimit `json:"limits"`
+	// Resets is the reset-grant inventory, present only when requested.
+	Resets *ResetProgram `json:"cedar_ember"`
+}
+
+// FableWindow returns the Fable-scoped weekly window, nil when not reported.
+func (u *Usage) FableWindow() *UsageWindow {
+	if u == nil {
+		return nil
+	}
+	return u.limitWindow("weekly_scoped", "Fable")
+}
+
+// WeeklyWindow returns the account-wide weekly window, nil when not reported.
+func (u *Usage) WeeklyWindow() *UsageWindow {
+	if u == nil {
+		return nil
+	}
+	if u.SevenDay != nil && u.SevenDay.Utilization != nil {
+		return u.SevenDay
+	}
+	return u.limitWindow("weekly_all", "")
+}
+
+// SessionWindow returns the 5-hour window, nil when the account has none open.
+func (u *Usage) SessionWindow() *UsageWindow {
+	if u == nil {
+		return nil
+	}
+	if u.FiveHour != nil && u.FiveHour.Utilization != nil {
+		return u.FiveHour
+	}
+	return u.limitWindow("session", "")
 }
 
 // limitWindow returns the first listed limit of kind, optionally scoped to the

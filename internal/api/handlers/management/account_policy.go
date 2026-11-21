@@ -201,7 +201,26 @@ func policyCreditStatuses(service *accountpolicy.Service) map[string]policyCredi
 
 func (h *Handler) GetAccountPolicyAccounts(c *gin.Context) {
 	if service := h.policyService(c); service != nil {
-		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service)})
+		body := gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service)}
+		h.addClaudeResets(body)
+		c.JSON(http.StatusOK, body)
+	}
+}
+
+// addClaudeResets adds the automatic Claude reset state when the controller
+// runs. Older builds and Home mode omit the key.
+func (h *Handler) addClaudeResets(body gin.H) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	if status, ok := h.authManager.ClaudeResetStatus(); ok {
+		for id, account := range status.Accounts {
+			if account.Error != "" {
+				account.Error = "Provider observation failed."
+				status.Accounts[id] = account
+			}
+		}
+		body["claude_resets"] = status
 	}
 }
 func (h *Handler) GetAccountPolicyDecisions(c *gin.Context) {
@@ -217,7 +236,9 @@ func (h *Handler) GetAccountPolicyResets(c *gin.Context) {
 func (h *Handler) GetAccountPolicyDiagnostics(c *gin.Context) {
 	if service := h.policyService(c); service != nil {
 		c.Header("Cache-Control", "no-store")
-		c.JSON(http.StatusOK, gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service), "decisions": policyDecisions(service), "operations": sanitizedOperations(service), "schedules": policySchedules(service)})
+		body := gin.H{"settings": service.Settings(), "accounts": sanitizedAccounts(service), "credit_status": policyCreditStatuses(service), "decisions": policyDecisions(service), "operations": sanitizedOperations(service), "schedules": policySchedules(service)}
+		h.addClaudeResets(body)
+		c.JSON(http.StatusOK, body)
 	}
 }
 

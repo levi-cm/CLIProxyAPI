@@ -177,3 +177,140 @@ is always open), and bound conversations move as above. A full window without
 a known reset, or every account full at once, leaves the decision to upstream
 and the reactive cooldown. Transitions are logged as `claude limit window full`
 and `claude limit window open`.
+
+## Claude reset grants
+
+Claude Max accounts hold reset grants in Anthropic's `cedar_ember` program: a
+monthly full reset that clears the weekly and the Fable weekly window, and Fable
+resets that clear only the Fable window. `sdk/cliproxy/auth/claude_reset_controller.go`
+spends them automatically. The decision rules live in `internal/claudereset`.
+Anthropic lists the program only to Claude Code clients, so these calls identify
+as the Claude CLI.
+
+A grant adds value only when the fleet would otherwise refuse demand.
+Allowance that renews unused is lost, and spending a grant early only moves
+consumption onto the restored allowance. A grant is therefore spent in three
+cases:
+
+- **Weekly need.** The open weekly allowance across healthy, unheld accounts is
+  below 5 points (100 points is one account's week), and a refused request
+  needed it within the last 15 minutes. Need is a request on a Claude route
+  that finally failed with a refusal (including one delivered in a stream),
+  and either:
+  - one of its attempts was refused with rate-limit headers marking the weekly
+    window `rejected`; an attempt refused while another account served the
+    retry does not count; or
+  - it was refused locally because no credential could serve (all cooling
+    down, possibly beside logged-out ones), while every healthy account was
+    blocked by its weekly window, judged at refusal time from fresh verified
+    inventory of the window running now (not renewed since it was read) or an
+    active cooldown ending at that window's reset. Later fleet changes cannot
+    give an earlier refusal a weekly cause.
+  Successful traffic, 5-hour, entitlement and request-scoped refusals are not
+  need. A refusal wakes the controller at once. A weekly grant
+  is spent on the exhausted account (≥ 95% used) whose weekly window renews
+  last. That gives the restored allowance the most time to be used, and it
+  postpones the least if Anthropic restarts the window on redemption.
+- **Fable need.** The same check for the Fable window (`7d_oi`), with a
+  refused Fable request. Only Fable grants are spent, on a Fable-exhausted account that has
+  weekly allowance left right now, because Fable also draws the weekly window.
+- **Expiry.** In the last 6 hours before a grant ends, it is spent if the exact
+  windows it clears hold at least 1% usage and none of them renews before the
+  grant ends. An expiring grant costs nothing. Inventory reads speed up 24
+  hours ahead.
+
+**Safety rules:**
+- Decisions use only inventory read with the credential's current, verified
+  token. Response headers and the usage poller only decide when to read early.
+- An account whose last claim may have spent a reset counts as restored until
+  its recovery confirmed the reset from a verified read; a read right after the
+  claim may still show the old usage. One reset never justifies another on
+  stale evidence.
+- Each window is judged on its own observation time. A window without evidence
+  from the last 15 minutes, or renewing within 30 minutes, counts as open, so
+  stale data never spends.
+- An account with a known-full 5-hour window is not a target for any trigger,
+  however soon it renews.
+- Need claims that spent or may have spent a reset (pending or unresolved)
+  are at least 10 minutes apart and capped at 3 per 24 hours.
+- A claim on an account needs an inventory read taken after that account's
+  previous claim.
+- A refused claim pauses that account for one hour.
+
+**The claim itself:**
+- **Fence.** Journal writes and claims happen only under the account-policy
+  `redemption.lock`, which is the deployment runner's fence, and with the writer
+  gate re-checked inside it. Shutdown drains the controller before it cancels
+  the run context that keeps writer ownership.
+- **Identity.** Inventory is decision-grade only when read with a token whose
+  provider profile matches the credential's stored account and organization.
+  The claim is sent with that same token, registration and identity, right
+  after a fresh read and a repeated decision.
+- **Journal.** Each attempt is journaled in `claude-resets.json`, in the policy
+  state directory, before it is sent. The journal is reloaded from disk under
+  the lock before every decision.
+- **Re-checks.** After the attempt is journaled, the gate, the credential, the
+  read's age (at most 90 seconds) and the resend window are checked again. The
+  request is bounded by that window. A first attempt that fails these checks is
+  settled as `not_sent`, without a pause. New selections of the account wait
+  while the claim and its local recovery run, and active streams continue.
+- **Unknown outcome.** An unresolved claim always starts from a fresh verified
+  read of the journaled identity, and fewer resets left settles it as spent. It
+  is resent with the same request ID only within 9 minutes, which Anthropic
+  treats as idempotent (`already_used`), and only if the decision still selects
+  that grant. After that, an unchanged count settles it as unspent. A vanished
+  grant counts as spent only when a cleared window is reported, its usage fell,
+  and it has not renewed.
+- **Quarantine.** An unresolved claim quarantines its logical account (account
+  UUID, whatever the credential is called), which counts as restored for need
+  decisions. It settles as `unresolved` after one hour and still counts against
+  the cap.
+
+**After a spent reset:**
+- Recovery first records the execution watermark, so results of executions
+  dispatched before then cannot apply cooldowns while it runs. Then it takes a
+  verified inventory read.
+- Each cleared window recovers on its own evidence. A window that was
+  exhausted at claim time needs its usage to fall clearly below the pre-claim
+  baseline; any other window only needs to be open.
+- The execution fence is taken once per reset, and each window's routing
+  recovery runs once, so later passes keep evidence from requests dispatched
+  after the reset.
+- The operation counts as recovered only once every cleared window is
+  confirmed. Until then the account counts as restored for need decisions, and
+  no other claim is made on it.
+- `RecoverClaudeReset`, modeled on the Codex recovery, clears only quota
+  cooldowns that end at a cleared window's renewal time (plus fuzz), whose
+  window that read shows open, and that were recorded before the read. The
+  credential-wide cooldown is decided by the read alone, because passive reads
+  advance its timestamp. A Fable cooldown also needs the weekly window open. A
+  deadline that also matches a still-full 5-hour window, or an unknown cause,
+  stays.
+- It persists the credential and the cooldown store before publishing.
+- It records the execution-sequence watermark, so results of earlier
+  dispatches cannot re-apply cooldowns or quota headers.
+- The selector forgets the Fable window when the grant clears it, for that
+  registration only, fenced against older observations. A reset can reopen a
+  window without moving its reset time, which the staleness rule would
+  otherwise ignore. A manual "clear cooldown" forgets every window the same
+  way.
+- The recovery is journaled only after it succeeded. Until then it is retried,
+  across restarts, until the cleared windows would have renewed anyway. Then a
+  fresh usage reading is published.
+- The usage poller stamps its readings with when the read began, so a read
+  started before a reset cannot pass the reset's fence.
+
+**Reads and claims:**
+- Inventory is read hourly, and every 5 minutes while a trigger is near.
+- Reads always happen. Claims happen only while this instance holds the
+  account-policy owner lock, the policy is enabled and not read-only, and
+  `claude_resets` is not `off`.
+- Journals written before this setting existed adopt the startup value.
+- Isolated deploy fixtures have no network, and the compose dry run has no
+  credentials.
+
+`GET /v8/management/account-policy/accounts` and `/diagnostics` report the
+state as `claude_resets`: the mode and gate, both need triggers with their
+reasons, the planned claim, each account's windows and grants, and recent
+operations. Request and organization identifiers are omitted. The status never
+calls the provider.

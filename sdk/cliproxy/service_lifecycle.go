@@ -137,6 +137,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if errPolicy := s.startAccountPolicy(ctx); errPolicy != nil {
 		return errPolicy
 	}
+	if !homeEnabled {
+		s.startClaudeResets(ctx)
+	}
 
 	s.ensureWebsocketGateway()
 	if homeEnabled {
@@ -281,6 +284,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		s.homeMu.Lock()
 		runCancel := s.runCancel
 		s.homeMu.Unlock()
+		// Drain automatic Claude resets while the policy still holds writer
+		// ownership; cancelling the run context would release it.
+		if s.coreManager != nil {
+			s.coreManager.StopClaudeResetController()
+		}
 		if runCancel != nil {
 			runCancel()
 		}

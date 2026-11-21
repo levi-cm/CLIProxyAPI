@@ -52,10 +52,12 @@ type Service struct {
 	semaphore                      chan struct{}
 	stateDir                       string
 	replica                        bool
-	refreshMu                      sync.Mutex
-	requested                      map[string]uint64
-	wake                           chan struct{}
-	creditSamples                  map[string][]creditSample
+	// owner reports that Run holds the state directory's owner lock.
+	owner         bool
+	refreshMu     sync.Mutex
+	requested     map[string]uint64
+	wake          chan struct{}
+	creditSamples map[string][]creditSample
 }
 
 func clone[T any](v T) T {
@@ -123,6 +125,9 @@ func NewService(opts Options) (*Service, error) {
 				if _, persisted := raw.Settings["credit_spending"]; !persisted {
 					s.state.Settings.CreditSpending = opts.Settings.CreditSpending
 				}
+				if _, persisted := raw.Settings["claude_resets"]; !persisted {
+					s.state.Settings.ClaudeResets = opts.Settings.ClaudeResets
+				}
 			}
 			// A replica configured read-only cannot acquire authority from persisted settings.
 			if opts.Settings.ReadOnly {
@@ -164,6 +169,36 @@ func (s *Service) RequestRefresh(id string) {
 	default:
 	}
 }
+
+// Writer reports whether this instance owns the state directory and may
+// perform provider writes. Replicas and read-only instances never write.
+func (s *Service) Writer() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.owner && !s.replica && !s.state.Settings.ReadOnly
+}
+
+// LockRedemption acquires the redemption lock that fences provider writes
+// against deployment cutovers and policy redemption. It fails unless this
+// instance is the writer or while another holder owns the lock.
+func (s *Service) LockRedemption() (func(), error) {
+	if !s.Writer() {
+		return nil, policyError("read_only", "only the policy writer may redeem")
+	}
+	return lockJournal(s.stateDir)
+}
+
+// StateDir returns the protected state directory, empty when none is used.
+func (s *Service) StateDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.stateDir
+}
+
 func (s *Service) Settings() Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -689,6 +724,9 @@ func (s *Service) Run(ctx context.Context) {
 	var releaseOwner func()
 	defer func() {
 		if releaseOwner != nil {
+			s.mu.Lock()
+			s.owner = false
+			s.mu.Unlock()
 			releaseOwner()
 		}
 	}()
@@ -706,6 +744,9 @@ func (s *Service) Run(ctx context.Context) {
 			s.mu.Unlock()
 		} else {
 			releaseOwner = unlock
+			s.mu.Lock()
+			s.owner = true
+			s.mu.Unlock()
 		}
 	}
 	acquireOwner()

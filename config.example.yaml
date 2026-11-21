@@ -27,6 +27,11 @@ account-policy:
   saved-credit-reserve: 1
   read-only: false # use true on replicas; only one owner may redeem a logical account
   force-account: "" # proxy credential ID; real authentication/quota blocks still apply
+  # Claude reset grants: auto (default) spends a grant when the whole Claude fleet
+  # runs out of the allowance it restores and requests still need it, or shortly
+  # before it would expire unused; off never spends them. Claims need the policy
+  # enabled, writable and owned by this instance. See internal/accountpolicy/README.md.
+  claude-resets: auto
   # Ordinary saved Codex reset credits only.
   credit-types: [codex_rate_limits]
   # credential-ID: {hold: false, reserve-percent: 0, credit-reserve-unlocked-until: <RFC3339>}

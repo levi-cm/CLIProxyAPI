@@ -100,7 +100,9 @@ func (m *Manager) observeClaudeUsage(id string, epoch uint64, headers http.Heade
 		m.mu.Unlock()
 		return false
 	}
-	now := time.Now()
+	// Stamp the reading with when it was obtained, not when it completed, so a
+	// read that began before a quota reset can never pass the reset's fence.
+	now := started
 	if !a.Quota.ObserveResponseHeadersForProvider(a.Provider, headers, now) {
 		m.mu.Unlock()
 		return false

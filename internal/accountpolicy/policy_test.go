@@ -110,3 +110,18 @@ func TestSettingsValidateSafety(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateSettingsClaudeResets(t *testing.T) {
+	for _, mode := range []string{"", "auto", "off"} {
+		s := DefaultSettings()
+		s.ClaudeResets = mode
+		if err := ValidateSettings(s); err != nil {
+			t.Fatalf("%q rejected: %v", mode, err)
+		}
+	}
+	s := DefaultSettings()
+	s.ClaudeResets = "notify"
+	if err := ValidateSettings(s); err == nil {
+		t.Fatal("unknown claude_resets mode accepted")
+	}
+}

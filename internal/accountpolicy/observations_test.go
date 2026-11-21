@@ -445,3 +445,95 @@ func TestObservationReplicaCannotOverwriteOwnerJournal(t *testing.T) {
 		t.Fatal("observation replica reclaimed write authority")
 	}
 }
+
+// Writer gates provider writes outside this package (automatic Claude resets).
+// It is true only while Run holds the owner lock.
+func TestWriterRequiresOwnerLock(t *testing.T) {
+	settings := observationSettings(t)
+	var service *Service
+	var during []bool
+	accounts := func() []Identity {
+		if service != nil {
+			during = append(during, service.Writer())
+		}
+		return nil
+	}
+	var err error
+	service, err = NewService(Options{Settings: settings, Provider: &fakeProvider{}, Now: testTime, Accounts: accounts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Writer() {
+		t.Fatal("writer before Run acquired the owner lock")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service.Run(ctx)
+	if len(during) == 0 || !during[0] {
+		t.Fatalf("writer while owning = %v", during)
+	}
+	if service.Writer() {
+		t.Fatal("writer after Run released the owner lock")
+	}
+
+	release, err := lockNamed(settings.StateDir, "owner.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	during = nil
+	service, err = NewService(Options{Settings: settings, Provider: &fakeProvider{}, Now: testTime, Accounts: accounts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Run(ctx)
+	for _, w := range during {
+		if w {
+			t.Fatal("replica reported writer authority")
+		}
+	}
+}
+
+// Journals written before claude_resets existed adopt the startup setting; a
+// persisted value stays authoritative.
+func TestClaudeResetsAdoptedFromStartupForOlderJournal(t *testing.T) {
+	settings := observationSettings(t)
+	if err := os.MkdirAll(settings.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := storedState{Version: 1, Settings: DefaultSettings(), Snapshots: map[string]Snapshot{}}
+	raw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generic map[string]any
+	if err = json.Unmarshal(raw, &generic); err != nil {
+		t.Fatal(err)
+	}
+	delete(generic["settings"].(map[string]any), "claude_resets")
+	if raw, err = json.Marshal(generic); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(settings.StateDir, "state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings.ClaudeResets = "off"
+	service, err := NewService(Options{Settings: settings, Provider: &fakeProvider{}, Now: testTime, Accounts: func() []Identity { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := service.Settings().ClaudeResets; got != "off" {
+		t.Fatalf("claude_resets = %q, want the startup value for an older journal", got)
+	}
+}
+
+func TestLockRedemptionRequiresWriter(t *testing.T) {
+	settings := observationSettings(t)
+	service, err := NewService(Options{Settings: settings, Provider: &fakeProvider{}, Now: testTime, Accounts: func() []Identity { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.LockRedemption(); err == nil {
+		t.Fatal("redemption lock granted without writer authority")
+	}
+}

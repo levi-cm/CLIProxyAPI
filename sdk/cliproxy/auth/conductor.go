@@ -244,11 +244,21 @@ type Manager struct {
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
-	persistLocks             sync.Map
-	policyRuntimeMu          sync.Mutex
-	policyRuntime            map[string]PolicyRuntimeStatus
-	policyClientHistory      map[policyClientKey]policyClientSelection
-	policyPending            map[*policyRequestLease]policyRequestDemand
+	persistLocks        sync.Map
+	policyRuntimeMu     sync.Mutex
+	policyRuntime       map[string]PolicyRuntimeStatus
+	policyClientHistory map[policyClientKey]policyClientSelection
+	policyPending       map[*policyRequestLease]policyRequestDemand
+
+	// Automatic Claude reset redemption and the demand evidence it needs.
+	claudeResetMu sync.Mutex
+	claudeResets  *claudeResetController
+	// Refusals Anthropic attributed to the weekly or Fable window, and local
+	// refusals of Claude routes whose credentials were all cooling down.
+	claudeWeeklyRefusalAt    time.Time
+	claudeFableRefusalAt     time.Time
+	claudeLocalRefusalAt     time.Time
+	fableLocalRefusalAt      time.Time
 	policyResetReservations  map[string]chan struct{}
 	policyRefreshCallback    func(string)
 	policyExhaustionCallback func(accountpolicy.Identity)

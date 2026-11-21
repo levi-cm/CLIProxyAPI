@@ -473,3 +473,69 @@ func TestClaudePolledFableWindowSurvivesOpusResponse(t *testing.T) {
 		t.Fatal("Fable window blocked Opus")
 	}
 }
+
+// A redeemed reset reopens the Fable window without moving its reset time. The
+// staleness rule ignores such a reading, so the reset must forget the window.
+func TestClaudeForgetLimitsAcceptsReopenedWindowWithSameReset(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	f.observeAll()
+	f.limit("x", "7d_oi", 1.0, 40*time.Hour, "rejected")
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable")); got != "m" {
+		t.Fatalf("Fable with x full = %q want m", got)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.limit("x", "7d_oi", 0, 40*time.Hour-time.Minute, "allowed")
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable-stale")); got != "m" {
+		t.Fatalf("open reading with the same reset accepted without a reset: %q", got)
+	}
+	f.s.ForgetClaudeLimits("x", 0, []string{claudeFableWindow}, f.now)
+	// The stored pre-reset snapshot cannot re-learn the full window.
+	f.limit("x", "7d_oi", 1.0, 40*time.Hour-time.Minute, "rejected")
+	f.auths["x"].Quota.ObservedAt = f.now
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable-fenced")); got != "x" {
+		t.Fatalf("pre-reset snapshot re-learned the full window: %q", got)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.limit("x", "7d_oi", 0, 40*time.Hour-2*time.Minute, "allowed")
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable-after-reset")); got != "x" {
+		t.Fatalf("Fable after the reset = %q want x", got)
+	}
+}
+
+type forgetRecordingSelector struct {
+	FillFirstSelector
+	forgot []string
+}
+
+func (s *forgetRecordingSelector) ForgetClaudeLimits(id string, _ uint64, windows []string, _ time.Time) {
+	if windows == nil {
+		s.forgot = append(s.forgot, id)
+	}
+}
+
+func TestResetQuotaForgetsClaudeLimits(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	sel := &forgetRecordingSelector{}
+	m.SetSelector(sel)
+	registerClaudeUsageAuth(t, m, "a", nil)
+	if _, _, err := m.ResetQuota(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sel.forgot) != 1 || sel.forgot[0] != "a" {
+		t.Fatalf("forgot = %v", sel.forgot)
+	}
+}
+
+func TestForgetClaudeLimitsSkipsAnotherRegistration(t *testing.T) {
+	f := newMixedClaudeFixture(t)
+	f.observeAll()
+	f.auths["x"].RegistrationEpoch = 2
+	f.limit("x", "7d_oi", 1.0, 40*time.Hour, "rejected")
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable")); got != "m" {
+		t.Fatalf("Fable with x full = %q want m", got)
+	}
+	f.s.ForgetClaudeLimits("x", 1, nil, f.now.Add(-time.Hour))
+	if got := f.pickMixed(t, "claude-fable-5-2", mixedOpts("fable-other-epoch")); got != "m" {
+		t.Fatalf("forgetting registration 1 reopened registration 2: %q", got)
+	}
+}

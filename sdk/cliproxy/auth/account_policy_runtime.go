@@ -33,6 +33,10 @@ type policyRequestLease struct {
 	refreshPending  bool
 	clientKey       policyClientKey
 	clientSelection policyClientSelection
+	// Window refusals of this request's attempts, published as Claude reset
+	// need only if the request finally fails.
+	claudeWeeklyRefused bool
+	claudeFableRefused  bool
 }
 
 type policyRequestDemand struct {
