@@ -1042,6 +1042,43 @@ func TestRecoverClaudeResetFablePassChecksBothDeadlines(t *testing.T) {
 	}
 }
 
+func TestRecoverClaudeResetFableRepairsCredentialWideCooldown(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	weeklyReset := f.client.statuses["a"].Weekly.ResetAt
+	fableReset := weeklyReset.Add(-24 * time.Hour)
+	sessionReset := f.now.Add(2 * time.Hour)
+	set := func(until time.Time) {
+		a, _ := f.m.GetByID("a")
+		// Only the credential-wide cooldown blocks; the models themselves are open.
+		a.ModelStates = map[string]*ModelState{"claude-opus-5-5": {Status: StatusActive}, "claude-fable-5-2": {Status: StatusActive}}
+		a.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}
+		a.Unavailable, a.NextRetryAfter, a.LastError = true, until, &Error{HTTPStatus: 429}
+		if _, err := f.m.Update(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := ClaudeResetRecovery{CredentialID: "a", AccountUUID: "acct-a", OrganizationUUID: f.client.identity["a"][1], ClearsFable: true,
+		FableResetAt: fableReset, WeeklyOpen: true, FableOpen: true, ObservedAt: f.now, ConfirmedAt: f.now}
+	// A refusal of the 5-hour and Fable windows set the credential-wide
+	// cooldown to the later, Fable deadline; the 5-hour window renewed since.
+	set(fableReset.Add(40 * time.Second))
+	if err := f.m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.m.GetByID("a"); a.Unavailable || a.Quota.Exceeded {
+		t.Fatalf("a Fable reset left the credential blocked: unavailable %v quota %+v", a.Unavailable, a.Quota)
+	}
+	// A credential-wide cooldown that may still belong to a full 5-hour window stays.
+	set(sessionReset.Add(40 * time.Second))
+	r.SessionFull, r.SessionResetAt = true, sessionReset
+	if err := f.m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.m.GetByID("a"); !a.Unavailable {
+		t.Fatal("cleared a credential-wide cooldown of the full 5-hour window")
+	}
+}
+
 func TestRecoverClaudeResetForgetsOnlyClearedWindow(t *testing.T) {
 	f := newClaudeResetFixture(t)
 	sel := &forgetWindowsSelector{}

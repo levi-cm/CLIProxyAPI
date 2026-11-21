@@ -1152,7 +1152,9 @@ func (c *claudeResetController) recover(ctx context.Context, op claudereset.Oper
 	// runs. Later passes keep that boundary, so requests dispatched after the
 	// reset keep their own evidence.
 	if !fenced {
-		if !c.m.fenceClaudeRecovery(op.CredentialID, op.AccountUUID, op.OrganizationUUID, op.ClearsWeekly) {
+		// Fence every model: a stale credential-scoped refusal must not re-apply
+		// a repaired credential-wide cooldown, even after a Fable-only reset.
+		if !c.m.fenceClaudeRecovery(op.CredentialID, op.AccountUUID, op.OrganizationUUID, true) {
 			return
 		}
 		c.mu.Lock()

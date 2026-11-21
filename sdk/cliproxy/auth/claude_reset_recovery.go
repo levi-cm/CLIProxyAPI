@@ -162,9 +162,14 @@ func (m *Manager) RecoverClaudeReset(ctx context.Context, r ClaudeResetRecovery)
 		changed = true
 	}
 	// The credential-wide cooldown has no failure timestamp of its own (passive
-	// reads advance UpdatedAt), so the post-reset read alone decides it.
+	// reads advance UpdatedAt), so the post-reset read alone decides it. A
+	// refusal of several windows sets it to the latest deadline, which may be
+	// the Fable window's: a cleared, confirmed window of either kind repairs
+	// it, unless it may still belong to a full 5-hour window.
 	authUntil := quotaCooldownUntil(auth.Quota, auth.NextRetryAfter)
-	if global && r.WeeklyOpen && policyQuotaFailure(auth.Quota, auth.LastError) && causedBy(authUntil, r.WeeklyResetAt) && !(r.SessionFull && causedBy(authUntil, r.SessionResetAt)) {
+	weeklyCause := r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(authUntil, r.WeeklyResetAt)
+	fableCause := r.ClearsFable && r.passFable() && r.FableOpen && r.WeeklyOpen && causedBy(authUntil, r.FableResetAt)
+	if (weeklyCause || fableCause) && policyQuotaFailure(auth.Quota, auth.LastError) && !(r.SessionFull && causedBy(authUntil, r.SessionResetAt)) {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})
