@@ -37,6 +37,7 @@ func (s *Service) startClaudeResets(ctx context.Context) {
 		StateDir: policy.StateDir,
 		Held:     policy.Held,
 		Forced:   policy.ForcedAccount,
+		Revision: policy.RoutingRevision,
 	})
 }
 

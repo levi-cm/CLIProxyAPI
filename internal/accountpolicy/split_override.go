@@ -65,7 +65,11 @@ func (s *Service) replaceRoutingOverride(mode string, shares []RoutingShare, hou
 		identities = append(identities, identity)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	routingBefore := routingKey(s.state.Settings)
+	defer func() {
+		s.noteRoutingLocked(routingBefore)
+		s.mu.Unlock()
+	}()
 	settings := s.state.Settings
 	if s.state.Override.Revision != revision {
 		return RoutingOverride{}, policyError("conflict", "override revision changed")

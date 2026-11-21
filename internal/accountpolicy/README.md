@@ -245,10 +245,15 @@ cases:
 - Need is bound to the routing pool its request started under: the accounts
   that could serve then (healthy, not held, not excluded by `force-account`),
   each keyed by credential, account and organization. It counts only while
-  that pool is unchanged, so a hold or override change, even one made while
-  the request runs, cannot hand one pool's refusal to accounts that served all
-  along. The pool is computed when the request starts, and a need claim is
-  sent only if it is still unchanged after the claim is journaled.
+  that pool is unchanged, so a hold or override change cannot hand one pool's
+  refusal to accounts that served all along. The pool is computed when the
+  request starts, together with a routing revision that advances on every
+  hold or force-account change. A refusal counts only if the pool and the
+  revision are the same when the request fails and when the claim is decided,
+  so a change during the request (which may have caused the refusal), or a
+  hold followed by a release, retires it. A need claim, or its resend, is
+  sent only if both are still unchanged after it is journaled; a local
+  refusal also needs evidence for every account of the starting pool.
 - One refusal justifies one reset: a new need claim requires a refusal after
   the last need claim, which may already have met that shortage. A resend of
   a pending claim keeps the refusal that started it.

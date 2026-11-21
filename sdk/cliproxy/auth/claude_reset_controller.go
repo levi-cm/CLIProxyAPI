@@ -66,6 +66,9 @@ type ClaudeResetOptions struct {
 	StateDir func() string
 	// Held reports operator holds; held accounts never serve restored allowance.
 	Held func(id string) bool
+	// Revision changes whenever force-account or a hold changes (nil: never),
+	// so refusal evidence from one routing view is not revived by a change back.
+	Revision func() uint64
 	// Forced returns the credential routing is forced to, empty when none;
 	// while set, no other account serves.
 	Forced func() string
@@ -270,8 +273,10 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	if lease != nil {
 		pool = lease.claudePool
 	}
-	if pool == nil {
-		// Without the pool the request started under this is not need.
+	if pool == nil || c.pool(c.claudeAuths()).view() != pool.view() {
+		// Without the pool the request started under, or when holds,
+		// force-account or credentials changed while it ran (the request may
+		// have been refused because of the change), this is not need.
 		c.poke()
 		return
 	}
@@ -289,7 +294,7 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 		c.poke()
 		return
 	}
-	m.recordClaudeRefusals(c, time.Now().UTC(), pool.key, weekly, fable, localWeekly, localFable)
+	m.recordClaudeRefusals(c, time.Now().UTC(), pool.view(), weekly, fable, localWeekly, localFable)
 }
 
 func containsClaudeProvider(providers []string) bool {
@@ -305,8 +310,15 @@ func containsClaudeProvider(providers []string) bool {
 // healthy, not held and not excluded by force-account. Members are keyed by
 // credential, account and organization, so a same-ID replacement differs.
 type claudePool struct {
-	key     string
-	members map[string]bool
+	key      string
+	revision uint64
+	members  map[string]bool
+}
+
+// view identifies the routing view: the members and the routing revision
+// they were read under.
+func (p claudePool) view() string {
+	return strconv.FormatUint(p.revision, 10) + "\x00" + p.key
 }
 
 // claudeRefusalPool computes the routing pool now. A Claude request captures
@@ -353,6 +365,12 @@ func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, p
 // pool returns the accounts of auths that can serve now (healthy, not held,
 // not excluded by force-account).
 func (c *claudeResetController) pool(auths []*Auth) claudePool {
+	// The revision is read first: a change landing during the read leaves an
+	// older revision, which no later view matches.
+	var revision uint64
+	if c.opts.Revision != nil {
+		revision = c.opts.Revision()
+	}
 	forced := ""
 	if c.opts.Forced != nil {
 		forced = c.opts.Forced()
@@ -367,12 +385,7 @@ func (c *claudeResetController) pool(auths []*Auth) claudePool {
 		}
 	}
 	sort.Strings(ids)
-	return claudePool{key: strings.Join(ids, "\x00"), members: members}
-}
-
-// poolKey identifies the accounts of auths that can serve now.
-func (c *claudeResetController) poolKey(auths []*Auth) string {
-	return c.pool(auths).key
+	return claudePool{key: strings.Join(ids, "\x00"), revision: revision, members: members}
 }
 
 func claudePoolMember(a *Auth) string {
@@ -405,7 +418,8 @@ func (c *claudeResetController) poke() {
 	}
 }
 
-// claudeRefusal is confirmed need and the routing pool it was refused for.
+// claudeRefusal is confirmed need and the routing view (claudePool.view) it
+// was refused under.
 type claudeRefusal struct {
 	at   time.Time
 	pool string
@@ -801,7 +815,7 @@ func (c *claudeResetController) inputPool(auths []*Auth, ignoreOp string, withSi
 	// while every healthy account is blocked by that window, and only for the
 	// routing pool it was refused for.
 	r := c.m.claudeRefusalTimes()
-	pool := c.poolKey(auths)
+	pool := c.pool(auths).view()
 	latest := func(refusals ...claudeRefusal) time.Time {
 		var at time.Time
 		for _, refusal := range refusals {
@@ -825,8 +839,17 @@ func (c *claudeResetController) localRefusalCauses(pool *claudePool) (weekly, fa
 	now := c.now()
 	// Classification needs only inventory and cooldowns, not the journal.
 	accts := c.accounts(auths, claudereset.History{}, false)
+	matched := 0
 	for i, a := range auths {
-		accts[i].Healthy = pool.members[claudePoolMember(a)]
+		member := pool.members[claudePoolMember(a)]
+		accts[i].Healthy = member
+		if member {
+			matched++
+		}
+	}
+	if matched != len(pool.members) {
+		// A starting member is gone: its block cannot be confirmed.
+		return false, false
 	}
 	return fleetCooling(auths, accts, false, now), fleetCooling(auths, accts, true, now)
 }
@@ -970,7 +993,8 @@ type claimTarget struct {
 	auth  *Auth
 	token string
 	obs   claudereset.Observation
-	// pool is the routing pool whose refusal justified a need claim.
+	// pool is the routing view (claudePool.view) whose refusal justified a
+	// need claim.
 	pool string
 }
 
@@ -1007,11 +1031,11 @@ func (c *claudeResetController) target(ctx context.Context, id, wantAccount, wan
 
 // stillTarget reports whether the credential is still exactly as it was read
 // and may receive a claim.
-// poolChanged reports a first need claim whose routing pool, the one whose
-// refusal justified it, changed after it was planned. Resends were re-planned
-// and expiry claims need no refusal.
+// poolChanged reports a need claim or resend whose routing view, the one
+// whose refusal justified it, changed after it was planned. Expiry claims need
+// no refusal.
 func (c *claudeResetController) poolChanged(t claimTarget, op claudereset.Operation) bool {
-	return op.Attempts == 1 && op.Trigger != claudereset.TriggerExpiry && c.poolKey(c.claudeAuths()) != t.pool
+	return op.Trigger != claudereset.TriggerExpiry && (t.pool == "" || c.pool(c.claudeAuths()).view() != t.pool)
 }
 
 func (c *claudeResetController) stillTarget(t claimTarget) bool {
@@ -1209,8 +1233,9 @@ func (c *claudeResetController) recoverPending(ctx context.Context) {
 				c.settle(ctx, op, claudereset.OpFailed, claudereset.ResultNotConsumed)
 				continue
 			case known:
-				replanned := c.evaluate(c.claudeAuths(), op.ID)
+				replanned, pool := c.evaluatePool(c.claudeAuths(), op.ID)
 				if replanned.Claim != nil && replanned.Claim.AccountID == op.CredentialID && replanned.Claim.GrantID == op.GrantID {
+					t.pool = pool
 					c.submit(ctx, t, op)
 				}
 				continue

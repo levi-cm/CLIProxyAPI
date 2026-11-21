@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,11 +54,13 @@ type Service struct {
 	stateDir                       string
 	replica                        bool
 	// owner reports that Run holds the state directory's owner lock.
-	owner         bool
-	refreshMu     sync.Mutex
-	requested     map[string]uint64
-	wake          chan struct{}
-	creditSamples map[string][]creditSample
+	owner bool
+	// routingRevision changes whenever force-account or a hold changes.
+	routingRevision uint64
+	refreshMu       sync.Mutex
+	requested       map[string]uint64
+	wake            chan struct{}
+	creditSamples   map[string][]creditSample
 }
 
 func clone[T any](v T) T {
@@ -199,6 +202,39 @@ func (s *Service) StateDir() string {
 	return s.stateDir
 }
 
+// routingKey identifies the operator controls that decide which accounts may
+// route: the force-account override and holds.
+func routingKey(settings Settings) string {
+	held := make([]string, 0, len(settings.Accounts))
+	for id, control := range settings.Accounts {
+		if control.Hold {
+			held = append(held, id)
+		}
+	}
+	sort.Strings(held)
+	return settings.ForceAccount + "\x00" + strings.Join(held, "\x00")
+}
+
+// noteRoutingLocked advances the routing revision when force-account or a
+// hold differs from before.
+func (s *Service) noteRoutingLocked(before string) {
+	if routingKey(s.state.Settings) != before {
+		s.routingRevision++
+	}
+}
+
+// RoutingRevision changes whenever force-account or a hold changes, so
+// evidence gathered under one routing view is never revived by a later
+// change back to it.
+func (s *Service) RoutingRevision() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.routingRevision
+}
+
 // ForcedAccount returns the force-account override without copying settings.
 func (s *Service) ForcedAccount() string {
 	if s == nil {
@@ -334,9 +370,11 @@ func (s *Service) MergeSettings(update func(Settings) (Settings, error)) error {
 	s.settingsUpdateMu.Lock()
 	defer s.settingsUpdateMu.Unlock()
 	s.mu.Lock()
+	routingBefore := routingKey(s.state.Settings)
 	var notify func(bool)
 	var collectionEnabled bool
 	defer func() {
+		s.noteRoutingLocked(routingBefore)
 		s.mu.Unlock()
 		if notify != nil {
 			notify(collectionEnabled)

@@ -123,6 +123,8 @@ type claudeResetFixture struct {
 	locked bool
 	onLock func()
 	held   map[string]bool
+	// revision is the routing revision; hold advances it.
+	revision uint64
 }
 
 func claudeResetObs(weeklyUsed float64, weeklyReset time.Time, grantLeft int) claudereset.Observation {
@@ -180,11 +182,19 @@ func newClaudeResetFixture(t *testing.T) *claudeResetFixture {
 		},
 		StateDir: func() string { return f.dir },
 		Held:     func(id string) bool { return f.held[id] },
+		Revision: func() uint64 { return f.revision },
 		Now:      func() time.Time { return f.now },
 	})
 	f.m.claudeResets = f.c
 	f.refused(time.Minute)
 	return f
+}
+
+// hold changes an operator hold, advancing the routing revision as account
+// policy does.
+func (f *claudeResetFixture) hold(id string, on bool) {
+	f.held[id] = on
+	f.revision++
 }
 
 // outcome publishes a failed Claude request through a real request lease, as
@@ -198,7 +208,7 @@ func (f *claudeResetFixture) outcome(model string, err error) {
 // refused records a weekly-window refusal ago before the fixture clock, for
 // the routing pool of that moment.
 func (f *claudeResetFixture) refused(ago time.Duration) {
-	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), f.c.poolKey(f.c.claudeAuths()), true, false, false, false)
+	f.m.recordClaudeRefusals(f.c, f.now.Add(-ago), f.c.pool(f.c.claudeAuths()).view(), true, false, false, false)
 }
 
 // clearRefusals forgets recorded need.
@@ -1411,8 +1421,8 @@ func TestClaudeRefusalKeepsThePoolItStartedUnder(t *testing.T) {
 	f.client.results = []string{"reset"}
 	f.now = f.now.Add(time.Minute)
 	f.c.tick(context.Background())
-	if r := f.m.claudeRefusalTimes(); r.localWeekly.at.IsZero() {
-		t.Fatal("the forced request's refusal was not recorded")
+	if r := f.m.claudeRefusalTimes(); !r.localWeekly.at.IsZero() {
+		t.Fatalf("a refusal under a routing change was recorded: %+v", r)
 	}
 	if len(f.client.claims) != 0 {
 		t.Fatalf("a forced-pool refusal was spent on the full pool: %v", f.client.claims)
@@ -1542,5 +1552,87 @@ func TestClaudeNeedClaimRechecksThePoolBeforeSending(t *testing.T) {
 	}
 	if op := f.op(t, "b"); op.Result != claudereset.ResultNotSent {
 		t.Fatalf("op = %+v, want not_sent", op)
+	}
+}
+
+func TestClaudeRefusalDuringAHoldAndReleaseIsNotNeed(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	// A request starts under the full pool and is dispatched to a.
+	lease := f.weeklyRefusedRequest(t)
+	// While a is in flight, b is held and released again, so the retry may
+	// have skipped b: the membership looks the same, the revision does not.
+	f.hold("b", true)
+	f.hold("b", false)
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", quotaRefusal{}, lease)
+	if r := f.m.claudeRefusalTimes(); !r.weekly.at.IsZero() {
+		t.Fatalf("a refusal across a hold and release was recorded: %+v", r)
+	}
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 0 {
+		t.Fatalf("claims = %v, want none", f.client.claims)
+	}
+}
+
+func TestClaudeRefusalEvidenceIsNotRevivedByARelease(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	lease := f.weeklyRefusedRequest(t)
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", quotaRefusal{}, lease)
+	if r := f.m.claudeRefusalTimes(); r.weekly.at.IsZero() {
+		t.Fatal("the weekly refusal was not recorded")
+	}
+	// A hold and release after the refusal retire it: the same members under a
+	// newer routing revision are a different view.
+	f.hold("b", true)
+	f.hold("b", false)
+	f.client.results = []string{"reset"}
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 0 {
+		t.Fatalf("claims = %v, want none", f.client.claims)
+	}
+}
+
+func TestClaudeResendRechecksThePoolBeforeSending(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.client.results = []string{"", "reset"}
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 || f.op(t, "b").State != claudereset.OpPending {
+		t.Fatalf("claims = %v op = %+v", f.client.claims, f.op(t, "b"))
+	}
+	// The resend is journaled, then a is held: the view that justified the
+	// resend is gone, so it is not sent and stays pending for reconciliation.
+	resend := regexp.MustCompile(`"attempts":\s*2`)
+	f.c.opts.Gate = func() (bool, string) {
+		if data, err := os.ReadFile(filepath.Join(f.dir, claudereset.JournalFile)); err == nil && resend.Match(data) && !f.held["a"] {
+			f.hold("a", true)
+		}
+		return true, ""
+	}
+	f.now = f.now.Add(2 * time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 {
+		t.Fatalf("resend sent after its routing view changed: %v", f.client.claims)
+	}
+	if op := f.op(t, "b"); op.State != claudereset.OpPending {
+		t.Fatalf("op = %+v, want pending", op)
+	}
+}
+
+func TestClaudeLocalRefusalNeedsEveryStartingMember(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	pool := f.c.pool(f.c.claudeAuths())
+	if weekly, _ := f.c.localRefusalCauses(&pool); !weekly {
+		t.Fatal("a fleet of verified exhausted members is not weekly-blocked")
+	}
+	// A starting member that is gone cannot be confirmed blocked.
+	pool.members["gone|acct-gone|org-gone"] = true
+	if weekly, fable := f.c.localRefusalCauses(&pool); weekly || fable {
+		t.Fatalf("classified without evidence for every starting member: weekly=%v fable=%v", weekly, fable)
 	}
 }

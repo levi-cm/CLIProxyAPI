@@ -165,3 +165,37 @@ func TestOverrideReplacementCancellationAndIdentityReassignment(t *testing.T) {
 		t.Fatal("terminated state lost on restart")
 	}
 }
+
+func TestRoutingRevisionTracksHoldsAndForceAccount(t *testing.T) {
+	now := testTime()
+	p := &fakeProvider{snapshots: map[string]Snapshot{"b": testSnapshot("b", 7)}}
+	settings := DefaultSettings()
+	settings.Enabled = true
+	s, _ := fixtureService(t, p, &now, settings)
+	merge := func(update func(*Settings)) {
+		t.Helper()
+		if err := s.MergeSettings(func(v Settings) (Settings, error) {
+			if v.Accounts == nil {
+				v.Accounts = map[string]AccountControl{}
+			}
+			update(&v)
+			return v, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := s.RoutingRevision()
+	merge(func(v *Settings) { v.Accounts["b"] = AccountControl{ReservePercent: 10} })
+	if s.RoutingRevision() != start {
+		t.Fatal("a change that does not affect routing advanced the revision")
+	}
+	merge(func(v *Settings) { v.Accounts["b"] = AccountControl{Hold: true, ReservePercent: 10} })
+	merge(func(v *Settings) { v.Accounts["b"] = AccountControl{ReservePercent: 10} })
+	if s.RoutingRevision() != start+2 || s.Held("b") {
+		t.Fatalf("hold and release: revision = %d, want %d", s.RoutingRevision(), start+2)
+	}
+	merge(func(v *Settings) { v.ForceAccount = "b" })
+	if s.RoutingRevision() != start+3 || s.ForcedAccount() != "b" {
+		t.Fatalf("force-account: revision = %d forced = %q", s.RoutingRevision(), s.ForcedAccount())
+	}
+}
