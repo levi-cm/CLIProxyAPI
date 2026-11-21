@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,25 +272,53 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 		localWeekly, localFable = c.localRefusalCauses()
 		localFable = localFable && m.claudeFableRoute(key)
 	}
-	if !weekly && !fable && !localWeekly && !localFable {
+	if c == nil {
 		return
 	}
-	at := time.Now().UTC()
+	if !weekly && !fable && !localWeekly && !localFable {
+		// Without a confirmed cause this is not need, but fresher inventory
+		// may confirm the next refusal: wake the controller.
+		c.poke()
+		return
+	}
+	m.recordClaudeRefusals(c, time.Now().UTC(), weekly, fable, localWeekly, localFable)
+}
+
+// recordClaudeRefusals stores confirmed need with the routing pool (the
+// accounts that could serve) at refusal time; it counts only while that pool
+// is unchanged, so a force-account or hold change cannot hand one pool's
+// refusal to accounts that served all along. It wakes the controller.
+func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, weekly, fable, localWeekly, localFable bool) {
+	pool := c.poolKey(c.claudeAuths())
+	refusal := claudeRefusal{at: at, pool: pool}
 	m.claudeResetMu.Lock()
 	if weekly {
-		m.claudeWeeklyRefusalAt = at
+		m.claudeRefusals.weekly = refusal
 	}
 	if fable {
-		m.claudeFableRefusalAt = at
+		m.claudeRefusals.fable = refusal
 	}
 	if localWeekly {
-		m.claudeLocalRefusalAt = at
+		m.claudeRefusals.localWeekly = refusal
 	}
 	if localFable {
-		m.fableLocalRefusalAt = at
+		m.claudeRefusals.localFable = refusal
 	}
 	m.claudeResetMu.Unlock()
 	c.poke()
+}
+
+// poolKey identifies the accounts that can serve now (healthy, not held, not
+// excluded by force-account).
+func (c *claudeResetController) poolKey(auths []*Auth) string {
+	ids := make([]string, 0, len(auths))
+	for _, a := range auths {
+		if c.healthy(a) {
+			ids = append(ids, a.ID)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, "\x00")
 }
 
 // claudeFableRoute reports whether route resolves to a Fable model on any
@@ -317,14 +346,20 @@ func (c *claudeResetController) poke() {
 	}
 }
 
+// claudeRefusal is confirmed need and the routing pool it was refused for.
+type claudeRefusal struct {
+	at   time.Time
+	pool string
+}
+
 type claudeRefusals struct {
-	weekly, fable, localWeekly, localFable time.Time
+	weekly, fable, localWeekly, localFable claudeRefusal
 }
 
 func (m *Manager) claudeRefusalTimes() claudeRefusals {
 	m.claudeResetMu.Lock()
 	defer m.claudeResetMu.Unlock()
-	return claudeRefusals{weekly: m.claudeWeeklyRefusalAt, fable: m.claudeFableRefusalAt, localWeekly: m.claudeLocalRefusalAt, localFable: m.fableLocalRefusalAt}
+	return m.claudeRefusals
 }
 
 func (c *claudeResetController) now() time.Time { return c.opts.Now().UTC() }
@@ -685,15 +720,21 @@ func (c *claudeResetController) input(auths []*Auth, ignoreOp string, withSignal
 	in := claudereset.Input{Now: now, LastNeedClaimAt: history.LastNeedClaimAt, NeedClaims24h: history.NeedClaims24h}
 	in.Accounts = c.accounts(auths, history, withSignals)
 	// Need is a refusal Anthropic attributed to the window, or a local refusal
-	// while every healthy account is blocked by that window.
+	// while every healthy account is blocked by that window, and only for the
+	// routing pool it was refused for.
 	r := c.m.claudeRefusalTimes()
-	in.ClaudeDemandAt, in.FableDemandAt = r.weekly, r.fable
-	if r.localWeekly.After(in.ClaudeDemandAt) {
-		in.ClaudeDemandAt = r.localWeekly
+	pool := c.poolKey(auths)
+	latest := func(refusals ...claudeRefusal) time.Time {
+		var at time.Time
+		for _, refusal := range refusals {
+			if refusal.pool == pool && refusal.at.After(at) {
+				at = refusal.at
+			}
+		}
+		return at
 	}
-	if r.localFable.After(in.FableDemandAt) {
-		in.FableDemandAt = r.localFable
-	}
+	in.ClaudeDemandAt = latest(r.weekly, r.localWeekly)
+	in.FableDemandAt = latest(r.fable, r.localFable)
 	return in
 }
 

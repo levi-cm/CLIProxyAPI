@@ -255,10 +255,7 @@ type Manager struct {
 	claudeResets  *claudeResetController
 	// Refusals Anthropic attributed to the weekly or Fable window, and local
 	// refusals of Claude routes whose credentials were all cooling down.
-	claudeWeeklyRefusalAt    time.Time
-	claudeFableRefusalAt     time.Time
-	claudeLocalRefusalAt     time.Time
-	fableLocalRefusalAt      time.Time
+	claudeRefusals           claudeRefusals
 	policyResetReservations  map[string]chan struct{}
 	policyRefreshCallback    func(string)
 	policyExhaustionCallback func(accountpolicy.Identity)
