@@ -198,10 +198,12 @@ cases:
   that finally failed with a refusal (including one delivered in a stream),
   and either:
   - one of its attempts was refused with rate-limit headers marking the weekly
-    window `rejected`; an attempt refused while another account served the
+    window `rejected` (attributed by the attempt's resolved model, so alias
+    routes count); an attempt refused while another account served the
     retry does not count; or
   - it was refused locally because no credential could serve (all cooling
-    down, possibly beside logged-out ones), while every healthy account was
+    down, possibly beside logged-out ones, or no account the policy allows,
+    such as a forced account on cooldown), while every healthy account was
     blocked by its weekly window, judged at refusal time from fresh verified
     inventory of the window running now (not renewed since it was read) or an
     active cooldown ending at that window's reset. Later fleet changes cannot
@@ -265,6 +267,8 @@ cases:
   unchanged count settles it as unspent. A vanished
   grant counts as spent only when a cleared window is reported, its usage fell,
   and it has not renewed.
+- **Reconciliation reads.** Settling a claim from a verified read ignores
+  holds and `force-account`, which only restrict where claims are sent.
 - **Quarantine.** An unresolved claim quarantines its logical account (account
   UUID, whatever the credential is called), which counts as restored for need
   decisions. It settles as `unresolved` after one hour and still counts against

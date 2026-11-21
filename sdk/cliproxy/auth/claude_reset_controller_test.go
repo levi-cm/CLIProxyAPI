@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudereset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -419,7 +421,11 @@ func TestClaudeRefusalCountsOnlyWhenTheRequestFails(t *testing.T) {
 	request := func(window string) *policyRequestLease {
 		opts, lease := m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{})
 		t.Cleanup(lease.release)
-		m.noteClaudeWindowRefusal(Result{Provider: "claude", Options: opts}, header(window))
+		resolved := "claude-opus-5-5"
+		if window == claudeFableWindow {
+			resolved = "claude-fable-5-2"
+		}
+		m.noteClaudeWindowRefusal(Result{Provider: "claude", Model: resolved, Options: opts}, header(window))
 		return lease
 	}
 	// Another account served the retry: no need.
@@ -434,9 +440,10 @@ func TestClaudeRefusalCountsOnlyWhenTheRequestFails(t *testing.T) {
 	if r := m.claudeRefusalTimes(); r.weekly.IsZero() || !r.fable.IsZero() {
 		t.Fatalf("weekly refusal = %+v", r)
 	}
-	m.noteClaudeRequestOutcome(claude, "claude-fable-5-2", quotaRefusal{}, request("7d_oi"))
+	// An alias route keeps the attribution of the resolved Fable model.
+	m.noteClaudeRequestOutcome(claude, "fable", quotaRefusal{}, request("7d_oi"))
 	if r := m.claudeRefusalTimes(); r.fable.IsZero() {
-		t.Fatal("Fable refusal not recorded")
+		t.Fatal("Fable refusal on an alias route not recorded")
 	}
 	// Without a controller to confirm a window cause, a local refusal is not need.
 	m.noteClaudeRequestOutcome(claude, "claude-fable-5-2", newModelCooldownError("claude-fable-5-2", "claude", time.Hour), nil)
@@ -1113,5 +1120,73 @@ func TestStopClaudeResetControllerDrains(t *testing.T) {
 	case <-c.done:
 	default:
 		t.Fatal("controller still running after stop")
+	}
+}
+
+// A forced account whose weekly cooldown was restored after a restart makes
+// the policy selector refuse with account_policy_unavailable. That refusal,
+// through the real Manager.Execute path and with no preloaded need, must arm
+// the forced account's weekly reset.
+func TestClaudeResetForcedAccountCooldownThroughExecute(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	model := "claude-opus-5-5"
+	reset := now.Add(96 * time.Hour)
+	executor := &claudeCancellationTestExecutor{}
+	m := NewManager(nil, nil, NoopHook{})
+	m.SetRetryConfig(0, 0, 0)
+	m.RegisterExecutor(executor)
+	ids := map[string]string{"a": "claude-forced-a-" + uuid.NewString(), "b": "claude-forced-b-" + uuid.NewString()}
+	client := &fakeClaudeResetClient{statuses: map[string]claudereset.Observation{}, identity: map[string][2]string{}, statusReads: map[string]int{},
+		failStatus: map[string]bool{}, stale: map[string]bool{}, staleFable: map[string]bool{}}
+	for i, key := range []string{"a", "b"} {
+		id := ids[key]
+		account, org := "acct-"+key, "22222222-2222-2222-2222-22222222222"+string(rune('1'+i))
+		a := &Auth{ID: id, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"auth_kind": "oauth"},
+			Metadata: map[string]any{"access_token": "tok-" + key, "account_uuid": account, "organization_uuid": org, "request_retry": float64(0)}}
+		if key == "a" {
+			a.ModelStates = map[string]*ModelState{model: quotaCooldown(reset.Add(40 * time.Second))}
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+		if _, err := m.Register(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+		client.identity[id] = [2]string{account, org}
+	}
+	client.statuses[ids["a"]] = claudeResetObs(100, reset, 1)
+	client.statuses[ids["b"]] = claudeResetObs(10, reset, 1)
+	settings := accountpolicy.DefaultSettings()
+	settings.Enabled = true
+	settings.ForceAccount = ids["a"]
+	sel := NewEarliestDeadlineSelector(&policyTestSource{settings: settings, snapshots: map[string]accountpolicy.Snapshot{}}, &FillFirstSelector{})
+	sel.SetBindingAuthResolver(m.GetByID)
+	t.Cleanup(sel.Stop)
+	m.SetSelector(sel)
+	c := newClaudeResetController(m, client, ClaudeResetOptions{
+		Gate:     func() (bool, string) { return true, "" },
+		Lock:     func() (func(), error) { return func() {}, nil },
+		StateDir: func() string { return t.TempDir() },
+		Held:     func(string) bool { return false },
+		Forced:   func() string { return ids["a"] },
+		Now:      func() time.Time { return now },
+	})
+	m.claudeResetMu.Lock()
+	m.claudeResets = c
+	m.claudeResetMu.Unlock()
+	c.refresh(context.Background(), c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+
+	if _, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("Execute served while the forced account is cooling down")
+	}
+	if executor.executeCalls.Load() != 0 {
+		t.Fatalf("an excluded account served the request: %d calls", executor.executeCalls.Load())
+	}
+	if r := m.claudeRefusalTimes(); r.localWeekly.IsZero() {
+		t.Fatalf("the forced account's weekly refusal was not recorded: %+v", r)
+	}
+	client.results = []string{"reset"}
+	c.tick(context.Background())
+	if len(client.claims) != 1 || !strings.HasPrefix(client.claims[0], ids["a"]+"/") {
+		t.Fatalf("claims = %v, want the forced account", client.claims)
 	}
 }

@@ -209,7 +209,9 @@ func (m *Manager) noteClaudeWindowRefusal(result Result, headers http.Header) {
 	rejected := func(window string) bool {
 		return strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-"+window+"-Status")), "rejected")
 	}
-	weekly, fable := rejected("7d"), rejected(claudeFableWindow)
+	// The result names the resolved model, so an alias route keeps its Fable
+	// attribution; 7d_oi on a non-Fable model (an overage cap) is not Fable.
+	weekly, fable := rejected("7d"), rejected(claudeFableWindow) && claudeFableModel(result.Model)
 	if !weekly && !fable {
 		return
 	}
@@ -232,8 +234,11 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	var selection *Error
 	// Selection refused the route: every credential cooling down, possibly
 	// alongside ones that cannot serve at all (auth_unavailable).
+	// account_policy_unavailable: the policy selector found no eligible
+	// account, for example a forced account whose cooldown was restored.
 	local := (errors.As(err, &cooldown) && cooldown != nil) ||
-		(errors.As(err, &selection) && selection != nil && (selection.Code == "auth_unavailable" || selection.Code == "model_cooldown"))
+		(errors.As(err, &selection) && selection != nil &&
+			(selection.Code == "auth_unavailable" || selection.Code == "model_cooldown" || selection.Code == "account_policy_unavailable"))
 	if !local && statusCodeFromError(err) != 429 {
 		return
 	}
@@ -241,19 +246,18 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	for _, provider := range providers {
 		claude = claude || strings.EqualFold(strings.TrimSpace(provider), "claude")
 	}
-	key := strings.ToLower(canonicalModelKey(model))
-	if !claude || !strings.HasPrefix(key, "claude-") {
+	if !claude {
 		return
 	}
+	key := strings.ToLower(canonicalModelKey(model))
+	// Window refusals were attributed from Claude results with their resolved
+	// models, so an alias route keeps them.
 	weekly, fable := false, false
 	if lease != nil {
 		lease.mu.Lock()
 		weekly, fable = lease.claudeWeeklyRefused, lease.claudeFableRefused
 		lease.mu.Unlock()
 	}
-	// 7d_oi is also reported on other refusals (organization overage caps); it
-	// is Fable need only for a Fable request.
-	fable = fable && claudeFableModel(key)
 	if !weekly && !fable && !local {
 		return
 	}
@@ -813,6 +817,17 @@ type claimTarget struct {
 // inventory with it. The claim must use the same verified token, registration
 // and identity as this read.
 func (c *claudeResetController) freshTarget(ctx context.Context, id, wantAccount, wantOrg string) (claimTarget, bool) {
+	return c.target(ctx, id, wantAccount, wantOrg, true)
+}
+
+// reconcileTarget is freshTarget for read-only reconciliation: operator
+// holds and force-account restrict where claims are sent, not whether a
+// verified read may settle an earlier claim.
+func (c *claudeResetController) reconcileTarget(ctx context.Context, id, wantAccount, wantOrg string) (claimTarget, bool) {
+	return c.target(ctx, id, wantAccount, wantOrg, false)
+}
+
+func (c *claudeResetController) target(ctx context.Context, id, wantAccount, wantOrg string, eligible bool) (claimTarget, bool) {
 	a, ok := c.m.GetByID(id)
 	if !ok || !isClaudeAuth(a) {
 		return claimTarget{}, false
@@ -826,13 +841,21 @@ func (c *claudeResetController) freshTarget(ctx context.Context, id, wantAccount
 		return claimTarget{}, false
 	}
 	t := claimTarget{auth: a, token: token, obs: obs}
-	return t, c.stillTarget(t)
+	return t, c.unchanged(t, eligible)
 }
 
-// stillTarget reports whether the credential is still exactly as it was read.
+// stillTarget reports whether the credential is still exactly as it was read
+// and may receive a claim.
 func (c *claudeResetController) stillTarget(t claimTarget) bool {
+	return c.unchanged(t, true)
+}
+
+// unchanged reports whether the credential is still exactly as it was read;
+// eligible also requires that it may receive a claim (healthy, not held, not
+// excluded by force-account).
+func (c *claudeResetController) unchanged(t claimTarget, eligible bool) bool {
 	current, ok := c.m.GetByID(t.auth.ID)
-	if !ok || current.RegistrationEpoch != t.auth.RegistrationEpoch || authAccessToken(current) != t.token || !c.healthy(current) {
+	if !ok || current.RegistrationEpoch != t.auth.RegistrationEpoch || authAccessToken(current) != t.token || (eligible && !c.healthy(current)) {
 		return false
 	}
 	readAccount, readOrg := claudeResetIdentity(t.auth)
@@ -1006,7 +1029,7 @@ func (c *claudeResetController) recoverPending(ctx context.Context) {
 		if age < claudereset.ClaimRetryWindow && now.Sub(op.UpdatedAt) < claudeResetRetryEvery {
 			continue
 		}
-		if t, ok := c.freshTarget(ctx, op.CredentialID, op.AccountUUID, op.OrganizationUUID); ok {
+		if t, ok := c.reconcileTarget(ctx, op.CredentialID, op.AccountUUID, op.OrganizationUUID); ok {
 			// Judge renewal at the read's completion, not before it.
 			consumed, known := settled(op, t.obs, c.now())
 			switch {
