@@ -1833,3 +1833,28 @@ func TestClaudeRouteCapableKeepsQuotaButNotModelSupportBlocks(t *testing.T) {
 		t.Fatal("a Fable model-support cooldown removed the account from the Opus route")
 	}
 }
+
+func TestClaudeResetClaimsWhileTheAccountServes(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	// b, the account renewing last, is serving a request (for example a long
+	// stream) when the fleet runs out.
+	_, lease := f.m.trackPolicyRequest(context.Background(), cliproxyexecutor.Options{}, claudeDemand)
+	defer lease.release()
+	lease.selectAuth("b")
+	if f.m.PolicyIsIdle("b") {
+		t.Fatal("fixture: b is not serving")
+	}
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	// The reset is spent without waiting for b to go idle, and the running
+	// request is left alone.
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "b/") {
+		t.Fatalf("claims = %v, want b while it serves", f.client.claims)
+	}
+	if op := f.op(t, "b"); op.State != claudereset.OpDone {
+		t.Fatalf("op = %+v, want done", op)
+	}
+	if got := f.m.PolicyRuntime("b").ActiveRequests; got != 1 {
+		t.Fatalf("active requests on b = %d, want the running request kept", got)
+	}
+}
