@@ -859,6 +859,31 @@ func TestClaudeResetLocalRecoveryResumesAfterRestart(t *testing.T) {
 	}
 }
 
+func TestClaudeResetOneRefusalSpendsOneGrant(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.client.results = []string{"reset", "reset"}
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "b/") || !f.op(t, "b").Recovered {
+		t.Fatalf("claims = %v op = %+v", f.client.claims, f.op(t, "b"))
+	}
+	// b recovered and serves; eleven minutes later it is put on hold. The fleet
+	// looks short again, but no request was refused since b's reset.
+	f.held["b"] = true
+	for i := 0; i < 4; i++ {
+		f.now = f.now.Add(3 * time.Minute)
+		f.c.tick(context.Background())
+	}
+	if len(f.client.claims) != 1 {
+		t.Fatalf("one refusal spent a second grant: %v", f.client.claims)
+	}
+	// A new refusal is new need.
+	f.refused(time.Second)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 2 || !strings.HasPrefix(f.client.claims[1], "c/") {
+		t.Fatalf("claims = %v, want c after a new refusal", f.client.claims)
+	}
+}
+
 func TestClaudeResetSkipsHeldAccount(t *testing.T) {
 	f := newClaudeResetFixture(t)
 	f.held["b"] = true

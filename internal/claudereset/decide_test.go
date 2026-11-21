@@ -115,6 +115,12 @@ func TestNeedClaimsSettleAndCap(t *testing.T) {
 	if plan := Decide(in); plan.Claim != nil || plan.Weekly.State != StateSettling {
 		t.Fatalf("plan = %+v, want settling", plan)
 	}
+	// A refusal from before the last claim is not new need.
+	stale := in
+	stale.ClaudeDemandAt, stale.LastNeedClaimAt = testNow.Add(-12*time.Minute), testNow.Add(-11*time.Minute)
+	if plan := Decide(stale); plan.Claim != nil || plan.Weekly.State != StateWaitingDemand {
+		t.Fatalf("plan = %+v, want waiting for a new refusal", plan)
+	}
 	in.LastNeedClaimAt, in.NeedClaims24h = testNow.Add(-time.Hour), MaxNeedClaimsPerDay
 	if plan := Decide(in); plan.Claim != nil || plan.Weekly.State != StateCapped {
 		t.Fatalf("plan = %+v, want capped", plan)

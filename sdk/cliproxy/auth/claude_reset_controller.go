@@ -269,7 +269,7 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	m.claudeResetMu.Unlock()
 	if local && c != nil {
 		localWeekly, localFable = c.localRefusalCauses()
-		localFable = localFable && claudeFableModel(key)
+		localFable = localFable && m.claudeFableRoute(key)
 	}
 	if !weekly && !fable && !localWeekly && !localFable {
 		return
@@ -290,6 +290,21 @@ func (m *Manager) noteClaudeRequestOutcome(providers []string, model string, err
 	}
 	m.claudeResetMu.Unlock()
 	c.poke()
+}
+
+// claudeFableRoute reports whether route resolves to a Fable model on any
+// Claude credential, so a neutral alias (for example "fable") keeps its Fable
+// attribution on a local refusal that happened before any upstream attempt.
+func (m *Manager) claudeFableRoute(route string) bool {
+	if claudeFableModel(route) {
+		return true
+	}
+	for _, a := range m.List() {
+		if isClaudeAuth(a) && claudeFableModel(m.selectionModelKeyForAuth(a, route)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *claudeResetController) poke() {

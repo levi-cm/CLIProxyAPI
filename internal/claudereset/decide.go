@@ -254,6 +254,10 @@ func needScope(in Input, demandAt time.Time, headroom func(Account, time.Time) f
 		st.State, st.Reason = StateOK, fmt.Sprintf("%.0f points of allowance are still open across the fleet", total)
 	case demandAt.IsZero() || now.Sub(demandAt) > DemandWindow:
 		st.State, st.Reason = StateWaitingDemand, "no request was refused for quota in the last 15 minutes"
+	case !in.LastNeedClaimAt.IsZero() && !demandAt.After(in.LastNeedClaimAt):
+		// One refusal justifies one reset: a new claim needs a refusal after
+		// the last one, which may already have met this shortage.
+		st.State, st.Reason = StateWaitingDemand, "no request was refused since the last automatic reset"
 	case !in.LastNeedClaimAt.IsZero() && now.Sub(in.LastNeedClaimAt) < NeedSettle:
 		st.State, st.Reason = StateSettling, "waiting for the last reset to show in usage"
 	case in.NeedClaims24h >= MaxNeedClaimsPerDay:

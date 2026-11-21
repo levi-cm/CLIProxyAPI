@@ -237,6 +237,9 @@ cases:
   however soon it renews.
 - Need claims that spent or may have spent a reset (pending or unresolved)
   are at least 10 minutes apart and capped at 3 per 24 hours.
+- One refusal justifies one reset: a new need claim requires a refusal after
+  the last need claim, which may already have met that shortage. A resend of
+  a pending claim keeps the refusal that started it.
 - A claim on an account needs an inventory read taken after that account's
   previous claim.
 - A refused claim pauses that account for one hour.
