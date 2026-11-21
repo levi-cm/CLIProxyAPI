@@ -282,8 +282,12 @@ cases:
 - **Re-checks.** After the attempt is journaled, the gate, the credential, the
   read's age (at most 90 seconds) and the resend window are checked again. The
   request is bounded by that window. A first attempt that fails these checks is
-  settled as `not_sent`, without a pause. New selections of the account wait
-  while the claim and its local recovery run, and active streams continue.
+  settled as `not_sent`, without a pause.
+- **Busy accounts.** A claim never waits for its account to go idle: requests
+  and streams already running on it continue untouched. Only new selections
+  of that account wait while the claim and its local recovery run (normally a
+  second or two, at most the 30-second call timeouts), so no request that
+  started before the reset can re-arm a cooldown the reset cleared.
 - **Unknown outcome.** An unresolved claim always starts from a fresh verified
   read of the journaled identity, and fewer resets left settles it as spent. It
   is resent with the same request ID only within 9 minutes, which Anthropic
