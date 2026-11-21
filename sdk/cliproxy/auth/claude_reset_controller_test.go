@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/accountpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudereset"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -27,6 +29,8 @@ type fakeClaudeResetClient struct {
 	stale      map[string]bool
 	staleFable map[string]bool
 	onStatus   func(authID string)
+	// headers makes Status return usage headers for the observation path.
+	headers bool
 }
 
 func (f *fakeClaudeResetClient) Status(_ context.Context, a *Auth, _ string) (claudereset.Observation, http.Header, error) {
@@ -40,7 +44,22 @@ func (f *fakeClaudeResetClient) Status(_ context.Context, a *Auth, _ string) (cl
 	if !ok || f.failStatus[a.ID] {
 		return claudereset.Observation{}, nil, errors.New("no status")
 	}
-	return obs, nil, nil
+	if !f.headers {
+		return obs, nil, nil
+	}
+	// Render usage as unified rate-limit headers, as the real client does.
+	h := http.Header{}
+	for _, item := range []struct {
+		name string
+		w    claudereset.Window
+	}{{"7d", obs.Weekly}, {claudeFableWindow, obs.Fable}} {
+		if item.w.Known {
+			prefix := "Anthropic-Ratelimit-Unified-" + item.name + "-"
+			h.Set(prefix+"Utilization", strconv.FormatFloat(item.w.Used/100, 'f', -1, 64))
+			h.Set(prefix+"Reset", strconv.FormatInt(item.w.ResetAt.Unix(), 10))
+		}
+	}
+	return obs, h, nil
 }
 
 func (f *fakeClaudeResetClient) Identity(_ context.Context, a *Auth, _ string) (string, string, error) {
@@ -916,6 +935,55 @@ type forgetWindowsSelector struct {
 
 func (s *forgetWindowsSelector) ForgetClaudeLimits(_ string, _ uint64, windows []string, _ time.Time) {
 	s.windows = append(s.windows, windows...)
+}
+
+func TestClaudeResetLaggingFullReadDoesNotStrandFable(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	settings := accountpolicy.DefaultSettings()
+	settings.Enabled = true
+	sel := NewEarliestDeadlineSelector(&policyTestSource{settings: settings, snapshots: map[string]accountpolicy.Snapshot{}}, &FillFirstSelector{})
+	sel.now = func() time.Time { return f.now }
+	sel.SetBindingAuthResolver(f.m.GetByID)
+	t.Cleanup(sel.Stop)
+	f.m.SetSelector(sel)
+	f.client.headers = true
+	obs := f.client.statuses["b"]
+	obs.Fable.Used = 100
+	f.client.statuses["b"] = obs
+	// The first post-claim read lags: Fable still shows full with the same reset.
+	f.client.staleFable["b"] = true
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	// A later read, after the claim was confirmed, still lags.
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	b, _ := f.m.GetByID("b")
+	if !sel.claudeLimitBlocked("b", b.RegistrationEpoch, "claude-fable-5-2", f.now) {
+		t.Fatal("setup: the lagging read did not mark Fable full")
+	}
+	// The reset shows up: the same deadline, now open.
+	obs = f.client.statuses["b"]
+	obs.Fable.Used = 0
+	f.client.statuses["b"] = obs
+	f.now = f.now.Add(time.Minute)
+	f.c.tick(context.Background())
+	if !f.op(t, "b").Recovered {
+		t.Fatalf("op = %+v", f.op(t, "b"))
+	}
+	if sel.claudeLimitBlocked("b", b.RegistrationEpoch, "claude-fable-5-2", f.now) {
+		t.Fatal("Fable stays blocked on the restored account after the reset became visible")
+	}
+}
+
+func TestClaudeResetForcedAccountOnlyServes(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.c.opts.Forced = func() string { return "a" }
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	// Only a serves while forced; b and c renew later but cannot serve.
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "a/") {
+		t.Fatalf("claims = %v, want the forced account", f.client.claims)
+	}
 }
 
 func TestRecoverClaudeResetFablePassChecksBothDeadlines(t *testing.T) {

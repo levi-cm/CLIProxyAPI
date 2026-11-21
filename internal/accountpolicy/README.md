@@ -220,6 +220,8 @@ cases:
   hours ahead.
 
 **Safety rules:**
+- While routing is forced to one credential (`force-account`), no other
+  account counts as serving.
 - Decisions use only inventory read with the credential's current, verified
   token. Response headers and the usage poller only decide when to read early.
 - An account whose last claim may have spent a reset counts as restored until
@@ -280,8 +282,10 @@ cases:
   reset.
 - Fable models recover in the pass where every window they draw is first
   confirmed, checking both cleared deadlines.
-- The selector forgets only window observations from before the fence; newer
-  evidence stays.
+- The selector forgets the Fable window up to the start of the verified read
+  that confirmed the reset. That supersedes a lagging post-claim read that
+  still showed the window full with the same reset time, and newer evidence
+  stays.
 - The operation counts as recovered only once every cleared window is
   confirmed. Until then the account counts as restored for need decisions, and
   no other claim is made on it.

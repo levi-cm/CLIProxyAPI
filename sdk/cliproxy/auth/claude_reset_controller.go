@@ -65,6 +65,9 @@ type ClaudeResetOptions struct {
 	StateDir func() string
 	// Held reports operator holds; held accounts never serve restored allowance.
 	Held func(id string) bool
+	// Forced returns the credential routing is forced to, empty when none;
+	// while set, no other account serves.
+	Forced func() string
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
@@ -125,6 +128,9 @@ func (m *Manager) StartClaudeResetController(ctx context.Context, client ClaudeR
 	}
 	if opts.Held == nil {
 		opts.Held = func(string) bool { return false }
+	}
+	if opts.Forced == nil {
+		opts.Forced = func() string { return "" }
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c := newClaudeResetController(m, client, opts)
@@ -447,7 +453,15 @@ func (c *claudeResetController) claudeAuths() []*Auth {
 }
 
 func (c *claudeResetController) healthy(a *Auth) bool {
-	return a != nil && !a.Disabled && a.Status != StatusDisabled && !hasUnauthorizedAuthFailure(a) && !c.opts.Held(a.ID)
+	if a == nil || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) || c.opts.Held(a.ID) {
+		return false
+	}
+	if c.opts.Forced != nil {
+		if forced := c.opts.Forced(); forced != "" && forced != a.ID {
+			return false
+		}
+	}
+	return true
 }
 
 func claudeResetIdentity(a *Auth) (string, string) {

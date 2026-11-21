@@ -282,7 +282,14 @@ func (m *Manager) forgetClaudeResetWindow(id string, epoch uint64, r ClaudeReset
 	if !r.ClearsFable || !r.FableOpen || !r.passFable() {
 		return
 	}
+	// The verified read confirming the reset supersedes every reading observed
+	// before it, including a lagging post-claim read that still showed the
+	// window full with the same reset time. Newer evidence stays.
+	fence := r.ObservedAt
+	if fence.Before(r.ConfirmedAt) {
+		fence = r.ConfirmedAt
+	}
 	if forgetter, ok := m.Selector().(claudeLimitForgetter); ok && forgetter != nil {
-		forgetter.ForgetClaudeLimits(id, epoch, []string{claudeFableWindow}, r.ConfirmedAt)
+		forgetter.ForgetClaudeLimits(id, epoch, []string{claudeFableWindow}, fence)
 	}
 }
