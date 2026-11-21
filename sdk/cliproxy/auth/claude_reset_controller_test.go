@@ -1079,6 +1079,54 @@ func TestRecoverClaudeResetFableRepairsCredentialWideCooldown(t *testing.T) {
 	}
 }
 
+// A Fable request refused by the 5-hour and Fable windows sets a
+// credential-scoped cooldown to the Fable deadline and wraps the sibling model
+// states in it. A Fable-only reset must release those wrappers too, while an
+// independent cooldown underneath survives.
+func TestRecoverClaudeResetReleasesPropagatedCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	id := "claude-propagated-" + uuid.NewString()
+	opus, fable, sonnet := "claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: opus}, {ID: fable}, {ID: sonnet}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+	org := "33333333-3333-3333-3333-333333333333"
+	if _, err := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "tok", "account_uuid": "acct-p", "organization_uuid": org}}); err != nil {
+		t.Fatal(err)
+	}
+	mark := func(model string, ok bool, retry time.Duration, credential bool) {
+		r := Result{AuthID: id, Provider: "claude", Model: model, Success: ok, CredentialScope: credential}
+		if !ok {
+			r.RetryAfter = &retry
+			r.Error = &Error{HTTPStatus: http.StatusTooManyRequests, Message: "limit"}
+		}
+		m.MarkResult(context.Background(), r)
+	}
+	mark(sonnet, false, 3*time.Hour, false) // independent model-scoped block
+	mark(opus, true, 0, false)
+	fableDeadline := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Second)
+	mark(fable, false, time.Until(fableDeadline), true)
+	a, _ := m.GetByID(id)
+	if blocked, _, _ := isAuthBlockedForModel(a, opus, time.Now()); !blocked {
+		t.Fatal("setup: the credential-scoped refusal did not block Opus")
+	}
+	r := ClaudeResetRecovery{CredentialID: id, AccountUUID: "acct-p", OrganizationUUID: org, ClearsFable: true,
+		FableResetAt: fableDeadline, WeeklyOpen: true, FableOpen: true, ObservedAt: time.Now().Add(time.Second), ConfirmedAt: time.Now()}
+	if err := m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = m.GetByID(id)
+	for _, model := range []string{opus, fable} {
+		if blocked, reason, _ := isAuthBlockedForModel(a, model, time.Now()); blocked {
+			t.Fatalf("%s still blocked after the Fable reset: %v (state %+v)", model, reason, a.ModelStates[model])
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(a, sonnet, time.Now()); !blocked {
+		t.Fatal("the independent Sonnet cooldown did not survive")
+	}
+}
+
 func TestRecoverClaudeResetForgetsOnlyClearedWindow(t *testing.T) {
 	f := newClaudeResetFixture(t)
 	sel := &forgetWindowsSelector{}

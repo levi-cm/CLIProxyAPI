@@ -83,6 +83,15 @@ func (r ClaudeResetRecovery) cleared(model string, until time.Time) bool {
 	return r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(until, r.WeeklyResetAt)
 }
 
+// credentialCause reports whether a credential-wide cooldown ending at until
+// was caused by a window this pass cleared and confirmed. One that may still
+// belong to a full 5-hour window is not.
+func (r ClaudeResetRecovery) credentialCause(until time.Time) bool {
+	weekly := r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(until, r.WeeklyResetAt)
+	fable := r.ClearsFable && r.passFable() && r.FableOpen && r.WeeklyOpen && causedBy(until, r.FableResetAt)
+	return (weekly || fable) && !(r.SessionFull && causedBy(until, r.SessionResetAt))
+}
+
 func quotaCooldownUntil(q QuotaState, retry time.Time) time.Time {
 	if !q.NextRecoverAt.IsZero() {
 		return q.NextRecoverAt
@@ -167,9 +176,27 @@ func (m *Manager) RecoverClaudeReset(ctx context.Context, r ClaudeResetRecovery)
 	// the Fable window's: a cleared, confirmed window of either kind repairs
 	// it, unless it may still belong to a full 5-hour window.
 	authUntil := quotaCooldownUntil(auth.Quota, auth.NextRetryAfter)
-	weeklyCause := r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(authUntil, r.WeeklyResetAt)
-	fableCause := r.ClearsFable && r.passFable() && r.FableOpen && r.WeeklyOpen && causedBy(authUntil, r.FableResetAt)
-	if (weeklyCause || fableCause) && policyQuotaFailure(auth.Quota, auth.LastError) && !(r.SessionFull && causedBy(authUntil, r.SessionResetAt)) {
+	// A credential-scoped refusal also wraps every sibling model state in its
+	// cooldown (Reason credential_quota), keeping any independent block below
+	// in the shadow. Release a wrapper the cleared window caused and reinstate
+	// a still-live independent block, as Devin quota restoration does.
+	for _, state := range auth.ModelStates {
+		if state == nil || state.Status == StatusDisabled || state.UpdatedAt.After(r.ObservedAt) {
+			continue
+		}
+		wrapped := state.credentialQuotaPropagated || strings.TrimSpace(state.Quota.Reason) == "credential_quota"
+		if !wrapped || !state.Quota.Exceeded || !r.credentialCause(quotaCooldownUntil(state.Quota, state.NextRetryAfter)) {
+			continue
+		}
+		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+			*state = *shadow.cloneShallow()
+			state.UpdatedAt = now
+		} else {
+			resetModelState(state, now)
+		}
+		changed = true
+	}
+	if policyQuotaFailure(auth.Quota, auth.LastError) && r.credentialCause(authUntil) {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})

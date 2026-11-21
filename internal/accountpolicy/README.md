@@ -303,7 +303,9 @@ cases:
   advance its timestamp. A refusal of several windows sets it to the latest
   deadline, so it is repaired by whichever cleared window that deadline
   belongs to, Fable included. The recovery fence covers every model, so a
-  stale credential-scoped refusal cannot re-apply it. A Fable cooldown also needs the weekly window open. A
+  stale credential-scoped refusal cannot re-apply it. Model states that the
+  refusal wrapped in the same cooldown (`credential_quota`) are released too,
+  and an independent cooldown kept below the wrapper is reinstated. A Fable cooldown also needs the weekly window open. A
   deadline that also matches a still-full 5-hour window, or an unknown cause,
   stays.
 - It persists the credential and the cooldown store before publishing.
