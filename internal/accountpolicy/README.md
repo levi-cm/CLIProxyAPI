@@ -205,8 +205,10 @@ cases:
     down, possibly beside logged-out ones, or no account the policy allows,
     such as a forced account on cooldown), while every healthy account was
     blocked by its weekly window, judged at refusal time from fresh verified
-    inventory of the window running now (not renewed since it was read) or an
-    active cooldown ending at that window's reset. Later fleet changes cannot
+    inventory of the window running now (not renewed since it was read). An
+    active cooldown counts only when its deadline cannot also be the Fable
+    window's: the two usually renew together, and a Fable refusal can block a
+    whole credential while weekly allowance remains. Later fleet changes cannot
     give an earlier refusal a weekly cause.
   Successful traffic, 5-hour, entitlement and request-scoped refusals are not
   need. A refusal wakes the controller at once. A weekly grant

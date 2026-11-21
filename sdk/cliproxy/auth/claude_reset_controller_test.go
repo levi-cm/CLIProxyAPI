@@ -498,6 +498,7 @@ func TestClaudeRefusalAttribution(t *testing.T) {
 	// Selection refusing with auth_unavailable (cooling plus unusable
 	// credentials) is a local refusal when the fleet is weekly-blocked now.
 	f := newClaudeResetFixture(t)
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
 	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
 	f.m.noteClaudeRequestOutcome(claude, "claude-opus-5-5", &Error{Code: "auth_unavailable", HTTPStatus: 503}, nil)
 	if r := f.m.claudeRefusalTimes(); r.localWeekly.IsZero() {
@@ -616,7 +617,10 @@ func TestClaudeResetLocalRefusalNeedsWindowCause(t *testing.T) {
 	if len(f.client.claims) != 0 {
 		t.Fatalf("claimed on a refusal whose cause was not weekly when it happened: %v", f.client.claims)
 	}
-	// A refusal while every account is weekly-blocked is need.
+	// A refusal while verified inventory shows every account weekly-exhausted is need.
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	f.now = f.now.Add(2 * time.Minute)
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
 	refuse()
 	f.now = f.now.Add(time.Minute)
 	f.c.tick(context.Background())
@@ -656,6 +660,31 @@ func TestClaudeResetLocalRefusalIgnoresRenewedOrStaleExhaustion(t *testing.T) {
 		if r := f.m.claudeRefusalTimes(); !r.localWeekly.IsZero() {
 			t.Fatalf("%s: local refusal given a weekly cause: %+v", tc.name, r)
 		}
+	}
+}
+
+// A Fable refusal can block the whole credential until the Fable deadline,
+// which usually equals the weekly one. A local refusal then must not count as
+// weekly need while verified inventory shows weekly allowance left.
+func TestClaudeResetFableCooldownAtWeeklyDeadlineIsNotWeeklyNeed(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.m.claudeResetMu.Lock()
+	f.m.claudeWeeklyRefusalAt = time.Time{}
+	f.m.claudeResetMu.Unlock()
+	// c is at 96% weekly; its credential-wide cooldown ends at the shared deadline.
+	f.client.statuses["c"] = claudeResetObs(96, f.client.statuses["c"].Weekly.ResetAt, 1)
+	f.c.refresh(context.Background(), f.c.claudeAuths(), func(claudeResetStatusEntry) bool { return true })
+	c, _ := f.m.GetByID("c")
+	until := f.client.statuses["c"].Weekly.ResetAt.Add(time.Second)
+	c.ModelStates = map[string]*ModelState{"claude-opus-5-5": {Status: StatusActive}}
+	c.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}
+	c.Unavailable, c.NextRetryAfter, c.LastError = true, until, &Error{HTTPStatus: 429}
+	if _, err := f.m.Update(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	f.m.noteClaudeRequestOutcome([]string{"claude"}, "claude-opus-5-5", newModelCooldownError("claude-opus-5-5", "claude", time.Hour), nil)
+	if r := f.m.claudeRefusalTimes(); !r.localWeekly.IsZero() {
+		t.Fatalf("a Fable-caused credential cooldown counted as weekly need: %+v", r)
 	}
 }
 
@@ -1124,6 +1153,32 @@ func TestRecoverClaudeResetReleasesPropagatedCredentialCooldown(t *testing.T) {
 	}
 	if blocked, _, _ := isAuthBlockedForModel(a, sonnet, time.Now()); !blocked {
 		t.Fatal("the independent Sonnet cooldown did not survive")
+	}
+}
+
+func TestRecoverClaudeResetKeepsIndependentCooldownBelowReportingModel(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	weeklyReset := f.client.statuses["a"].Weekly.ResetAt
+	fableReset := weeklyReset.Add(-24 * time.Hour)
+	independent := f.now.Add(2 * time.Hour)
+	a, _ := f.m.GetByID("a")
+	// Fable had its own model-scoped cooldown when a credential-scoped Fable
+	// refusal wrapped it (the reporting model keeps the earlier block below).
+	st := quotaCooldown(fableReset.Add(40 * time.Second))
+	below := quotaCooldown(independent)
+	st.credentialQuotaShadow = below
+	a.ModelStates = map[string]*ModelState{"claude-fable-5-2": st, "claude-opus-5-5": {Status: StatusActive}}
+	if _, err := f.m.Update(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	r := ClaudeResetRecovery{CredentialID: "a", AccountUUID: "acct-a", OrganizationUUID: f.client.identity["a"][1], ClearsFable: true,
+		FableResetAt: fableReset, WeeklyOpen: true, FableOpen: true, ObservedAt: f.now.Add(time.Second), ConfirmedAt: f.now}
+	if err := f.m.RecoverClaudeReset(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = f.m.GetByID("a")
+	if got := a.ModelStates["claude-fable-5-2"]; got == nil || !got.Unavailable || !got.NextRetryAfter.Equal(independent) {
+		t.Fatalf("independent Fable cooldown not reinstated: %+v", got)
 	}
 }
 

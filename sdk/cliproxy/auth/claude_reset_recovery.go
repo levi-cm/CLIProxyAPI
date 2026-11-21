@@ -83,6 +83,19 @@ func (r ClaudeResetRecovery) cleared(model string, until time.Time) bool {
 	return r.ClearsWeekly && r.passWeekly() && r.WeeklyOpen && causedBy(until, r.WeeklyResetAt)
 }
 
+// release clears a model state's cooldown that this recovery restored. An
+// independent cooldown kept beneath it (credentialQuotaShadow) is reinstated
+// while still live, unless a cleared window caused that one too.
+func (r ClaudeResetRecovery) release(model string, state *ModelState, now time.Time) {
+	if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) &&
+		!(policyQuotaFailure(shadow.Quota, shadow.LastError) && r.cleared(model, quotaCooldownUntil(shadow.Quota, shadow.NextRetryAfter))) {
+		*state = *shadow.cloneShallow()
+		state.UpdatedAt = now
+		return
+	}
+	resetModelState(state, now)
+}
+
 // credentialCause reports whether a credential-wide cooldown ending at until
 // was caused by a window this pass cleared and confirmed. One that may still
 // belong to a full 5-hour window is not.
@@ -167,7 +180,7 @@ func (m *Manager) RecoverClaudeReset(ctx context.Context, r ClaudeResetRecovery)
 		if !r.cleared(model, quotaCooldownUntil(state.Quota, state.NextRetryAfter)) {
 			continue
 		}
-		resetModelState(state, now)
+		r.release(model, state, now)
 		changed = true
 	}
 	// The credential-wide cooldown has no failure timestamp of its own (passive
@@ -180,7 +193,7 @@ func (m *Manager) RecoverClaudeReset(ctx context.Context, r ClaudeResetRecovery)
 	// cooldown (Reason credential_quota), keeping any independent block below
 	// in the shadow. Release a wrapper the cleared window caused and reinstate
 	// a still-live independent block, as Devin quota restoration does.
-	for _, state := range auth.ModelStates {
+	for model, state := range auth.ModelStates {
 		if state == nil || state.Status == StatusDisabled || state.UpdatedAt.After(r.ObservedAt) {
 			continue
 		}
@@ -188,12 +201,7 @@ func (m *Manager) RecoverClaudeReset(ctx context.Context, r ClaudeResetRecovery)
 		if !wrapped || !state.Quota.Exceeded || !r.credentialCause(quotaCooldownUntil(state.Quota, state.NextRetryAfter)) {
 			continue
 		}
-		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
-			*state = *shadow.cloneShallow()
-			state.UpdatedAt = now
-		} else {
-			resetModelState(state, now)
-		}
+		r.release(model, state, now)
 		changed = true
 	}
 	if policyQuotaFailure(auth.Quota, auth.LastError) && r.credentialCause(authUntil) {

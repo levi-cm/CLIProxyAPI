@@ -743,6 +743,15 @@ func cooldownCausedBy(a *Auth, reset time.Time, fable bool, now time.Time) bool 
 	return false
 }
 
+// weeklyCooldown reports an active quota cooldown that only the weekly window
+// can explain: it ends at the weekly reset and not at the Fable reset.
+func weeklyCooldown(a *Auth, acct claudereset.Account, now time.Time) bool {
+	if acct.Fable.ResetAt.IsZero() || causedBy(acct.Weekly.ResetAt, acct.Fable.ResetAt) || causedBy(acct.Fable.ResetAt, acct.Weekly.ResetAt) {
+		return false
+	}
+	return cooldownCausedBy(a, acct.Weekly.ResetAt, false, now)
+}
+
 // fleetCooling reports whether every healthy account is blocked by its weekly
 // window (or, for fable, by its weekly or Fable window), according to verified
 // inventory or a cooldown caused by that window.
@@ -755,8 +764,11 @@ func fleetCooling(auths []*Auth, accts []claudereset.Account, fable bool, now ti
 		}
 		seen = true
 		// Exhaustion evidence counts only when fresh and from the window that
-		// is running now; a renewed or stale reading proves nothing.
-		if (acct.Weekly.Current(now) && windowOut(acct.Observation, claudereset.WindowWeekly, acct.Weekly)) || cooldownCausedBy(a, acct.Weekly.ResetAt, false, now) {
+		// is running now; a renewed or stale reading proves nothing. A cooldown
+		// proves a weekly cause only when its deadline cannot also be the
+		// Fable window's: the two usually renew together, and a Fable refusal
+		// can block the whole credential while weekly allowance remains.
+		if (acct.Weekly.Current(now) && windowOut(acct.Observation, claudereset.WindowWeekly, acct.Weekly)) || weeklyCooldown(a, acct, now) {
 			continue
 		}
 		if fable && ((acct.Fable.Current(now) && windowOut(acct.Observation, claudereset.WindowFable, acct.Fable)) || cooldownCausedBy(a, acct.Fable.ResetAt, true, now)) {
