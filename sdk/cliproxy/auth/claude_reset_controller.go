@@ -365,27 +365,39 @@ func (m *Manager) recordClaudeRefusals(c *claudeResetController, at time.Time, p
 // pool returns the accounts of auths that can serve now (healthy, not held,
 // not excluded by force-account).
 func (c *claudeResetController) pool(auths []*Auth) claudePool {
-	// The revision is read first: a change landing during the read leaves an
-	// older revision, which no later view matches.
-	var revision uint64
-	if c.opts.Revision != nil {
-		revision = c.opts.Revision()
-	}
-	forced := ""
-	if c.opts.Forced != nil {
-		forced = c.opts.Forced()
-	}
-	ids := make([]string, 0, len(auths))
-	members := make(map[string]bool, len(auths))
-	for _, a := range auths {
-		if c.healthyFor(a, forced) {
-			member := claudePoolMember(a)
-			ids = append(ids, member)
-			members[member] = true
+	revision := func() uint64 {
+		if c.opts.Revision == nil {
+			return 0
 		}
+		return c.opts.Revision()
 	}
-	sort.Strings(ids)
-	return claudePool{key: strings.Join(ids, "\x00"), revision: revision, members: members}
+	now := c.now()
+	// Holds and force-account are read between two reads of the routing
+	// revision. Every change to them advances it in the same critical section,
+	// so equal reads mean one consistent view.
+	for attempt := 0; attempt < 3; attempt++ {
+		before := revision()
+		forced := ""
+		if c.opts.Forced != nil {
+			forced = c.opts.Forced()
+		}
+		ids := make([]string, 0, len(auths))
+		members := make(map[string]bool, len(auths))
+		for _, a := range auths {
+			if c.healthyFor(a, forced, now) {
+				member := claudePoolMember(a)
+				ids = append(ids, member)
+				members[member] = true
+			}
+		}
+		if revision() != before {
+			continue
+		}
+		sort.Strings(ids)
+		return claudePool{key: strings.Join(ids, "\x00"), revision: before, members: members}
+	}
+	// Routing keeps changing: a view no refusal or plan can match.
+	return claudePool{key: "unstable\x00" + uuid.NewString(), members: map[string]bool{}}
 }
 
 func claudePoolMember(a *Auth) string {
@@ -587,12 +599,15 @@ func (c *claudeResetController) healthy(a *Auth) bool {
 	if c.opts.Forced != nil {
 		forced = c.opts.Forced()
 	}
-	return c.healthyFor(a, forced)
+	return c.healthyFor(a, forced, c.now())
 }
 
-// healthyFor is healthy with the force-account override already read.
-func (c *claudeResetController) healthyFor(a *Auth, forced string) bool {
-	if a == nil || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) || c.opts.Held(a.ID) {
+// healthyFor is healthy with the force-account override already read. It
+// mirrors selection's credential checks (isAuthBlockedForModel): a disabled,
+// terminally unauthorized or expired-token credential cannot serve, so it
+// neither counts as open allowance nor receives a reset.
+func (c *claudeResetController) healthyFor(a *Auth, forced string, now time.Time) bool {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) || accessTokenExpired(a, now) || c.opts.Held(a.ID) {
 		return false
 	}
 	return forced == "" || forced == a.ID
@@ -810,12 +825,18 @@ func (c *claudeResetController) inputPool(auths []*Auth, ignoreOp string, withSi
 	}
 	history := claudereset.Summarize(ops, now)
 	in := claudereset.Input{Now: now, LastNeedClaimAt: history.LastNeedClaimAt, NeedClaims24h: history.NeedClaims24h}
+	// Health comes from the same routing snapshot as the pool, so the plan and
+	// the view it counts refusals for agree.
+	snapshot := c.pool(auths)
 	in.Accounts = c.accounts(auths, history, withSignals)
+	for i, a := range auths {
+		in.Accounts[i].Healthy = snapshot.members[claudePoolMember(a)]
+	}
 	// Need is a refusal Anthropic attributed to the window, or a local refusal
 	// while every healthy account is blocked by that window, and only for the
 	// routing pool it was refused for.
 	r := c.m.claudeRefusalTimes()
-	pool := c.pool(auths).view()
+	pool := snapshot.view()
 	latest := func(refusals ...claudeRefusal) time.Time {
 		var at time.Time
 		for _, refusal := range refusals {
@@ -1234,7 +1255,9 @@ func (c *claudeResetController) recoverPending(ctx context.Context) {
 				continue
 			case known:
 				replanned, pool := c.evaluatePool(c.claudeAuths(), op.ID)
-				if replanned.Claim != nil && replanned.Claim.AccountID == op.CredentialID && replanned.Claim.GrantID == op.GrantID {
+				// The same trigger must still hold: an expiry claim is not resent
+				// on need evidence, nor a need claim on expiry.
+				if replanned.Claim != nil && replanned.Claim.AccountID == op.CredentialID && replanned.Claim.GrantID == op.GrantID && replanned.Claim.Trigger == op.Trigger {
 					t.pool = pool
 					c.submit(ctx, t, op)
 				}

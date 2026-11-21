@@ -1636,3 +1636,81 @@ func TestClaudeLocalRefusalNeedsEveryStartingMember(t *testing.T) {
 		t.Fatalf("classified without evidence for every starting member: weekly=%v fable=%v", weekly, fable)
 	}
 }
+
+func TestClaudeResetExpiredCredentialDoesNotVetoNeed(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.clearRefusals()
+	f.client.statuses["c"] = claudeResetObs(100, f.client.statuses["c"].Weekly.ResetAt, 1)
+	// b's access token expired and its refresh keeps failing: selection skips
+	// b, and its inventory cannot be read.
+	b, _ := f.m.GetByID("b")
+	b.Metadata["expired"] = f.now.Add(-time.Minute).Format(time.RFC3339)
+	if _, err := f.m.Update(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ = f.m.GetByID("b"); !accessTokenExpired(b, f.now) {
+		t.Fatal("fixture: b's token is not expired")
+	}
+	f.client.failStatus["b"] = true
+	f.refused(time.Second)
+	f.client.results = []string{"reset"}
+	f.c.tick(context.Background())
+	// b cannot serve, so it adds no assumed allowance and gets no reset; c
+	// renews last among the accounts that can.
+	if len(f.client.claims) != 1 || !strings.HasPrefix(f.client.claims[0], "c/") {
+		t.Fatalf("claims = %v, want c", f.client.claims)
+	}
+}
+
+func TestClaudePoolReadsOneRoutingSnapshot(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.held["b"] = true
+	released := false
+	// b is released right after the scan read its hold.
+	f.c.opts.Held = func(id string) bool {
+		held := f.held[id]
+		if id == "b" && !released {
+			released = true
+			f.hold("b", false)
+		}
+		return held
+	}
+	pool := f.c.pool(f.c.claudeAuths())
+	if !pool.members[claudePoolMember(mustAuth(t, f.m, "b"))] || pool.revision != f.revision {
+		t.Fatalf("pool = %+v at revision %d, want b at %d", pool.members, pool.revision, f.revision)
+	}
+	// A revision that never settles yields a view nothing can match.
+	f.c.opts.Revision = func() uint64 { f.revision++; return f.revision }
+	if first, second := f.c.pool(f.c.claudeAuths()).view(), f.c.pool(f.c.claudeAuths()).view(); first == second {
+		t.Fatal("unstable routing produced a repeatable view")
+	}
+}
+
+func mustAuth(t *testing.T, m *Manager, id string) *Auth {
+	t.Helper()
+	a, ok := m.GetByID(id)
+	if !ok {
+		t.Fatalf("auth %s missing", id)
+	}
+	return a
+}
+
+func TestClaudeResendNeedsTheOriginalTrigger(t *testing.T) {
+	f := newClaudeResetFixture(t)
+	f.client.results = []string{"", "reset"}
+	f.c.tick(context.Background())
+	if op := f.op(t, "b"); op.State != claudereset.OpPending || op.Trigger != claudereset.TriggerWeeklyNeed {
+		t.Fatalf("op = %+v, want a pending need claim", op)
+	}
+	// The need has passed, but b's grant now ends within hours, so a re-plan
+	// selects the same grant for expiry: the need claim is not resent on it.
+	f.clearRefusals()
+	obs := f.client.statuses["b"]
+	obs.Grants[0].EndsAt = f.now.Add(3 * time.Hour)
+	f.client.statuses["b"] = obs
+	f.now = f.now.Add(2 * time.Minute)
+	f.c.tick(context.Background())
+	if len(f.client.claims) != 1 {
+		t.Fatalf("need claim resent on expiry evidence: %v", f.client.claims)
+	}
+}

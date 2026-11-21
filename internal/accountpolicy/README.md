@@ -243,8 +243,10 @@ cases:
 - Need claims that spent or may have spent a reset (pending or unresolved)
   are at least 10 minutes apart and capped at 3 per 24 hours.
 - Need is bound to the routing pool its request started under: the accounts
-  that could serve then (healthy, not held, not excluded by `force-account`),
-  each keyed by credential, account and organization. It counts only while
+  that could serve then (enabled, not terminally unauthorized, with an
+  unexpired access token, as selection requires; not held; not excluded by
+  `force-account`), each keyed by credential, account and organization. An
+  account that cannot serve adds no allowance and receives no reset. It counts only while
   that pool is unchanged, so a hold or override change cannot hand one pool's
   refusal to accounts that served all along. The pool is computed when the
   request starts, together with a routing revision that advances on every
@@ -282,7 +284,7 @@ cases:
   read of the journaled identity, and fewer resets left settles it as spent. It
   is resent with the same request ID only within 9 minutes, which Anthropic
   treats as idempotent (`already_used`), and only if the decision still selects
-  that grant. A refused resend proves nothing about an earlier attempt whose
+  that grant for the same trigger. A refused resend proves nothing about an earlier attempt whose
   outcome was lost, so it leaves the claim pending. After the window, an
   unchanged count settles it as unspent. A vanished
   grant counts as spent only when a cleared window is reported, its usage fell,

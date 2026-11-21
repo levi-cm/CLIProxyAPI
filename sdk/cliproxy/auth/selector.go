@@ -826,6 +826,13 @@ func IsAuthAvailableForModel(auth *Auth, model string, now time.Time) bool {
 	return !blocked
 }
 
+// accessTokenExpired reports an access token that expired at now; selection
+// skips such a credential until it is refreshed.
+func accessTokenExpired(auth *Auth, now time.Time) bool {
+	exp, ok := auth.AccessTokenExpirationTime()
+	return ok && !exp.IsZero() && !exp.After(now)
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -836,7 +843,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if hasUnauthorizedAuthFailure(auth) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+	if accessTokenExpired(auth, now) {
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
